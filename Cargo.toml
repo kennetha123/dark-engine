@@ -1,0 +1,62 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "LicenseRef-DarkWagonStudio-Proprietary"
+publish = false
+
+[workspace.dependencies]
+dark_core = { path = "crates/dark_core" }
+dark_net = { path = "crates/dark_net" }
+dark_platform = { path = "crates/dark_platform" }
+dark_render = { path = "crates/dark_render" }
+dark_time = { path = "crates/dark_time" }
+dark_world = { path = "crates/dark_world" }
+dark_sprite = { path = "crates/dark_sprite" }
+dark_assets = { path = "crates/dark_assets" }
+dark_physics = { path = "crates/dark_physics" }
+dark_sim = { path = "crates/dark_sim" }
+dark_combat = { path = "crates/dark_combat" }
+dark_audio = { path = "crates/dark_audio" }
+dark_life = { path = "crates/dark_life" }
+
+bevy_ecs = "0.18.1"
+bytemuck = { version = "1.25.2", features = ["derive"] }
+pathfinding = "4.16.0"
+# No system fonts (no fontconfig on Linux): games ship their own font files.
+cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash"] }
+glam = { version = "0.33.8", features = ["serde"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+# FMOD is loaded at run time, so the engine builds and tests without the (proprietary) SDK.
+libloading = "0.9.0"
+# Dev-only shader validation; must match the naga version wgpu uses.
+naga = { version = "=30.0.1", features = ["wgsl-in"] }
+# integer128: player ids (u128) are saved in the world simulation.
+ron = { version = "0.12.2", features = ["integer128"] }
+pollster = "1.0.1"
+postcard = { version = "1.1.3", features = ["alloc"] }
+renet = "2.0.0"
+renet_netcode = "2.0.0"
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.20"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.26.1", features = ["v4", "serde"] }
+wgpu = "30.0.1"
+winit = "0.30.13"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

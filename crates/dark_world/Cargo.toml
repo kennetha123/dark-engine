@@ -1,0 +1,26 @@
+[package]
+name = "dark_world"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bevy_ecs.workspace = true
+dark_assets.workspace = true
+dark_core.workspace = true
+dark_net.workspace = true
+dark_physics.workspace = true
+dark_sprite.workspace = true
+dark_time.workspace = true
+dark_sim.workspace = true
+dark_combat.workspace = true
+dark_life.workspace = true
+pathfinding.workspace = true
+glam.workspace = true
+serde.workspace = true
+tracing.workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "dark-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+dark_assets.workspace = true
+dark_sim.workspace = true
+glam.workspace = true
+image.workspace = true
