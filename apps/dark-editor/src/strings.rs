@@ -68,6 +68,11 @@ impl Strings {
         text
     }
 
+    /// Text typed since the last save.
+    pub fn dirty(&self) -> bool {
+        self.dirty
+    }
+
     fn has_written(&self, key: &str, language: &str) -> bool {
         self.written
             .get(language)
@@ -85,21 +90,23 @@ impl Strings {
     /// A key, `<prefix>.<n>`, with no text in any language and not `in_use` (keys the map
     /// already names, text or not).
     pub fn fresh_key(&mut self, prefix: &str, in_use: impl Fn(&str) -> bool) -> String {
+        (1..)
+            .map(|n| format!("{prefix}.{n}"))
+            .find(|k| !in_use(k) && self.is_free(k))
+            .expect("some number is free")
+    }
+
+    /// Whether `key` has no text in any language, hand-written or typed here.
+    pub fn is_free(&mut self, key: &str) -> bool {
         let current = self.shown.language().to_owned();
         let languages = self.languages.clone();
-        let key = (1..)
-            .map(|n| format!("{prefix}.{n}"))
-            .find(|k| {
-                !in_use(k)
-                    && !self.written.values().any(|t| t.contains_key(k))
-                    && !languages.iter().any(|code| {
-                        self.shown.set_language(code);
-                        self.shown.has(k)
-                    })
-            })
-            .expect("some number is free");
+        let taken = self.written.values().any(|t| t.contains_key(key))
+            || languages.iter().any(|code| {
+                self.shown.set_language(code);
+                self.shown.has(key)
+            });
         self.shown.set_language(&current);
-        key
+        !taken
     }
 
     /// Writes what changed.

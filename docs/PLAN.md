@@ -196,7 +196,7 @@ docs/            this plan
 | M5 ✅ | Actors, roles, parties, life sim | Mixed parties, betrayal, factions, needs, temperature, tents, intoxication (done; see §14, §15) |
 | M6 ✅ | Spine | Rendering + baked hitboxes (done; see §16) |
 | M7 ✅ | Narrative + save | Storylets, dialogue, relationships/marriage, endings, full world save (done; see §17) |
-| M8 | Editor MVP | Maps + height (stage 1 done; see §18), database, roles/factions, calendar, storylets, hitbox/enemy editors, multi-client playtest, manual slice overrides |
+| M8 ✅ | Editor MVP | Maps + height, database, roles/factions, calendar, storylets, hitbox/enemy editors, multi-client playtest, manual slice overrides (done; see §18) |
 | M9 | Polish + ship | Steam lobby/relay, lighting, particles, Luau, localization, export |
 
 ## 8. Risks
@@ -317,6 +317,11 @@ docs/            this plan
 - `dark_sim` (sim crate, no ECS): the whole world over the year, stepped in in-game hours.
   Integer maths and its own seeded generator (SplitMix64, saved with the world), so a seed gives
   the same year on every machine and a saved world replays exactly.
+- The calendar (`world.ron` `calendar`, M8): seasons through the 365 days, each from its first
+  day (no two on one day) to the next one's, with a warmth added to every region's air (days
+  before the earliest are the latest season's), and events on a day for 1 to 365 days. Storylets can wait for either (`Season(id)`,
+  `During(id)`). A world carried on from a save follows the project's calendar as it is now
+  (so carrying on a save needs the project's `world.ron` to read).
 - The world is authored in the project's `world.ron`: regions (kind, danger 0–10, inn) joined by
   roads (walking hours), factions (`hostile` for the demon army), titles with succession rules,
   actors (role, faction, power, home, titles; `boss` for those who guard their home), the hero
@@ -396,8 +401,9 @@ docs/            this plan
   project's events from them, and `fmodstudiocl -build` writes the banks. The runtime is FMOD
   2.02.30 (from the studio's FMOD for Unity), so banks must come from Studio 2.02.
 - `--autopilot-fight` fights the nearest enemy (combos, dodges wind-ups) for screenshots.
-- Known gaps: hitboxes are one circle per attack, not per-frame authored boxes (M8's editor);
-  no air attacks, projectiles, AoE, aiming or lock-on; no gamepad, so no rumble; no flow fields
+- Per-frame boxes: a sheet's `boxes` (drawn in the editor's Sheets tab, §18) give each frame of
+  a clip its own hit and hurt circles; a clip with any uses them instead of the moveset's circle.
+- Known gaps: no air attacks, projectiles, AoE, aiming or lock-on; no gamepad, so no rumble; no flow fields
   (A* per enemy is fine at this count); no boss phases; enemy tells rely on startup length and
   the wind-up sound, there are no tell animations; being hit is not predicted (the victim sees it
   a round trip late, like any host decision); players have no lag compensation for their hits;
@@ -639,9 +645,52 @@ docs/            this plan
   paint stroke is one step. Text edits are not undone.
 - Checking without a person at the screen: `--script` feeds clicks, drags, keys and typing as
   if a person did them, and `--screenshot <png> --frames <n>` saves the whole window.
-- Known gaps (later stages): the database (items, movesets, enemies, people, factions,
-  regions), the storylet editor, sheet slicing and hitbox editing (with a Spine bake button),
-  the calendar, multi-client playtest. Spine characters are not drawn in the editor.
-  Scattered-prop groups are shown but not edited; placed
-  props get a round footprint a third of their width (edit `colliders` by hand for more); an
-  exit's arrival point is typed as numbers, not picked on the other map.
+- Stage 2, the database: a Database tab beside Maps (tabs along the top; one Save writes
+  everything changed, text first; Undo follows the open tab). Categories on the left, their
+  things in a list, a form for the chosen one: items (name, icon with its picture, what using it
+  does), the starting kit (hotbar order, what is worn), climates (°C), movesets (health, poise,
+  each attack of the combo, the dodge), enemies (look, attack sheet, moveset, how it thinks),
+  people, factions, regions, roads, titles (who is next), the hero party, and Balance (bodies,
+  the world's year, standing and loyalty). Names are typed as text; ids are typed once, to make
+  something (tidied to lower case), and pickers show names with ids. Something still used (by a
+  map, a person, the story…) cannot be deleted, and the editor says what uses it. Saving
+  rewrites `life.ron`, `combat.ron` and `world.ron` (their comments are not kept; git has
+  them), then runs the game's own checks, the world simulation's included; a file that did not
+  read is never written. Maps pick from the database as it is (a new enemy kind is placeable at
+  once).
+- Stage 3, the story: a Story tab. Conversations are listed by the person they are with; the
+  chosen one is drawn as a flowchart (a column per step from the start): each box is a line the
+  person says with the player's answers listed under it, each answer's arrow going to the line
+  that follows or to "end"; ★ marks a line that does something. Clicking a box opens it on the
+  right: its text (typed), what reaching it does, and its answers (text, the line that follows
+  or "a new line…", which makes and links one, conditions, what choosing does). When it is
+  offered (with whom, how often, priority, conditions) folds above. Conditions and effects are
+  picked from plain-English lists (each condition can be turned round with "not"); factions,
+  people, titles and items are picked by name. "Read it through" follows the conversation as a
+  player would. The year's endings are listed in the order they are tried. Saving rewrites
+  `story.ron` and checks it as the game does, and that everything it names exists.
+- Stage 4, sheets: a Sheets tab. A new sheet is made from a picture (browsed for in the
+  project). The picture is shown cut as the sheet says, every frame outlined and numbered;
+  clicking frames picks them, in order, to make a clip of. On the right: the picture, how large
+  it is drawn, how it is cut (a grid; an RPG Maker character; each sprite found; rectangles by
+  hand, the manual override; rows of directions by columns of actions), where frames stand,
+  and the clips, the slicing's and the sheet's own (frames, speed, looping, mirrored). A clip
+  plays, or steps frame by frame, large, standing on its feet: pressing on it places where
+  that frame hits (red) or can be hit (blue), dragging sizes the circle. These are the sheet's
+  `boxes` (per clip, per frame, from the feet); combat uses them as it uses a skeleton's baked
+  boxes, instead of the moveset's circle (§13). Skeleton sheets show whether their bake is up
+  to date, with a Bake button (the same as `dark-cli bake-spine`). Saving a sheet writes it and
+  the maps load it again. Skeletons are drawn on maps in their idle pose.
+- Stage 5, the year and the rest: a Calendar in the Database (the year's 365 days, coloured
+  by season, events outlined; a click chooses a day, which a season can start on or an event
+  be put on; seasons warm or cool every region's air, in °C; events last some days). Storylets
+  can wait for a season or an event ("It is a season", "During a calendar event"); a season or
+  event the story uses cannot be removed. Play takes a number of players: more than one hosts
+  and opens a window for each other player, joined (`--host 7777 --clients <players − 1>`). Maps: the
+  scattered groups are edited in the map's settings (pictures, from the palette; how many; how
+  far apart; Shuffle; solid; on which ground), a prop's footprint part by part (round or a
+  box, from its foot, low enough to jump over or not), and "Pick it there…" opens the map an
+  exit leads to, where a click sets where it arrives (written to the exit's map at once).
+- Known gaps: text edits are not undone (Ctrl+Z in a field undoes typing); ids cannot be
+  renamed once made; the editor's own interface is in English only; a sheet saved again leaves
+  its old picture on the GPU until the editor closes (the renderer frees no textures).

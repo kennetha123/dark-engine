@@ -23,7 +23,7 @@ pub mod world;
 
 use serde::{Deserialize, Serialize};
 
-pub use def::{DefError, Social, Tuning, WorldDef};
+pub use def::{CalendarDef, DefError, EventDef, SeasonDef, Social, Tuning, WorldDef};
 pub use director::{HeroParty, Location, Step, YEAR_HOURS};
 pub use rng::Rng;
 pub use social::{Parting, Party, Refusal};
@@ -52,6 +52,10 @@ pub struct WorldSim {
     outcome: Option<Outcome>,
     /// Happened since the last [`WorldSim::take_events`].
     events: Vec<WorldEvent>,
+    /// The project's calendar: always the current `world.ron`'s, never a save's (see
+    /// [`WorldSim::set_calendar`]).
+    #[serde(skip)]
+    calendar: CalendarDef,
 }
 
 impl WorldSim {
@@ -67,6 +71,7 @@ impl WorldSim {
                 .find(|f| !world.factions[usize::from(f.0)].hostile)
                 .ok_or_else(|| DefError::Invalid("no friendly faction for players".into()))?,
         };
+        def.calendar.validate()?;
         Ok(Self {
             world,
             party,
@@ -78,7 +83,18 @@ impl WorldSim {
             hour: START_HOUR,
             outcome: None,
             events: Vec::new(),
+            calendar: def.calendar.clone(),
         })
+    }
+
+    pub fn calendar(&self) -> &CalendarDef {
+        &self.calendar
+    }
+
+    /// The calendar to follow: a world carried on from a save follows the project's as it is
+    /// now, not as it was.
+    pub fn set_calendar(&mut self, calendar: CalendarDef) {
+        self.calendar = calendar;
     }
 
     pub fn world(&self) -> &World {

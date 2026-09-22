@@ -3,6 +3,7 @@
 //! No GPU: the host loads sheets too, because automatic slicing needs pixels and hitboxes
 //! (M4) need frames. Paths inside definitions are relative to the project root.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use dark_physics::{Cell, Shape, Terrain};
@@ -198,23 +199,46 @@ pub struct LoadedSheet {
 }
 
 /// A `*.sheet.ron` file.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SheetDef {
     /// Image path relative to the project root.
     pub image: String,
     /// The image is drawn at this many times its pixel size (RPG Maker MZ art is often 3×); it is
     /// shrunk back before slicing, so `cell`s, rects and pivots are in the shrunk image.
-    #[serde(default = "one")]
+    #[serde(default = "one", skip_serializing_if = "is_one")]
     pub downscale: u32,
     pub slicing: Slicing,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub pivot: Pivot,
     /// Extra clips; character slicing already provides `walk_<dir>` and `idle_<dir>`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clips: Vec<ClipDef>,
+    /// Where a clip's frames hit and can be hit, by clip name: combat uses these instead of
+    /// the moveset's circle (docs/PLAN.md §13), as it uses a skeleton's baked boxes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub boxes: BTreeMap<String, ClipBoxes>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+/// One clip's circles, frame by frame: `(x, y, radius)` on the ground plane from the feet, or
+/// none on a frame without one. A clip with no hitboxes listed uses its moveset's; one with no
+/// hurtboxes, the body's footprint.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct ClipBoxes {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hitboxes: Vec<Option<(f32, f32, f32)>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hurtboxes: Vec<Option<(f32, f32, f32)>>,
+}
+
+fn is_one(v: &u32) -> bool {
+    *v == 1
+}
+
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Slicing {
     Grid {
         cell: (u32, u32),
@@ -248,7 +272,7 @@ pub enum Slicing {
 }
 
 /// One animation on a [`Slicing::Directional`] sheet.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ActionDef {
     pub name: String,
     pub frames: u32,
@@ -269,7 +293,7 @@ fn yes() -> bool {
     true
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ClipDef {
     pub name: String,
     pub frames: Vec<u32>,
@@ -446,6 +470,42 @@ impl SheetDef {
                 looping: clip.looping,
                 flip_x: clip.flip_x,
             });
+        }
+        for (name, boxes) in &self.boxes {
+            let id = sheet
+                .clip_id(name)
+                .ok_or_else(|| format!("boxes for clip {name}, which the sheet does not have"))?;
+            let frames = sheet.clips[usize::from(id.0)].frames.len();
+            if boxes.hitboxes.len() > frames || boxes.hurtboxes.len() > frames {
+                return Err(format!(
+                    "clip {name} has {frames} frames, and boxes for more"
+                ));
+            }
+            let circles = |list: &[Option<(f32, f32, f32)>]| -> Vec<Option<dark_sprite::Circle>> {
+                if list.is_empty() {
+                    return Vec::new();
+                }
+                // Frames past the list have none.
+                let mut circles: Vec<_> = list
+                    .iter()
+                    .map(|c| {
+                        c.map(|(x, y, radius)| dark_sprite::Circle {
+                            offset: glam::Vec2::new(x, y),
+                            radius,
+                        })
+                    })
+                    .collect();
+                circles.resize(frames, None);
+                circles
+            };
+            let index = usize::from(id.0);
+            if sheet.timing.len() <= index {
+                sheet
+                    .timing
+                    .resize(index + 1, dark_sprite::ClipTiming::default());
+            }
+            sheet.timing[index].hitboxes = circles(&boxes.hitboxes);
+            sheet.timing[index].hurtboxes = circles(&boxes.hurtboxes);
         }
         Ok((sheet, repacked))
     }
@@ -732,6 +792,23 @@ impl NpcDef {
 }
 
 impl Project {
+    /// The definition in `*.sheet.ron` file `path`, as written (for the editor).
+    pub fn load_sheet_def(&self, path: impl AsRef<Path>) -> Result<SheetDef, AssetError> {
+        read_ron(&self.path(path))
+    }
+
+    /// Writes `def` to sheet file `path` (the editor's save). Comments in the file are not kept.
+    pub fn save_sheet_def(&self, path: impl AsRef<Path>, def: &SheetDef) -> Result<(), AssetError> {
+        let path = self.path(path);
+        let config = ron::ser::PrettyConfig::default()
+            .extensions(ron::extensions::Extensions::IMPLICIT_SOME)
+            .struct_names(false);
+        let body = ron::ser::to_string_pretty(def, config)
+            .map_err(|e| invalid(&path, format!("cannot write the sheet: {e}")))?;
+        let text = format!("// A Dark Engine sheet: made in the editor (dark-editor).\n{body}\n");
+        std::fs::write(&path, text).map_err(|source| AssetError::Io { path, source })
+    }
+
     /// Writes `def` to scene file `path` (the editor's save). Comments in the file are not kept.
     pub fn save_scene(&self, path: impl AsRef<Path>, def: &SceneDef) -> Result<(), AssetError> {
         let path = self.path(path);
@@ -1279,6 +1356,47 @@ mod validation_tests {
         assert!(
             build(def, &blank(32, 24)).is_err(),
             "5 frames need 5 columns"
+        );
+    }
+
+    #[test]
+    fn a_sheets_own_boxes_become_its_clip_timing() {
+        let def = r#"(image: "x", slicing: Grid(cell: (8, 8)),
+            clips: [(name: "swing", frames: [0, 1, 2], ticks_per_frame: 4),
+                    (name: "rest", frames: [3], ticks_per_frame: 4)],
+            boxes: {"swing": (hitboxes: [None, Some((0, 12, 6))], hurtboxes: [Some((0, 0, 5))])})"#;
+        let (sheet, _) = build(def, &blank(32, 8)).unwrap();
+        let swing = sheet.timing(sheet.clip_id("swing").unwrap()).unwrap();
+        assert_eq!(swing.hitboxes.len(), 3, "one per frame, the last without");
+        assert_eq!(
+            swing.hitboxes[1].unwrap().offset,
+            glam::Vec2::new(0.0, 12.0)
+        );
+        assert_eq!(swing.hitboxes[2], None);
+        assert_eq!(swing.hurtboxes[0].unwrap().radius, 5.0);
+        assert!(
+            sheet
+                .timing(sheet.clip_id("rest").unwrap())
+                .is_none_or(|t| t.hitboxes.is_empty()),
+            "a clip without boxes uses its moveset's"
+        );
+        // Written back, a sheet says the same (and no more than it did).
+        let parsed: SheetDef = ron::from_str(def).unwrap();
+        let text = ron::ser::to_string(&parsed).unwrap();
+        let again: SheetDef = ron::from_str(&text).unwrap();
+        assert_eq!(again.boxes, parsed.boxes);
+        assert!(!text.contains("downscale"), "{text}");
+        let too_many = def.replace("(0, 0, 5))]", "(0, 0, 5)), None, None, None]");
+        assert!(
+            build(&too_many, &blank(32, 8))
+                .unwrap_err()
+                .contains("boxes for more")
+        );
+        let unknown = def.replace("{\"swing\"", "{\"lunge\"");
+        assert!(
+            build(&unknown, &blank(32, 8))
+                .unwrap_err()
+                .contains("lunge")
         );
     }
 

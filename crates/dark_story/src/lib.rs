@@ -283,6 +283,11 @@ impl Story {
                 .and_then(|t| world.holder(t))
                 .is_some_and(|h| players.contains(&h)),
             Condition::FromDay(day) => sim.day() + 1 >= *day,
+            Condition::Season(id) => sim
+                .calendar()
+                .season(sim.day() + 1)
+                .is_some_and(|s| s.id == *id),
+            Condition::During(id) => sim.calendar().during(id, sim.day() + 1),
             Condition::Alive(id) => alive(id),
             Condition::Dead(id) => world.actor(id).is_some() && !alive(id),
             Condition::Flag(f) => any(&|p| self.flag(p, f)),

@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use dark_assets::{LoadedSheet, Project, SceneDef};
-use dark_render::{Renderer, Sprite, SpriteKind, TextureId, layer};
+use dark_render::{Mesh, MeshVertex, Renderer, Sprite, SpriteKind, TextureId, layer};
 use dark_sprite::Facing;
 use dark_view::MapView;
 use dark_world::Map;
@@ -90,6 +90,15 @@ pub struct Viewport {
     pub image: egui::TextureId,
     size: (u32, u32),
     jump_apex: f32,
+    /// Skeletons of Spine sheets, drawn standing in their idle pose.
+    skeletons: HashMap<String, Skeleton>,
+}
+
+/// A Spine sheet's skeleton, its pages uploaded, and which animation plays each clip.
+struct Skeleton {
+    rig: dark_spine::Rig,
+    pages: Vec<TextureId>,
+    clips: HashMap<String, (String, bool)>,
 }
 
 impl Viewport {
@@ -121,6 +130,7 @@ impl Viewport {
             image,
             size,
             jump_apex: params.jump_speed * params.jump_speed / (2.0 * params.gravity),
+            skeletons: HashMap::new(),
         }
     }
 
@@ -134,9 +144,64 @@ impl Viewport {
                 .create_texture(path, image.width, image.height, &image.rgba)
                 .map_err(|e| e.to_string())?;
             self.textures.insert(path.to_owned(), id);
+            // A skeleton draws from its own pages (painted art, so sampled smoothly).
+            if let Some(spine) = &loaded.spine {
+                match self.skeleton_of(project, path, spine) {
+                    Ok(skeleton) => {
+                        self.skeletons.insert(path.to_owned(), skeleton);
+                    }
+                    // The sheet still works (its bake is what the game plays); it is only not drawn.
+                    Err(e) => tracing::warn!("{path}: the skeleton cannot be drawn: {e}"),
+                }
+            }
             self.sheets.insert(path.to_owned(), loaded);
         }
         Ok(&self.sheets[path])
+    }
+
+    /// A Spine sheet's rig, with its pages uploaded.
+    fn skeleton_of(
+        &mut self,
+        project: &Project,
+        path: &str,
+        spine: &dark_assets::SpineSheet,
+    ) -> Result<Skeleton, String> {
+        let rig = dark_spine::Rig::load(project, &spine.def).map_err(|e| e.to_string())?;
+        let pages = rig
+            .pages
+            .iter()
+            .map(|page| {
+                let image = &page.image;
+                self.renderer.create_texture_smooth(
+                    &format!("{path} {}", page.name),
+                    image.width,
+                    image.height,
+                    &image.rgba,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        let clips = spine
+            .bake
+            .clips
+            .iter()
+            .map(|(name, c)| (name.clone(), (c.animation.clone(), c.looping)))
+            .collect();
+        Ok(Skeleton { rig, pages, clips })
+    }
+
+    /// Whether figures wearing `sheet` are drawn (a skeleton that did not load is not).
+    pub fn draws(&self, sheet: &str) -> bool {
+        self.sheets
+            .get(sheet)
+            .is_some_and(|s| s.spine.is_none() || self.skeletons.contains_key(sheet))
+    }
+
+    /// Drops sheet `path`, so the next use loads it again (it was changed and saved).
+    pub fn forget_sheet(&mut self, path: &str) {
+        self.sheets.remove(path);
+        self.textures.remove(path);
+        self.skeletons.remove(path);
     }
 
     /// Builds scene `path` (`def`) as the game would, with other scenes' exits landing at
@@ -207,14 +272,54 @@ impl Viewport {
                 }));
             }
         }
+        let mut meshes = Vec::new();
         for figure in figures {
             if let Some(sprite) = self.figure(figure) {
                 sprites.push(sprite);
             }
+            meshes.extend(self.skeleton(figure));
         }
         let half = Vec2::new(size.0 as f32, size.1 as f32) / 2.0;
         self.renderer
-            .render(origin + half, [0.02, 0.02, 0.025], &mut sprites);
+            .render_with(origin + half, [0.02, 0.02, 0.025], &mut sprites, &meshes);
+    }
+
+    /// A skeletal figure, posed as its idle clip begins, as meshes standing at its feet.
+    fn skeleton(&self, figure: &Figure) -> Vec<Mesh> {
+        let Some(skeleton) = self.skeletons.get(figure.sheet) else {
+            return Vec::new();
+        };
+        let idle = format!("idle_{}", figure.facing.cardinal().name());
+        let Some((animation, looping)) = skeleton
+            .clips
+            .get(&idle)
+            .or_else(|| skeleton.clips.get("idle_down"))
+            .or_else(|| skeleton.clips.values().next())
+        else {
+            return Vec::new();
+        };
+        let mut pose = dark_spine::Pose::new(&skeleton.rig);
+        pose.pose(animation, *looping, 0.0);
+        let at = Vec2::from(figure.at);
+        let feet = at - Vec2::new(0.0, self.ground(at));
+        pose.meshes(&skeleton.rig)
+            .into_iter()
+            .map(|mesh| Mesh {
+                texture: skeleton.pages[mesh.page],
+                vertices: mesh
+                    .vertices
+                    .iter()
+                    .map(|v| MeshVertex {
+                        position: feet + v.position,
+                        uv: v.uv,
+                        color: v.color,
+                    })
+                    .collect(),
+                layer: layer::WORLD,
+                sort_y: at.y,
+                body: true,
+            })
+            .collect()
     }
 
     fn figure(&self, figure: &Figure) -> Option<Sprite> {

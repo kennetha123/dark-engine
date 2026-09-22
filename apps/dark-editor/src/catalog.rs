@@ -15,6 +15,8 @@ pub struct Catalog {
     pub characters: Vec<String>,
     /// Every other sheet: props and ground.
     pub props: Vec<String>,
+    /// Attack sheets (a character's swings, beside its walking sheet).
+    pub attacks: Vec<String>,
     /// Enemy kinds (`combat.ron`), with the sheet each wears.
     pub enemies: Vec<(String, String)>,
     /// The world's people (`world.ron`) an NPC can be.
@@ -33,16 +35,15 @@ impl Catalog {
             scenes: files(project, "scenes", ".ron"),
             ..Default::default()
         };
-        let sheets = files(project, "sheets", ".sheet.ron")
-            .into_iter()
-            .chain(files(project, "sheets", ".spine.ron"));
-        for path in sheets {
+        for path in sheet_files(project) {
             match viewport.load_sheet(project, &path) {
                 Ok(loaded) => {
                     let walks = loaded.sheet.clip_id("idle_down").is_some();
                     if walks || loaded.spine.is_some() {
                         catalog.characters.push(path);
-                    } else if !path.contains("_attack") {
+                    } else if path.contains("_attack") {
+                        catalog.attacks.push(path);
+                    } else {
                         catalog.props.push(path);
                     }
                 }
@@ -51,6 +52,7 @@ impl Catalog {
         }
         catalog.characters.sort();
         catalog.props.sort();
+        catalog.attacks.sort();
         match dark_combat::CombatDef::load_or_default(&project.path("combat.ron")) {
             Ok(combat) => {
                 catalog.enemies = combat
@@ -101,6 +103,14 @@ fn files(project: &Project, dir: &str, suffix: &str) -> Vec<String> {
         .collect();
     found.sort();
     found
+}
+
+/// Every sheet file of the project: `sheets/*.sheet.ron` and `sheets/*.spine.ron`.
+pub fn sheet_files(project: &Project) -> Vec<String> {
+    let mut list = files(project, "sheets", ".sheet.ron");
+    list.extend(files(project, "sheets", ".spine.ron"));
+    list.sort();
+    list
 }
 
 /// A scene's short name: `scenes/meadow.ron` is "meadow".

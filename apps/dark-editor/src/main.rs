@@ -8,11 +8,15 @@
 //! without a person at the screen.
 
 mod catalog;
+mod database;
 mod editor;
 mod scene_ops;
 mod script;
+mod sheets;
+mod story;
 mod strings;
 mod viewport;
+mod widgets;
 
 use std::path::PathBuf;
 use std::sync::Arc;

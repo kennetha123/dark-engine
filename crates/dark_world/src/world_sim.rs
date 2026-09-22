@@ -64,7 +64,16 @@ pub fn load_world(
         && save.exists()
     {
         let text = std::fs::read_to_string(save).map_err(|e| format!("{}: {e}", save.display()))?;
-        let world = WorldSave::parse(&text).map_err(|e| format!("{}: {e}", save.display()))?;
+        let mut world = WorldSave::parse(&text).map_err(|e| format!("{}: {e}", save.display()))?;
+        // The calendar is the project's as it is now (a save does not keep one).
+        let path = project.path("world.ron");
+        if path.exists() {
+            let def = WorldDef::load(&path).map_err(|e| e.to_string())?;
+            def.calendar
+                .validate()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            world.sim.set_calendar(def.calendar);
+        }
         tracing::info!(
             "world carried on from {} (day {}, {} characters)",
             save.display(),
@@ -260,6 +269,8 @@ mod tests {
     #[test]
     fn a_saved_world_is_carried_on_and_a_new_one_starts_from_world_ron() {
         let dir = std::env::temp_dir().join(format!("dark_world_save_{}", std::process::id()));
+        // A folder left by an earlier run (process ids come round again) starts empty.
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("project.ron"),

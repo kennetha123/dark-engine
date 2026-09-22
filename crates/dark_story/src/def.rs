@@ -22,7 +22,7 @@ pub enum StoryError {
     Invalid(String),
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub struct StoryDef {
     #[serde(default)]
     pub storylets: Vec<Storylet>,
@@ -32,7 +32,7 @@ pub struct StoryDef {
 }
 
 /// A conversation with one person of the world, offered while its conditions hold.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Storylet {
     pub id: String,
     /// The world actor it is with.
@@ -61,7 +61,7 @@ pub enum Repeat {
 }
 
 /// What the person says, and what can be said back. With no choices the conversation ends there.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Node {
     pub line: String,
     #[serde(default)]
@@ -70,7 +70,7 @@ pub struct Node {
     pub choices: Vec<Choice>,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Choice {
     /// What the player says.
     pub says: String,
@@ -101,6 +101,10 @@ pub enum Condition {
     Title(String),
     /// From this day on (1 is the first).
     FromDay(u32),
+    /// It is this season (a calendar id, `world.ron`).
+    Season(String),
+    /// This calendar event is on today.
+    During(String),
     Alive(String),
     Dead(String),
     Flag(String),
@@ -159,7 +163,7 @@ pub enum Effect {
 }
 
 /// One way the year can end.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct EndingDef {
     pub id: String,
     /// What is shown (a string key).

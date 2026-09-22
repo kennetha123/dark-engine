@@ -323,6 +323,7 @@ type Living = (
     Has<Asleep>,
 );
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn live(
     mut commands: Commands,
     clock: Res<WorldClock>,
@@ -331,7 +332,10 @@ pub(crate) fn live(
     mut night: ResMut<NightPassed>,
     mut living: Query<Living, Without<Dormant>>,
     mut structures: Query<(Entity, &MapId, &mut Placed)>,
+    world: Option<Res<crate::WorldState>>,
 ) {
+    // The seasons are the world's (none without a world simulation).
+    let calendar = world.as_deref().map(|w| w.sim.calendar());
     let now = minute_of(&clock.0);
     let slept_from = night.0.take();
     let rules = &mut *rules;
@@ -339,7 +343,7 @@ pub(crate) fn live(
     let spots: Vec<Spot> = structures.iter().map(|(_, m, p)| Spot::of(*m, p)).collect();
     for (_, map, body, state, mut life, offline) in &mut living {
         let insulation = life.inventory.insulation(&rules.def.items);
-        life.around = surroundings(&rules.def, &maps, &spots, *map, &body.0, now);
+        life.around = surroundings(&rules.def, calendar, &maps, &spots, *map, &body.0, now);
         life.around.insulation = insulation;
         life.around.asleep = state.sleeping || offline;
     }
@@ -359,8 +363,9 @@ pub(crate) fn live(
                 continue;
             }
             let mut around = life.around;
-            around.air = air(&rules.def, &maps, *map, minute);
-            around.fire = surroundings(&rules.def, &maps, &spots, *map, &body.0, minute).fire;
+            around.air = air(&rules.def, calendar, &maps, *map, minute);
+            around.fire =
+                surroundings(&rules.def, calendar, &maps, &spots, *map, &body.0, minute).fire;
             around.asleep |= everyone_asleep;
             let happened = life.body.minute(&around, &rules.def.rates);
             if state.fighter.suffer(happened.damage) {
@@ -421,16 +426,24 @@ impl Spot {
     }
 }
 
-/// The region's air in `map` at absolute `minute`.
-fn air(def: &LifeDef, maps: &Maps, map: MapId, minute: u64) -> i32 {
+/// The region's air in `map` at absolute `minute`, warmed or cooled by the season.
+fn air(
+    def: &LifeDef,
+    calendar: Option<&dark_sim::CalendarDef>,
+    maps: &Maps,
+    map: MapId,
+    minute: u64,
+) -> i32 {
     let region = maps.get(map).def.region.as_deref();
-    def.air(region, (minute % DAY_MINUTES) as u32)
+    let day = u32::try_from(minute / DAY_MINUTES).unwrap_or(u32::MAX - 1) + 1;
+    def.air(region, (minute % DAY_MINUTES) as u32) + calendar.map_or(0, |c| c.warmth(day))
 }
 
 /// What is around `body` in `map`: the air, an inn or a tent over it, a fire nearby (at about
 /// its height). Clothes and sleep are the caller's.
 fn surroundings(
     def: &LifeDef,
+    calendar: Option<&dark_sim::CalendarDef>,
     maps: &Maps,
     spots: &[Spot],
     map: MapId,
@@ -454,7 +467,7 @@ fn surroundings(
         Shelter::Open
     };
     Surroundings {
-        air: air(def, maps, map, minute),
+        air: air(def, calendar, maps, map, minute),
         shelter,
         fire: near(
             |s| matches!(s, Structure::Campfire { minutes } if *minutes > 0),

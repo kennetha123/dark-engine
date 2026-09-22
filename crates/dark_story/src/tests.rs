@@ -67,6 +67,59 @@ fn id(sim: &WorldSim, name: &str) -> ActorId {
 }
 
 #[test]
+fn storylets_can_wait_for_a_season_or_a_calendar_event() {
+    let world = WORLD.replace(
+        "hero_party:",
+        r#"calendar: (
+            seasons: [(id: "spring", name: "s.spring", from_day: 60, warmth: 200),
+                      (id: "winter", name: "s.winter", from_day: 330, warmth: -800)],
+            events: [(id: "fair", name: "e.fair", day: 3, days: 2)]),
+        hero_party:"#,
+    );
+    let def = StoryDef::parse(
+        r#"(storylets: [
+            (id: "fair", with: "borin", when: [During("fair")], start: "a", nodes: {"a": (line: "fair")}),
+            (id: "cold", with: "oswin", when: [Season("winter")], start: "a", nodes: {"a": (line: "cold")}),
+        ])"#,
+    )
+    .unwrap();
+    let mut sim = WorldSim::new(&WorldDef::parse(&world).unwrap(), 1).unwrap();
+    let village = sim.world().region("village").unwrap();
+    let me = sim.player_actor(7, village);
+    let (borin, oswin) = (id(&sim, "borin"), id(&sim, "oswin"));
+    let story = Story::default();
+    // Day 1 is before spring: still the last season of the year, winter.
+    assert_eq!(sim.calendar().season(1).unwrap().id, "winter");
+    assert_eq!(sim.calendar().warmth(100), 200);
+    assert!(
+        story.open(&def, &sim, me, oswin).is_some(),
+        "winter on day 1"
+    );
+    assert!(story.open(&def, &sim, me, borin).is_none(), "no fair yet");
+    sim.advance_hours(2 * 24);
+    assert!(
+        story.open(&def, &sim, me, borin).is_some(),
+        "the fair, day 3"
+    );
+    sim.advance_hours(24);
+    assert!(story.open(&def, &sim, me, borin).is_some(), "and day 4");
+    sim.advance_hours(24);
+    assert!(story.open(&def, &sim, me, borin).is_none(), "over on day 5");
+    // Written in any order, the seasons still follow the year; two starting together are refused.
+    let backwards = world.replace(
+        r#"(id: "spring", name: "s.spring", from_day: 60, warmth: 200),
+                      (id: "winter", name: "s.winter", from_day: 330, warmth: -800)"#,
+        r#"(id: "winter", name: "s.winter", from_day: 330, warmth: -800),
+                      (id: "spring", name: "s.spring", from_day: 60, warmth: 200)"#,
+    );
+    let sim = WorldSim::new(&WorldDef::parse(&backwards).unwrap(), 1).unwrap();
+    assert_eq!(sim.calendar().season(1).unwrap().id, "winter");
+    assert_eq!(sim.calendar().season(100).unwrap().id, "spring");
+    let clash = world.replace("from_day: 330", "from_day: 60");
+    assert!(WorldSim::new(&WorldDef::parse(&clash).unwrap(), 1).is_err());
+}
+
+#[test]
 fn a_person_tells_their_storylet_and_choices_change_the_world() {
     let (def, mut sim, mut story, me) = setup();
     let borin = id(&sim, "borin");

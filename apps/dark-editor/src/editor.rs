@@ -16,7 +16,10 @@ use egui::{
 use glam::Vec2;
 
 use crate::catalog::{Catalog, scene_name, sheet_name};
+use crate::database::{Database, Elsewhere};
 use crate::scene_ops::{self as ops, History, Thing};
+use crate::sheets::SheetEditor;
+use crate::story::StoryEditor;
 use crate::strings::Strings;
 use crate::viewport::{Figure, MAX_ZOOM, Mapping, View, Viewport};
 
@@ -135,6 +138,15 @@ enum Pending {
     Quit,
 }
 
+/// What the window is for: one of the editor's parts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Workspace {
+    Maps,
+    Database,
+    Story,
+    Sheets,
+}
+
 struct NewMap {
     name: String,
     cols: u32,
@@ -145,6 +157,10 @@ struct NewMap {
 
 pub struct Editor {
     project: Project,
+    workspace: Workspace,
+    database: Database,
+    story: StoryEditor,
+    sheets: SheetEditor,
     tile: u32,
     catalog: Catalog,
     pub viewport: Viewport,
@@ -179,7 +195,14 @@ pub struct Editor {
     hover: Option<Vec2>,
     /// Asked to close, and nothing is left unsaved.
     pub quit: bool,
+    /// How many play a playtest, each in a window of their own.
+    players: u8,
+    /// Picking, on the map an exit leads to, where it arrives: the exit's map and number.
+    picking: Option<(String, usize)>,
 }
+
+/// Where a playtest with more than one player is hosted.
+const PLAYTEST_PORT: &str = "7777";
 
 impl Editor {
     pub fn new(
@@ -191,9 +214,16 @@ impl Editor {
         let tile = project.settings.tile_size;
         let catalog = Catalog::load(&project, &mut viewport);
         let strings = Strings::load(&project);
+        let database = Database::load(&project);
+        let story = StoryEditor::load(&project);
         use_project_font(&project, ctx);
         let language = strings.languages.first().cloned().unwrap_or_default();
-        let problem = strings.broken.as_ref().or(catalog.problems.first());
+        let problem = strings
+            .broken
+            .as_ref()
+            .or(database.broken.first())
+            .or(story.broken.as_ref())
+            .or(catalog.problems.first());
         let status = match problem {
             Some(problem) => (format!("Could not read {problem}"), true),
             None => (
@@ -209,6 +239,10 @@ impl Editor {
                 .unwrap_or_default()
         };
         let mut editor = Self {
+            workspace: Workspace::Maps,
+            database,
+            story,
+            sheets: SheetEditor::new(Vec::new()),
             tile,
             palette_sheet: first(&catalog.props, "town_props"),
             npc_sheet: first(&catalog.characters, "villager"),
@@ -245,6 +279,8 @@ impl Editor {
             new_map: None,
             hover: None,
             quit: false,
+            players: 1,
+            picking: None,
             project,
         };
         let start = start.or_else(|| {
@@ -258,24 +294,34 @@ impl Editor {
         if let Some(start) = start {
             editor.open(start);
         }
+        editor.list_sheets();
         editor
     }
 
     pub fn title(&self) -> String {
+        let star = if self.unsaved() { " *" } else { "" };
         match &self.scene {
             Some(s) => format!(
-                "{}{} - {} - Dark Editor",
+                "{}{star} - {} - Dark Editor",
                 scene_name(&s.path),
-                if s.dirty { " *" } else { "" },
                 self.project.settings.name
             ),
-            None => format!("{} - Dark Editor", self.project.settings.name),
+            None => format!("{}{star} - Dark Editor", self.project.settings.name),
         }
+    }
+
+    /// Anything not yet saved: the map, the database or text.
+    fn unsaved(&self) -> bool {
+        self.scene.as_ref().is_some_and(|s| s.dirty)
+            || self.database.dirty()
+            || self.story.dirty()
+            || self.sheets.dirty()
+            || self.strings.dirty()
     }
 
     /// The window was asked to close.
     pub fn request_quit(&mut self) {
-        if self.scene.as_ref().is_some_and(|s| s.dirty) {
+        if self.unsaved() {
             self.pending = Some(Pending::Quit);
         } else {
             self.quit = true;
@@ -286,28 +332,63 @@ impl Editor {
         let ctx = ui.ctx().clone();
         // Names on the map show in the language being written.
         self.strings.shown.set_language(&self.language);
+        // Maps offer what the database holds now, new kinds of enemy and people included.
+        self.catalog.enemies = self.database.enemies();
+        self.catalog.actors = self.database.actors();
+        self.catalog.regions = self.database.regions();
         self.shortcuts(&ctx);
         Panel::top("tools").show(ui, |ui| self.toolbar(ui));
         Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
-        Panel::left("maps")
-            .resizable(true)
-            .default_size(240.0)
-            .min_size(200.0)
-            .show(ui, |ui| self.left_panel(ui));
-        // Wide enough for any selection, so the map does not shift as the selection changes.
-        Panel::right("inspector")
-            .resizable(true)
-            .default_size(320.0)
-            .min_size(320.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| self.inspector(ui));
-            });
-        CentralPanel::no_frame().show(ui, |ui| self.map_view(ui));
+        match self.workspace {
+            Workspace::Maps => {
+                Panel::left("maps")
+                    .resizable(true)
+                    .default_size(240.0)
+                    .min_size(200.0)
+                    .show(ui, |ui| self.left_panel(ui));
+                // Wide enough for any selection, so the map does not shift as it changes.
+                Panel::right("inspector")
+                    .resizable(true)
+                    .default_size(320.0)
+                    .min_size(320.0)
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| self.inspector(ui));
+                    });
+                CentralPanel::no_frame().show(ui, |ui| self.map_view(ui));
+            }
+            Workspace::Database => {
+                // "Used by" sees the open map and the story as they are now, saved or not.
+                let elsewhere = Elsewhere {
+                    scene: self.scene.as_ref().map(|s| (s.path.as_str(), &s.def)),
+                    story: self.story.def(),
+                };
+                self.database.ui(
+                    ui,
+                    &self.project,
+                    &self.catalog,
+                    &mut self.strings,
+                    &self.language,
+                    &elsewhere,
+                );
+            }
+            Workspace::Sheets => {
+                self.sheets.ui(ui, &self.project);
+                // A sheet just made reaches the maps at once.
+                self.reload_sheets();
+            }
+            Workspace::Story => {
+                let lists = self.database.lists(&mut self.strings, &self.language);
+                self.story.ui(ui, &lists, &mut self.strings, &self.language);
+            }
+        }
         self.dialogs(&ctx);
     }
 
     /// Draws the map for this frame, after the interface has laid it out.
     pub fn render(&mut self, egui: &mut egui_wgpu::Renderer) {
+        if self.workspace != Workspace::Maps {
+            return;
+        }
         let Some(scene) = &self.scene else {
             return;
         };
@@ -350,6 +431,8 @@ impl Editor {
     // --- Files -----------------------------------------------------------------------------
 
     fn request_open(&mut self, path: String) {
+        // Nothing could be changed while picking, so the map being picked on is left as is.
+        self.picking = None;
         if self.scene.as_ref().is_some_and(|s| s.dirty) {
             self.pending = Some(Pending::Open(path));
         } else {
@@ -387,13 +470,10 @@ impl Editor {
         }
     }
 
-    /// Saves the map and its text, then checks the game will load it. False if the map was not
-    /// written.
+    /// Saves everything changed: the text, the database, the map; then checks the game will
+    /// load them. False if something could not be written.
     fn save(&mut self) -> bool {
-        let Some(scene) = &mut self.scene else {
-            return true;
-        };
-        // The text first: a map naming text that was never written would show its keys.
+        // The text first: data naming text that was never written would show its keys.
         if let Err(err) = self.strings.save(&self.project) {
             self.status = (
                 format!("Not saved: the text cannot be written: {err}"),
@@ -401,21 +481,175 @@ impl Editor {
             );
             return false;
         }
-        ops::compact_terrain(&mut scene.def, self.tile);
-        if let Err(err) = self.project.save_scene(&scene.path, &scene.def) {
-            self.status = (format!("Not saved: {err}"), true);
-            return false;
+        // Each part is saved on its own: one that cannot be written does not keep the others.
+        let mut failed = Vec::new();
+        let mut warnings = Vec::new();
+        if self.database.dirty() {
+            match self.database.save(&self.project) {
+                Ok(refused) => warnings.extend(
+                    refused.map(|e| format!("the game will not accept the database yet: {e}")),
+                ),
+                Err(err) => failed.push(format!("the database is not saved: {err}")),
+            }
         }
-        scene.dirty = false;
-        let name = scene_name(&scene.path).to_owned();
-        self.status = match self.check() {
-            Ok(()) => (format!("Saved {name}."), false),
-            Err(err) => (
-                format!("Saved {name}, but the game will not load it yet: {err}"),
-                true,
-            ),
+        if self.story.dirty() {
+            let lists = self.database.lists(&mut self.strings, &self.language);
+            match self.story.save(&self.project, &lists) {
+                Ok(refused) => warnings.extend(
+                    refused.map(|e| format!("the game will not accept the story yet: {e}")),
+                ),
+                Err(err) => failed.push(format!("the story is not saved: {err}")),
+            }
+        }
+        if self.sheets.dirty() {
+            match self.sheets.save(&self.project) {
+                Ok(refused) => warnings.extend(refused),
+                Err(err) => failed.push(format!("the sheet is not saved: {err}")),
+            }
+            self.reload_sheets();
+        }
+        let mut saved = "Saved.".to_owned();
+        if let Some(scene) = self.scene.as_mut().filter(|s| s.dirty) {
+            ops::compact_terrain(&mut scene.def, self.tile);
+            match self.project.save_scene(&scene.path, &scene.def) {
+                Ok(()) => {
+                    scene.dirty = false;
+                    saved = format!("Saved {}.", scene_name(&scene.path));
+                }
+                Err(err) => failed.push(format!("the map is not saved: {err}")),
+            }
+        }
+        if let Err(e) = self.check() {
+            warnings.push(format!("the game will not load this map yet: {e}"));
+        }
+        self.status = if !failed.is_empty() {
+            (capitalised(&failed.join("; ")), true)
+        } else if !warnings.is_empty() {
+            (format!("{saved} But {}.", warnings.join("; ")), true)
+        } else {
+            (saved, false)
         };
-        true
+        failed.is_empty()
+    }
+
+    /// Sheets written since the last look: the maps load them again, and the lists follow.
+    fn reload_sheets(&mut self) {
+        let saved = std::mem::take(&mut self.sheets.saved);
+        if saved.is_empty() {
+            return;
+        }
+        for path in &saved {
+            self.viewport.forget_sheet(path);
+            self.thumbnails.remove(path);
+        }
+        let catalog = Catalog::load(&self.project, &mut self.viewport);
+        self.catalog = catalog;
+        self.list_sheets();
+        // What the tools had chosen may be gone (a sheet that no longer loads).
+        if !self.catalog.props.contains(&self.palette_sheet) {
+            self.palette_sheet = self.catalog.props.first().cloned().unwrap_or_default();
+        }
+        if !self.catalog.characters.contains(&self.npc_sheet) {
+            self.npc_sheet = self.catalog.characters.first().cloned().unwrap_or_default();
+        }
+        if self
+            .prop
+            .as_ref()
+            .is_some_and(|(sheet, _)| !self.catalog.props.contains(sheet))
+        {
+            self.prop = None;
+        }
+        self.stale = true;
+    }
+
+    /// Every sheet file of the project, loading or not (one that does not is to be fixed).
+    fn list_sheets(&mut self) {
+        let loaded = |path: &String| {
+            self.catalog.characters.contains(path)
+                || self.catalog.props.contains(path)
+                || self.catalog.attacks.contains(path)
+        };
+        let list = crate::catalog::sheet_files(&self.project);
+        self.sheets.broken = list.iter().filter(|p| !loaded(p)).cloned().collect();
+        self.sheets.list = list;
+    }
+
+    /// Opens the map exit `exit` leads to, to click where it arrives.
+    fn start_picking(&mut self, exit: usize) {
+        let Some(scene) = &self.scene else {
+            return;
+        };
+        if scene.dirty {
+            self.status = ("Save this map first (Ctrl+S), then pick.".into(), true);
+            return;
+        }
+        let Some(to) = scene.def.exits.get(exit).map(|e| e.to.clone()) else {
+            return;
+        };
+        let from = scene.path.clone();
+        self.open(to.clone());
+        // A map that did not open (its status says why) cannot be picked on.
+        if self.scene.as_ref().is_none_or(|s| s.path != to) {
+            return;
+        }
+        self.picking = Some((from.clone(), exit));
+        self.tool = Tool::Select;
+        self.status = (
+            format!(
+                "Click where people arriving from {} appear (Esc to stop).",
+                scene_name(&from)
+            ),
+            false,
+        );
+    }
+
+    /// Sets the picked arrival in the exit's own map (saved at once), and goes back to it.
+    fn finish_picking(&mut self, at: Vec2) {
+        let Some((from, exit)) = self.picking.take() else {
+            return;
+        };
+        let result = self
+            .project
+            .load_scene(&from)
+            .map_err(|e| e.to_string())
+            .and_then(|mut def| {
+                let e = def.exits.get_mut(exit).ok_or("the exit is gone")?;
+                e.spawn = (at.x.round(), at.y.round());
+                self.project
+                    .save_scene(&from, &def)
+                    .map_err(|e| e.to_string())
+            });
+        self.open(from.clone());
+        self.selected = Some(Thing::Exit(exit));
+        self.status = match result.and_then(|()| self.check()) {
+            Ok(()) => (
+                format!(
+                    "Set where people arriving from {} appear.",
+                    scene_name(&from)
+                ),
+                false,
+            ),
+            Err(e) => (format!("Set, but the game will not load it yet: {e}"), true),
+        };
+    }
+
+    /// Undoes the last change in what is open: the map or the database.
+    fn undo_any(&mut self) {
+        match self.workspace {
+            Workspace::Maps => self.undo(),
+            Workspace::Database => self.database.undo_step(),
+            Workspace::Story => self.story.undo_step(),
+            Workspace::Sheets => self.sheets.undo_step(&self.project),
+        }
+    }
+
+    fn redo_any(&mut self) {
+        match self.workspace {
+            Workspace::Maps => self.redo(),
+            Workspace::Database => self.database.redo_step(),
+            Workspace::Story => self.story.redo_step(),
+            Workspace::Sheets => self.sheets.redo_step(&self.project),
+        }
     }
 
     /// Whether the game loads the saved map (and every map it leads to).
@@ -430,8 +664,7 @@ impl Editor {
 
     /// Saves, then starts the game on this map (from its player start, if it has one).
     fn play(&mut self) {
-        let dirty = self.scene.as_ref().is_some_and(|s| s.dirty);
-        if dirty && !self.save() {
+        if self.unsaved() && !self.save() {
             return;
         }
         if let Err(err) = self.check() {
@@ -454,6 +687,11 @@ impl Editor {
             .arg("--project")
             .arg(self.project.root())
             .args(["--lang", &self.language]);
+        // More than one player: a host, and a window of its own for each other player, joined.
+        if self.players > 1 {
+            let others = (self.players - 1).to_string();
+            command.args(["--host", PLAYTEST_PORT, "--clients", &others]);
+        }
         let here = self
             .scene
             .as_ref()
@@ -578,15 +816,27 @@ impl Editor {
         if pressed(ctx, Modifiers::COMMAND, Key::S) {
             self.save();
         }
+        // While typing, Ctrl+Z undoes the typing (the field's own undo), not the last change.
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        if self.picking.is_some() {
+            if pressed(ctx, Modifiers::NONE, Key::Escape)
+                && let Some((from, _)) = self.picking.take()
+            {
+                self.open(from);
+            }
+            return;
+        }
         if pressed(ctx, Modifiers::COMMAND | Modifiers::SHIFT, Key::Z)
             || pressed(ctx, Modifiers::COMMAND, Key::Y)
         {
-            self.redo();
+            self.redo_any();
         }
         if pressed(ctx, Modifiers::COMMAND, Key::Z) {
-            self.undo();
+            self.undo_any();
         }
-        if ctx.egui_wants_keyboard_input() {
+        if self.workspace != Workspace::Maps {
             return;
         }
         if pressed(ctx, Modifiers::NONE, Key::Delete)
@@ -605,30 +855,65 @@ impl Editor {
     fn toolbar(&mut self, ui: &mut Ui) {
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
-            let dirty = self.scene.as_ref().is_some_and(|s| s.dirty);
+            for (workspace, label, help) in [
+                (
+                    Workspace::Maps,
+                    "Maps",
+                    "Make maps: ground, props, villagers, enemies, exits",
+                ),
+                (
+                    Workspace::Database,
+                    "Database",
+                    "Items, enemies, movesets, people, factions, regions",
+                ),
+                (
+                    Workspace::Story,
+                    "Story",
+                    "Conversations with the people of the world, and the year's endings",
+                ),
+                (
+                    Workspace::Sheets,
+                    "Sheets",
+                    "How pictures are cut into frames and clips, and where attacks hit",
+                ),
+            ] {
+                let chosen = self.workspace == workspace;
+                let tab = egui::Button::new(egui::RichText::new(label).strong()).selected(chosen);
+                if ui.add(tab).on_hover_text(help).clicked() {
+                    self.workspace = workspace;
+                }
+            }
+            ui.separator();
             if ui
-                .add_enabled(dirty, egui::Button::new("Save"))
-                .on_hover_text("Ctrl+S")
+                .add_enabled(self.unsaved(), egui::Button::new("Save"))
+                .on_hover_text("Save everything (Ctrl+S)")
                 .clicked()
             {
                 self.save();
             }
+            let (can_undo, can_redo) = match self.workspace {
+                Workspace::Maps => (self.history.can_undo(), self.history.can_redo()),
+                Workspace::Database => (self.database.can_undo(), self.database.can_redo()),
+                Workspace::Story => (self.story.can_undo(), self.story.can_redo()),
+                Workspace::Sheets => (self.sheets.can_undo(), self.sheets.can_redo()),
+            };
             if ui
-                .add_enabled(self.history.can_undo(), egui::Button::new("Undo"))
+                .add_enabled(can_undo, egui::Button::new("Undo"))
                 .on_hover_text("Ctrl+Z")
                 .clicked()
             {
-                self.undo();
+                self.undo_any();
             }
             if ui
-                .add_enabled(self.history.can_redo(), egui::Button::new("Redo"))
+                .add_enabled(can_redo, egui::Button::new("Redo"))
                 .on_hover_text("Ctrl+Y")
                 .clicked()
             {
-                self.redo();
+                self.redo_any();
             }
             ui.separator();
-            for (tool, label, help) in Tool::ALL {
+            let maps = self.workspace == Workspace::Maps;
+            for (tool, label, help) in Tool::ALL.into_iter().filter(|_| maps) {
                 if ui
                     .selectable_label(self.tool == tool, label)
                     .on_hover_text(help)
@@ -638,18 +923,41 @@ impl Editor {
                     self.drag = None;
                 }
             }
-            ui.separator();
+            if maps {
+                ui.separator();
+            }
             if ui
                 .add_enabled(self.scene.is_some(), egui::Button::new("▶ Play"))
-                .on_hover_text("Save, then play this map from its player start")
+                .on_hover_text("Save, then play the open map from its player start")
                 .clicked()
             {
                 self.play();
             }
+            ComboBox::from_id_salt("players")
+                .selected_text(match self.players {
+                    1 => "1 player".to_owned(),
+                    n => format!("{n} players"),
+                })
+                .width(80.0)
+                .show_ui(ui, |ui| {
+                    for n in 1..=4u8 {
+                        let label = if n == 1 {
+                            "1 player".to_owned()
+                        } else {
+                            format!("{n} players")
+                        };
+                        ui.selectable_value(&mut self.players, n, label);
+                    }
+                })
+                .response
+                .on_hover_text("Play together on this computer: one window per player");
             ui.separator();
-            ui.checkbox(&mut self.grid, "Grid");
-            ui.checkbox(&mut self.overlay, "Collision")
-                .on_hover_text("Show what blocks walking, hills and exits as the game sees them");
+            if maps {
+                ui.checkbox(&mut self.grid, "Grid");
+                ui.checkbox(&mut self.overlay, "Collision").on_hover_text(
+                    "Show what blocks walking, hills and exits as the game sees them",
+                );
+            }
             ComboBox::from_id_salt("language")
                 .selected_text(format!("Text: {}", self.language))
                 .show_ui(ui, |ui| {
@@ -660,6 +968,10 @@ impl Editor {
                 .response
                 .on_hover_text("The language you are writing text in");
         });
+        if self.workspace != Workspace::Maps {
+            ui.add_space(2.0);
+            return;
+        }
         // The chosen tool's options.
         ui.horizontal_wrapped(|ui| {
             let help = Tool::ALL
@@ -718,6 +1030,9 @@ impl Editor {
                 ui.colored_label(Color32::from_rgb(255, 110, 100), text);
             } else {
                 ui.label(text);
+            }
+            if self.workspace != Workspace::Maps {
+                return;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(format!("zoom {}x", self.view.zoom));
@@ -833,6 +1148,19 @@ impl Editor {
     }
 
     fn inspector(&mut self, ui: &mut Ui) {
+        if let Some((from, _)) = &self.picking {
+            ui.heading("Picking where people arrive");
+            ui.label(format!(
+                "Click on this map where people coming from {} appear.",
+                scene_name(from)
+            ));
+            if ui.button("Stop").clicked() {
+                let from = from.clone();
+                self.picking = None;
+                self.open(from);
+            }
+            return;
+        }
         let Some(scene) = &mut self.scene else {
             ui.label("No map is open.");
             return;
@@ -841,7 +1169,10 @@ impl Editor {
         let name = scene_name(&scene.path).to_owned();
         let mut form = Form {
             changed: None,
+            step: false,
             text_changed: false,
+            palette: self.prop.clone(),
+            pick_arrival: None,
             strings: &mut self.strings,
             language: &self.language,
             catalog: &self.catalog,
@@ -870,16 +1201,21 @@ impl Editor {
             }
         }
         let (changed, text_changed) = (form.changed, form.text_changed);
+        let (step, pick_arrival) = (form.step, form.pick_arrival);
         if let Some(id) = changed {
-            if self.editing != Some(id) {
+            if self.editing != Some(id) || step {
                 self.history.record(&before);
-                self.editing = Some(id);
             }
+            self.editing = (!step).then_some(id);
             scene.dirty = true;
             self.stale = true;
         }
         if text_changed {
             scene.dirty = true;
+        }
+        if let Some(exit) = pick_arrival {
+            self.start_picking(exit);
+            return;
         }
         if remove {
             match self.selected {
@@ -905,7 +1241,10 @@ impl Editor {
             let mut answer = None;
             egui::Modal::new(egui::Id::new("unsaved")).show(ctx, |ui| {
                 ui.heading("Unsaved changes");
-                ui.label(format!("Save the changes to {name}?"));
+                ui.label(match pending {
+                    Pending::Quit => "Save your changes before closing?".to_owned(),
+                    _ => format!("Save the changes to {name}?"),
+                });
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
                         answer = Some(Some(true));
@@ -923,8 +1262,11 @@ impl Editor {
                 let go = match answer {
                     Some(true) => self.save(),
                     Some(false) => {
-                        // What was typed goes too, or the next save would write it.
-                        self.strings = Strings::load(&self.project);
+                        // What was typed goes too, or the next save would write it; unless
+                        // the database or the story, still open, names things with it.
+                        if !self.database.dirty() && !self.story.dirty() {
+                            self.strings = Strings::load(&self.project);
+                        }
                         true
                     }
                     None => false,
@@ -1024,6 +1366,21 @@ impl Editor {
         self.hover = response.hover_pos().map(|p| mapping.to_world(p));
         self.pointer(ui, &response, &mapping);
         self.markers(&painter, &mapping);
+        if let Some((from, _)) = &self.picking {
+            let text = format!(
+                "Click where people arriving from {} appear",
+                scene_name(from)
+            );
+            let galley = painter.layout_no_wrap(text, FontId::proportional(16.0), Color32::WHITE);
+            let at =
+                Align2::CENTER_TOP.anchor_size(rect.center_top() + vec2(0.0, 12.0), galley.size());
+            painter.rect_filled(
+                at.expand(6.0),
+                4.0,
+                Color32::from_rgba_unmultiplied(20, 60, 20, 220),
+            );
+            painter.galley(at.min, galley, Color32::WHITE);
+        }
     }
 
     fn pointer(&mut self, ui: &Ui, response: &egui::Response, mapping: &Mapping) {
@@ -1071,6 +1428,13 @@ impl Editor {
             }
             return;
         };
+        // Picking where an exit arrives: a click here is the answer.
+        if self.picking.is_some() {
+            if response.clicked() {
+                self.finish_picking(at);
+            }
+            return;
+        }
         let primary_down = response.is_pointer_button_down_on()
             && ui.input(|i| i.pointer.button_down(PointerButton::Primary));
         let secondary_down = response.is_pointer_button_down_on()
@@ -1404,8 +1768,7 @@ impl Editor {
             let drawn = self
                 .catalog
                 .enemy_sheet(&enemy.kind)
-                .and_then(|s| self.viewport.sheets.get(s))
-                .is_some_and(|s| s.spine.is_none());
+                .is_some_and(|s| self.viewport.draws(s));
             if !drawn {
                 painter.circle_filled(m.to_screen(Vec2::from(enemy.position)), 6.0, red);
             }
@@ -1499,7 +1862,13 @@ impl Editor {
 /// The inspector's fields for one frame: which field changed (for undo), and where text goes.
 struct Form<'a> {
     changed: Option<egui::Id>,
+    /// The change was a press: an undo step of its own.
+    step: bool,
     text_changed: bool,
+    /// The palette's picture, for scattering.
+    palette: Option<(String, u32)>,
+    /// Asked to pick, on the map it leads to, where exit `n` arrives.
+    pick_arrival: Option<usize>,
     strings: &'a mut Strings,
     language: &'a str,
     catalog: &'a Catalog,
@@ -1508,6 +1877,12 @@ struct Form<'a> {
 }
 
 impl Form<'_> {
+    /// A press that changed the map: an undo step of its own.
+    fn press(&mut self, id: impl std::hash::Hash + std::fmt::Debug) {
+        self.changed = Some(egui::Id::new(id));
+        self.step = true;
+    }
+
     fn track(&mut self, response: egui::Response) -> egui::Response {
         if response.changed() {
             self.changed = Some(response.id);
@@ -1654,11 +2029,149 @@ impl Form<'_> {
             def.enemies.len(),
             def.exits.len()
         ));
-        if !def.scatter.is_empty() {
-            ui.weak(format!(
-                "{} groups of scattered props (grass, trees) are laid out by the game.",
-                def.scatter.len()
-            ));
+        ui.separator();
+        self.scatter(ui, def);
+    }
+
+    /// Groups of props the game strews over the map (grass, flowers, trees): which pictures,
+    /// how many, how far apart, solid or not, on which ground.
+    fn scatter(&mut self, ui: &mut Ui, def: &mut SceneDef) {
+        ui.strong("Scattered props");
+        ui.weak("Strewn by the game over flat ground, clear of paths and people.");
+        let mut remove = None;
+        for (g, group) in def.scatter.iter_mut().enumerate() {
+            let title = format!("{} × {}", group.count, sheet_name(&group.sheet));
+            egui::CollapsingHeader::new(title)
+                .id_salt(("scatter", g))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Pictures");
+                        let mut drop = None;
+                        for (k, frame) in group.frames.iter().enumerate() {
+                            if ui.small_button(format!("#{frame} ✖")).clicked() {
+                                drop = Some(k);
+                            }
+                        }
+                        if let Some(k) = drop {
+                            group.frames.remove(k);
+                            self.press(("scatter drop", g, k));
+                        }
+                    });
+                    match &self.palette {
+                        Some((sheet, frame)) if *sheet == group.sheet => {
+                            if !group.frames.contains(frame)
+                                && ui.button(format!("Add the palette's #{frame}")).clicked()
+                            {
+                                group.frames.push(*frame);
+                                self.press(("scatter add", g, *frame));
+                            }
+                        }
+                        _ => {
+                            ui.weak(format!(
+                                "Pick a picture of {} in the palette to add it.",
+                                sheet_name(&group.sheet)
+                            ));
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("How many");
+                        self.track(ui.add(DragValue::new(&mut group.count).range(0..=5000)));
+                        ui.label("apart");
+                        self.track(
+                            ui.add(
+                                DragValue::new(&mut group.min_spacing)
+                                    .range(0.0..=2000.0)
+                                    .suffix(" px"),
+                            ),
+                        );
+                    });
+                    if ui
+                        .button("Shuffle")
+                        .on_hover_text("Strew them somewhere else")
+                        .clicked()
+                    {
+                        group.seed = group
+                            .seed
+                            .wrapping_mul(6_364_136_223_846_793_005)
+                            .wrapping_add(1_442_695_040_888_963_407);
+                        self.press(("shuffle", g));
+                    }
+                    let mut solid = group.collider.is_some();
+                    if self
+                        .track(ui.checkbox(&mut solid, "Solid (a round footprint)"))
+                        .changed()
+                    {
+                        group.collider = solid.then(|| dark_assets::ColliderDef {
+                            shape: dark_physics::Shape::Circle { radius: 6.0 },
+                            offset: (0.0, -4.0),
+                            height: 1000.0,
+                        });
+                    }
+                    if let Some(c) = &mut group.collider {
+                        collider(self, ui, ("scatter collider", g), c);
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("On");
+                        let mut anywhere = group.levels.is_none();
+                        if self
+                            .track(ui.checkbox(&mut anywhere, "any ground"))
+                            .changed()
+                        {
+                            group.levels = (!anywhere).then(|| vec![0]);
+                        }
+                        if let Some(levels) = &mut group.levels {
+                            for level in 0..=3u8 {
+                                let mut on = levels.contains(&level);
+                                let label = if level == 0 {
+                                    "ground".to_owned()
+                                } else {
+                                    format!("hill {level}")
+                                };
+                                if ui.checkbox(&mut on, label).changed() {
+                                    if on {
+                                        levels.push(level);
+                                        levels.sort_unstable();
+                                    } else {
+                                        levels.retain(|l| *l != level);
+                                    }
+                                    self.press(("levels", g, level));
+                                }
+                            }
+                        }
+                    });
+                    if ui.button("Remove this group").clicked() {
+                        remove = Some(g);
+                    }
+                });
+        }
+        if let Some(g) = remove {
+            def.scatter.remove(g);
+            self.press(("scatter remove", g));
+        }
+        match self.palette.clone() {
+            Some((sheet, frame)) => {
+                if ui
+                    .button(format!(
+                        "Scatter the palette's picture ({} #{frame})",
+                        sheet_name(&sheet)
+                    ))
+                    .clicked()
+                {
+                    def.scatter.push(dark_assets::ScatterDef {
+                        sheet,
+                        frames: vec![frame],
+                        count: 20,
+                        min_spacing: 24.0,
+                        seed: def.scatter.len() as u64 * 7919 + 17,
+                        collider: None,
+                        levels: None,
+                    });
+                    self.press(("scatter new", def.scatter.len()));
+                }
+            }
+            None => {
+                ui.weak("Pick a picture in the palette to scatter it.");
+            }
         }
     }
 
@@ -1692,6 +2205,30 @@ impl Form<'_> {
                         .map_or(self.tile, |f| f.rect.w);
                     p.colliders =
                         ops::new_prop(&p.sheet, p.frame, Vec2::ZERO, width, solid).colliders;
+                }
+                let count = p.colliders.len();
+                let mut remove = None;
+                for (k, c) in p.colliders.iter_mut().enumerate() {
+                    ui.indent(("prop collider", i, k), |ui| {
+                        collider(self, ui, ("prop collider", i, k), c);
+                        if count > 1 && ui.small_button("Remove this part").clicked() {
+                            remove = Some(k);
+                        }
+                    });
+                }
+                if let Some(k) = remove {
+                    p.colliders.remove(k);
+                    self.press(("remove part", i, k));
+                }
+                if !p.colliders.is_empty()
+                    && ui
+                        .button("Add a part")
+                        .on_hover_text("A footprint of several shapes (a house with a porch)")
+                        .clicked()
+                {
+                    let last = p.colliders[count - 1];
+                    p.colliders.push(last);
+                    self.press(("add part", i, count));
                 }
             }
             Thing::Npc(i) => {
@@ -1835,7 +2372,12 @@ impl Form<'_> {
                     }
                 });
                 self.point(ui, "Arrives at", &mut exit.spawn);
-                ui.weak("Where you appear on the other map, in its pixels.");
+                ui.horizontal(|ui| {
+                    ui.weak("Where you appear on the other map.");
+                    if ui.button("Pick it there…").clicked() {
+                        self.pick_arrival = Some(i);
+                    }
+                });
                 self.area(ui, &mut exit.area);
             }
             Thing::Inn(i) => {
@@ -1876,6 +2418,65 @@ fn frame_number(value: &mut u32, last: u32) -> DragValue<'_> {
     DragValue::new(value)
         .range(0..=last)
         .clamp_existing_to_range(false)
+}
+
+/// A footprint at most this tall is jumped over and stood on.
+const LOW: f32 = 18.0;
+
+/// A footprint: round or a box, where it stands from the prop's foot, and how tall.
+fn collider(
+    form: &mut Form,
+    ui: &mut Ui,
+    salt: impl std::hash::Hash + std::fmt::Debug + Copy,
+    c: &mut dark_assets::ColliderDef,
+) {
+    use dark_physics::Shape;
+    ui.horizontal(|ui| {
+        let round = matches!(c.shape, Shape::Circle { .. });
+        if ui.selectable_label(round, "round").clicked() && !round {
+            c.shape = Shape::Circle { radius: 8.0 };
+            form.press((salt, "round"));
+        }
+        if ui.selectable_label(!round, "a box").clicked() && round {
+            c.shape = Shape::Rect {
+                half: glam::Vec2::new(8.0, 6.0),
+            };
+            form.press((salt, "box"));
+        }
+        match &mut c.shape {
+            Shape::Circle { radius } => {
+                form.track(ui.add(DragValue::new(radius).range(1.0..=1000.0).prefix("radius ")));
+            }
+            Shape::Rect { half } => {
+                let (mut w, mut h) = (half.x * 2.0, half.y * 2.0);
+                let a = form.track(ui.add(DragValue::new(&mut w).range(1.0..=2000.0).prefix("w ")));
+                let b = form.track(ui.add(DragValue::new(&mut h).range(1.0..=2000.0).prefix("h ")));
+                if a.changed() || b.changed() {
+                    *half = glam::Vec2::new(w / 2.0, h / 2.0);
+                }
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("From the foot");
+        form.track(ui.add(DragValue::new(&mut c.offset.0).prefix("x ")));
+        form.track(ui.add(DragValue::new(&mut c.offset.1).prefix("y ")));
+        // Low enough to jump onto: below the jump's height (about 20 px).
+        let mut low = c.height <= LOW;
+        if form
+            .track(ui.checkbox(&mut low, "low (jumped over, stood on)"))
+            .changed()
+        {
+            c.height = if low { LOW.min(12.0) } else { 1000.0 };
+        }
+    });
+}
+
+fn capitalised(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map(|first| first.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
 }
 
 fn thing_label(thing: Thing) -> &'static str {

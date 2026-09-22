@@ -21,7 +21,7 @@ pub enum DefError {
     Invalid(String),
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct WorldDef {
     pub regions: Vec<RegionDef>,
     pub roads: Vec<RoadDef>,
@@ -37,6 +37,111 @@ pub struct WorldDef {
     /// Standing, parties and loyalty.
     #[serde(default)]
     pub social: Social,
+    /// Seasons and the days that matter.
+    #[serde(default, skip_serializing_if = "CalendarDef::is_empty")]
+    pub calendar: CalendarDef,
+}
+
+/// The year's seasons and dated events. Days count from 1 to 365.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CalendarDef {
+    /// Each from its first day to the next one's (in any order in the file): the latest runs to
+    /// the year's end, and the days before the earliest belong to the latest (winter into the
+    /// new year).
+    #[serde(default)]
+    pub seasons: Vec<SeasonDef>,
+    #[serde(default)]
+    pub events: Vec<EventDef>,
+}
+
+/// A season: its name (a string key) and how much warmer it is than the climate (hundredths of
+/// a degree, added to every region's air; negative is colder).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SeasonDef {
+    pub id: String,
+    pub name: String,
+    pub from_day: u32,
+    #[serde(default)]
+    pub warmth: i32,
+}
+
+/// Something on the calendar (a festival, a market day), from `day` for `days` days. Storylets
+/// can be offered only then.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct EventDef {
+    pub id: String,
+    pub name: String,
+    pub day: u32,
+    #[serde(default = "one_day")]
+    pub days: u32,
+}
+
+fn one_day() -> u32 {
+    1
+}
+
+impl CalendarDef {
+    pub fn is_empty(&self) -> bool {
+        self.seasons.is_empty() && self.events.is_empty()
+    }
+
+    /// The season of `day` (from 1): the one begun most recently, counting round the year.
+    pub fn season(&self, day: u32) -> Option<&SeasonDef> {
+        self.seasons
+            .iter()
+            .filter(|s| s.from_day <= day)
+            .max_by_key(|s| s.from_day)
+            .or_else(|| self.seasons.iter().max_by_key(|s| s.from_day))
+    }
+
+    /// Whether event `id` is on during `day` (from 1).
+    pub fn during(&self, id: &str, day: u32) -> bool {
+        self.events
+            .iter()
+            .any(|e| e.id == id && (e.day..e.day.saturating_add(e.days.max(1))).contains(&day))
+    }
+
+    /// How much warmer than its climate `day` is.
+    pub fn warmth(&self, day: u32) -> i32 {
+        self.season(day).map_or(0, |s| s.warmth)
+    }
+
+    pub fn validate(&self) -> Result<(), DefError> {
+        let bad = |m: String| Err(DefError::Invalid(m));
+        for (i, s) in self.seasons.iter().enumerate() {
+            if !(1..=365).contains(&s.from_day) {
+                return bad(format!("season {} must start on a day from 1 to 365", s.id));
+            }
+            if let Some(other) = self.seasons[..i].iter().find(|o| o.from_day == s.from_day) {
+                return bad(format!(
+                    "seasons {} and {} both start on day {}",
+                    other.id, s.id, s.from_day
+                ));
+            }
+        }
+        for e in &self.events {
+            if !(1..=365).contains(&e.day) || !(1..=365).contains(&e.days) {
+                return bad(format!(
+                    "event {} must be on a day from 1 to 365, and last 1 to 365 days",
+                    e.id
+                ));
+            }
+        }
+        let ids: Vec<&String> = self
+            .seasons
+            .iter()
+            .map(|s| &s.id)
+            .chain(self.events.iter().map(|e| &e.id))
+            .collect();
+        if let Some(twice) = ids
+            .iter()
+            .enumerate()
+            .find_map(|(i, id)| ids[..i].contains(id).then_some(id))
+        {
+            return bad(format!("{twice} is on the calendar twice"));
+        }
+        Ok(())
+    }
 }
 
 impl WorldDef {
@@ -78,7 +183,7 @@ impl RegionKind {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RegionDef {
     pub id: String,
     pub name: String,
@@ -91,13 +196,13 @@ pub struct RegionDef {
 }
 
 /// A way between two regions, walked in `hours`.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RoadDef {
     pub between: (String, String),
     pub hours: u32,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FactionDef {
     pub id: String,
     pub name: String,
@@ -106,7 +211,7 @@ pub struct FactionDef {
     pub hostile: bool,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TitleDef {
     pub id: String,
     pub name: String,
@@ -117,7 +222,7 @@ pub struct TitleDef {
 /// Who holds a title after its holder dies. Rules apply in order: the killer first (if
 /// `to_killer` and the killer is a person, not a monster), then a successor appointed by a
 /// faction, else the title falls vacant.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Succession {
     #[serde(default)]
     pub to_killer: bool,
@@ -126,13 +231,13 @@ pub struct Succession {
     pub appointed: Option<Appointment>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Appointment {
     pub faction: String,
     pub role: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ActorDef {
     pub id: String,
     pub name: String,
@@ -155,7 +260,7 @@ pub struct ActorDef {
 
 /// The party the world follows through the year: who leads it, which roles it needs, whom
 /// it must defeat and who stands in the way.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct HeroPartyDef {
     /// The holder of this title leads the party.
     pub leader_title: String,

@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CombatError {
@@ -22,7 +22,7 @@ pub enum CombatError {
     Invalid(String),
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct CombatDef {
     /// How characters fight, by id; looks name the moveset they use.
     #[serde(default)]
@@ -110,7 +110,7 @@ impl CombatDef {
 }
 
 /// How a character fights: its body's toughness, its combo and its dodge.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Moveset {
     pub health: u16,
     /// Stagger resistance: hits take poise, and only a hit that empties it staggers.
@@ -147,7 +147,7 @@ impl Default for Moveset {
 }
 
 /// One attack: frame data, what it does on hit, and where it reaches.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct AttackDef {
     /// Animation clip, played as `<clip>_<facing>`; falls back to `attack`.
     #[serde(default = "default_attack_clip")]
@@ -187,7 +187,7 @@ impl AttackDef {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct DodgeDef {
     #[serde(default = "default_dodge_clip")]
     pub clip: String,
@@ -201,7 +201,7 @@ pub struct DodgeDef {
 }
 
 /// A kind of enemy: how it looks, fights and thinks.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EnemyDef {
     /// Name key (`locale/<code>.ron`).
     pub name: String,
@@ -213,7 +213,7 @@ pub struct EnemyDef {
 }
 
 /// Enemy behaviour tuning (the states are fixed: guard, chase, attack, back off, return).
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AiDef {
     /// Notices a player this close.
     pub sight: f32,

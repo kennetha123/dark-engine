@@ -25,7 +25,7 @@ pub enum LifeError {
     Invalid(String),
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct LifeDef {
     #[serde(default)]
     pub rates: Rates,
@@ -265,7 +265,7 @@ impl Default for Harm {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ItemDef {
     /// Name key (`locale/<code>.ron`).
     pub name: String,
@@ -276,7 +276,7 @@ pub struct ItemDef {
 }
 
 /// An icon on an icon sheet (a grid of `size`-pixel cells).
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct IconDef {
     pub image: String,
     pub size: u32,
@@ -322,7 +322,7 @@ impl Climate {
 
 /// Sheets (project paths) for set-down structures: a tent's first frame; a campfire's `burn`
 /// clip while it burns, its first frame once out.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct StructureArt {
     #[serde(default)]
     pub tent: Option<String>,
@@ -331,7 +331,7 @@ pub struct StructureArt {
 }
 
 /// What using an item does.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ItemUse {
     /// Eaten or drunk: gone once used.
     Consume(Consumable),
