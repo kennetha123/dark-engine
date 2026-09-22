@@ -117,7 +117,11 @@ impl Plugin for PartyPlugin {
 
 /// The world actor playing `player`, if their map is in a region (made the first time), placed
 /// in that region now (the world simulation otherwise hears where players are once an hour).
-fn player_actor(world: &mut WorldState, player: PlayerId, map: MapId) -> Option<ActorId> {
+pub(crate) fn player_actor(
+    world: &mut WorldState,
+    player: PlayerId,
+    map: MapId,
+) -> Option<ActorId> {
     let region = world.region_of(map)?;
     let actor = world.sim.player_actor(player.0.as_u128(), region);
     world.sim.move_player(actor, region);
@@ -282,7 +286,12 @@ type Follower = (
 type FollowerOnly = (Without<PlayerAvatar>, Without<Hostile>, Without<Dormant>);
 
 /// An enemy a follower may fight.
-type Foe = (&'static MapId, &'static BodyState, &'static CharacterState);
+type Foe = (
+    Entity,
+    &'static MapId,
+    &'static BodyState,
+    &'static CharacterState,
+);
 
 /// Companions follow their leader and fight the enemies around them.
 fn follow(
@@ -319,6 +328,8 @@ fn follow(
         let near_leader = |at: Vec2| at.distance(leader.0.position) <= GUARD;
         let foe = foes
             .iter()
+            .filter(|(e, ..)| *e != companion.leader)
+            .map(|(_, m, b, s)| (m, b, s))
             .filter(|(m, b, s)| {
                 *m == &*map
                     && !s.fighter.is_dead()
@@ -388,7 +399,7 @@ fn credit(
             commands.entity(entity).remove::<Counted>();
         }
     }
-    for (entity, map, body, state, hostile, person) in &fallen {
+    for (entity, map, body, state, hostile, person, player_fell) in &fallen {
         if !state.fighter.is_dead() {
             continue;
         }
@@ -402,7 +413,8 @@ fn credit(
             world.sim.kill(actor, None);
             commands.entity(entity).insert(Mortal);
         }
-        if !hostile {
+        // Slaying the other side earns standing; a player gone over to it is still a person.
+        if !hostile || player_fell {
             continue;
         }
         // Whoever landed the killing blow, if a player.
@@ -439,6 +451,7 @@ type Fallen = (
     &'static CharacterState,
     Has<Hostile>,
     Option<&'static Person>,
+    Has<PlayerAvatar>,
 );
 
 /// A death already dealt with.

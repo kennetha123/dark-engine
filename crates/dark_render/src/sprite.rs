@@ -166,8 +166,10 @@ pub(crate) struct Batch {
 pub(crate) struct FrameBatches {
     pub instances: Vec<Instance>,
     pub vertices: Vec<Instance>,
-    /// Main pass, back to front.
+    /// Main pass, back to front: the world.
     pub main: Vec<Batch>,
+    /// Interface and debug ([`layer::UI`] and up), drawn after silhouettes so none shows through.
+    pub overlay: Vec<Batch>,
     /// Sprites drawn after, and overlapping, a character: they write the occlusion mask.
     pub occluders: Vec<Batch>,
     /// Character bodies, drawn again as silhouettes where the mask says they are covered.
@@ -314,7 +316,11 @@ pub(crate) fn build_batches(
             order: seq as f32,
             mode,
         });
-        append(&mut frame.main, sprite.texture, index);
+        if sprite.layer >= layer::UI {
+            append(&mut frame.overlay, sprite.texture, index);
+        } else {
+            append(&mut frame.main, sprite.texture, index);
+        }
         let drawn = Drawn {
             seq,
             min: lifted,
@@ -691,5 +697,15 @@ mod tests {
         );
         let frame = build_batches(&mut [tree], &[plain], |_| (16, 16));
         assert!(frame.silhouettes.is_empty() && frame.occluders.is_empty());
+    }
+
+    #[test]
+    fn the_interface_is_drawn_apart_after_everything() {
+        let mut bubble = Sprite::new(TextureId(0), Rect::new(0, 0, 4, 4), Vec2::ZERO, Vec2::ZERO);
+        bubble.layer = layer::UI;
+        let tree = Sprite::new(TextureId(0), Rect::new(0, 0, 4, 4), Vec2::ZERO, Vec2::ZERO);
+        let frame = build_batches(&mut [bubble, tree], &[], |_| (4, 4));
+        assert_eq!(frame.main.len(), 1, "the tree");
+        assert_eq!(frame.overlay.len(), 1, "the bubble");
     }
 }

@@ -162,6 +162,9 @@ type Talker = (
     &'static CharacterState,
 );
 
+/// Talkers: not NPCs, awake, and not already in a storylet's conversation.
+type FreeToTalk = (Without<Npc>, Without<Asleep>, Without<crate::Conversing>);
+
 /// Who can be talked to.
 type Listener = (
     Entity,
@@ -172,9 +175,9 @@ type Listener = (
     &'static mut CharacterState,
 );
 
-fn talk(
+pub(crate) fn talk(
     mut commands: Commands,
-    talkers: Query<Talker, (Without<Npc>, Without<Asleep>)>,
+    talkers: Query<Talker, FreeToTalk>,
     mut npcs: Query<Listener>,
 ) {
     for (talker, talker_id, map, body, control, state) in &talkers {

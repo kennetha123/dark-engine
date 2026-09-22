@@ -23,6 +23,7 @@ dark_sim = { path = "crates/dark_sim" }
 dark_combat = { path = "crates/dark_combat" }
 dark_audio = { path = "crates/dark_audio" }
 dark_spine = { path = "crates/dark_spine" }
+dark_story = { path = "crates/dark_story" }
 dark_life = { path = "crates/dark_life" }
 
 bevy_ecs = "0.18.1"
@@ -46,6 +47,8 @@ renet = "2.0.0"
 renet_netcode = "2.0.0"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.20"
+# The headless host saves the world on Ctrl+C.
+ctrlc = "3.5.2"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.26.1", features = ["v4", "serde"] }

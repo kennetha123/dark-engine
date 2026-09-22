@@ -72,6 +72,8 @@ pub struct Snapshot {
     pub life: Option<LifeView>,
     /// The others in the client's party.
     pub party: Vec<NetId>,
+    /// The client's conversation choices, fades and the year's ending.
+    pub story: crate::StoryView,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -233,11 +235,15 @@ fn read_inputs(mut host: ResMut<NetHost>, mut queues: Query<(&PlayerAvatar, &mut
             if let Some((seq, dropped)) = queue.pending.pop_first() {
                 queue.acked = seq;
                 if let Some(mut next) = queue.pending.first_entry() {
-                    // `latch` takes the newer input's slot; here `dropped` is the older one.
-                    let item = next.get().item;
+                    // `latch` takes the newer input's slot and choice; here `dropped` is the
+                    // older one.
+                    let (item, choice) = (next.get().item, next.get().choice);
                     next.get_mut().latch(dropped);
                     if item != 0 {
                         next.get_mut().item = item;
+                    }
+                    if choice != 0 {
+                        next.get_mut().choice = choice;
                     }
                 }
             }
@@ -332,12 +338,21 @@ type Recipient = (
     Option<&'static Life>,
 );
 
+/// What each recipient is sent of their own: body, party, conversation, fades.
+#[derive(bevy_ecs::system::SystemParam)]
+struct Personal<'w, 's> {
+    rules: Option<Res<'w, LifeRules>>,
+    roster: Option<Res<'w, crate::PartyRoster>>,
+    story: Option<Res<'w, crate::StoryState>>,
+    world: Option<Res<'w, crate::WorldState>>,
+    faded: Query<'w, 's, &'static crate::Faded>,
+}
+
 fn send_snapshots(
     tick: Res<SimTick>,
     clock: Res<WorldClock>,
     mut host: ResMut<NetHost>,
-    // Each recipient's own body and party.
-    (rules, roster): (Option<Res<LifeRules>>, Option<Res<crate::PartyRoster>>),
+    personal: Personal,
     avatars: Query<Recipient>,
     characters: Query<Replicated, Without<crate::Dormant>>,
     structures: Query<(&NetId, &MapId, &Placed)>,
@@ -385,11 +400,24 @@ fn send_snapshots(
                     at: p.at,
                 })
                 .collect(),
-            life: life.zip(rules.as_ref()).map(|(l, r)| l.view(&r.def)),
-            party: roster
+            life: life
+                .zip(personal.rules.as_ref())
+                .map(|(l, r)| l.view(&r.def)),
+            party: personal
+                .roster
                 .as_ref()
                 .map(|r| crate::party_members(r, entity))
                 .unwrap_or_default(),
+            story: crate::StoryView {
+                choices: personal
+                    .story
+                    .as_ref()
+                    .zip(personal.world.as_ref())
+                    .map(|(s, w)| crate::story::choices_of(s, w, entity))
+                    .unwrap_or_default(),
+                faded: personal.faded.get(entity).map_or(0, |f| f.0),
+                ending: personal.story.as_ref().and_then(|s| s.ending.clone()),
+            },
         };
         host.0.send(avatar.0, Channel::State, encode(&snapshot));
     }

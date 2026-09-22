@@ -55,6 +55,7 @@ pub struct DemoScene {
     icons: Vec<(String, Image)>,
     /// Skeletons, by the `*.spine.ron` sheet path they are loaded from.
     rigs: HashMap<String, Rig>,
+    story: dark_story::StoryDef,
 }
 
 /// One frame's world, as the view draws it.
@@ -70,6 +71,8 @@ pub struct Frame<'a> {
     pub structures: &'a [StructureSnapshot],
     /// The others in the local player's party.
     pub party: &'a [NetId],
+    /// The local player's conversation choices, fades and the year's ending.
+    pub story: &'a dark_world::StoryView,
 }
 
 impl DemoScene {
@@ -98,6 +101,13 @@ impl DemoScene {
         let life = LifeDef::load_or_default(&life_path).map_err(|e| AssetError::Invalid {
             path: life_path,
             message: e.to_string(),
+        })?;
+        let story_path = project.path("story.ron");
+        let story = dark_story::StoryDef::load_or_default(&story_path).map_err(|e| {
+            AssetError::Invalid {
+                path: story_path,
+                message: e.to_string(),
+            }
         })?;
         let icons = life
             .items
@@ -176,7 +186,13 @@ impl DemoScene {
             life,
             icons,
             rigs,
+            story,
         })
+    }
+
+    /// The project's storylets and endings, for the host.
+    pub fn story_def(&self) -> dark_story::StoryDef {
+        self.story.clone()
     }
 
     pub fn character_sheets(&self) -> CharacterSheets {
@@ -314,6 +330,9 @@ impl DemoScene {
             skeletons,
             poses: HashMap::new(),
             frame_meshes: Vec::new(),
+            faded: None,
+            fade_left: 0.0,
+            choosing: Vec::new(),
         })
     }
 }
@@ -357,11 +376,17 @@ pub fn host_characters(app: &mut App) -> Option<(MapId, Vec<DrawCharacter>)> {
     Some((map, characters))
 }
 
-/// The host's own player's body, the structures in `map`, and the others in their party.
+/// The host's own player's body, the structures in `map`, the others in their party, and what
+/// their screen shows of the story.
 pub fn host_life(
     app: &mut App,
     map: MapId,
-) -> (Option<LifeView>, Vec<StructureSnapshot>, Vec<NetId>) {
+) -> (
+    Option<LifeView>,
+    Vec<StructureSnapshot>,
+    Vec<NetId>,
+    dark_world::StoryView,
+) {
     let me = app.world.resource::<NetHost>().0.local_player();
     let life = me.and_then(|me| dark_world::life_of(&mut app.world, me));
     let structures = dark_world::structures_in(&mut app.world, map);
@@ -375,7 +400,10 @@ pub fn host_life(
         (Some(avatar), Some(roster)) => dark_world::party_members(roster, avatar),
         _ => Vec::new(),
     };
-    (life, structures, party)
+    let story = me
+        .map(|me| dark_world::story_view(&mut app.world, me))
+        .unwrap_or_default();
+    (life, structures, party, story)
 }
 
 /// Static sprites and debug overlay of one map.
@@ -640,6 +668,8 @@ const SLOT: f32 = 20.0;
 const HOTBAR_SLOTS: usize = 8;
 /// A need gauge's size.
 const GAUGE: Vec2 = Vec2::new(6.0, 16.0);
+/// The year's ending card wraps at this width.
+const ENDING_WIDTH: f32 = 360.0;
 /// Party members' health bars, top right.
 const PARTY_BAR: f32 = 40.0;
 /// Statuses listed under the gauges.
@@ -733,6 +763,13 @@ pub struct DemoView {
     /// Each skeletal character's posed skeleton, by who it is.
     poses: HashMap<NetId, (usize, Pose)>,
     frame_meshes: Vec<Mesh>,
+    /// Fades to black seen so far (`None` before the first frame), and seconds left of the one
+    /// showing.
+    faded: Option<u32>,
+    fade_left: f32,
+    /// Conversation choices showing (their node indices, in order): number keys answer instead of
+    /// using the hotbar.
+    choosing: Vec<u8>,
 }
 
 impl DemoView {
@@ -757,6 +794,19 @@ impl DemoView {
     /// Sounds for this frame's events: FMOD event paths and where they happened.
     pub fn sounds(&self) -> &[(&'static str, Vec2)] {
         &self.fx.sounds
+    }
+
+    /// The choice number key `n` (from 1) answers with, as a `TickInput::choice`, if choices
+    /// are showing.
+    pub fn choice_for(&self, n: u8) -> Option<Option<u8>> {
+        if self.choosing.is_empty() {
+            return None;
+        }
+        Some(
+            self.choosing
+                .get(usize::from(n).wrapping_sub(1))
+                .map(|index| index + 1),
+        )
     }
 
     /// Where the camera is looking: where the player hears from.
@@ -901,6 +951,7 @@ impl DemoView {
         self.draw_health(characters, dt);
         let screen = (camera - half, half * 2.0);
         self.draw_interface(renderer, characters, frame, screen, dt);
+        self.draw_fade(frame.story.faded, screen, dt);
         // Skeletons of those no longer here are dropped.
         self.poses
             .retain(|id, _| characters.iter().any(|c| c.id == *id));
@@ -923,6 +974,7 @@ impl DemoView {
         dt: f32,
     ) {
         let (time, life) = (frame.time, frame.life);
+        self.choosing = frame.story.choices.iter().map(|(i, _)| *i).collect();
         let Some(text) = &mut self.text else {
             return;
         };
@@ -1075,6 +1127,22 @@ impl DemoView {
                 (layout(name, BUBBLE_WIDTH), bar)
             })
             .collect();
+        // Conversation choices, numbered for the keys that pick them; the year's ending.
+        let choices: Vec<TextLayout> = frame
+            .story
+            .choices
+            .iter()
+            .enumerate()
+            .map(|(i, (_, key))| {
+                let line = format!("{}  {}", i + 1, self.strings.text(key));
+                layout(&line, view_size.x - 4.0 * WINDOW_MARGIN)
+            })
+            .collect();
+        let ending = frame
+            .story
+            .ending
+            .as_ref()
+            .map(|key| layout(self.strings.text(key), ENDING_WIDTH));
         self.language_shown = (self.language_shown - dt).max(0.0);
         let banner = (self.language_shown > 0.0)
             .then(|| layout(self.strings.text("ui.language"), BUBBLE_WIDTH));
@@ -1155,6 +1223,49 @@ impl DemoView {
                 hostile: false,
             };
             self.bar(view_min + Vec2::new(8.0, 8.0), 80.0, bar, 3e9);
+        }
+        // Choices sit above the dialogue window.
+        if !choices.is_empty() {
+            let height: f32 = choices.iter().map(|c| c.size.y).sum::<f32>() + 2.0 * WINDOW_PAD;
+            let width = view_size.x - 2.0 * WINDOW_MARGIN;
+            let at = view_min
+                + Vec2::new(
+                    WINDOW_MARGIN,
+                    view_size.y - 2.0 * WINDOW_MARGIN - WINDOW_HEIGHT - height,
+                );
+            self.panel(
+                at,
+                Vec2::new(width, height),
+                [0.03, 0.03, 0.07, 0.92],
+                Some(NAME),
+                2.1e9,
+            );
+            let mut pen = at + Vec2::new(WINDOW_PAD, WINDOW_PAD - 2.0);
+            for choice in &choices {
+                self.frame_sprites.extend(TextSystem::sprites(
+                    choice,
+                    texture,
+                    pen,
+                    PAPER,
+                    layer::UI,
+                    2.1e9 + 0.01,
+                ));
+                pen.y += choice.size.y;
+            }
+        }
+        if let Some(ending) = &ending {
+            let pad = Vec2::splat(12.0);
+            let size = ending.size + pad * 2.0;
+            let at = (view_min + (view_size - size) / 2.0).round();
+            self.panel(at, size, [0.02, 0.02, 0.04, 0.94], Some(NAME), 3.5e9);
+            self.frame_sprites.extend(TextSystem::sprites(
+                ending,
+                texture,
+                at + pad,
+                PAPER,
+                layer::UI,
+                3.5e9 + 0.01,
+            ));
         }
         let mut pen = view_min + Vec2::new(view_size.x - 8.0, 24.0);
         for (name, bar) in &party {
@@ -1473,6 +1584,29 @@ impl DemoView {
                 body: true,
             });
         }
+    }
+
+    /// A fade to black and back when the count of fades goes up: a second down, a second dark,
+    /// a second up. What happens in the dark is never shown.
+    fn draw_fade(&mut self, faded: u32, (view_min, view_size): (Vec2, Vec2), dt: f32) {
+        match self.faded {
+            Some(seen) if faded > seen => self.fade_left = 3.0,
+            _ => {}
+        }
+        self.faded = Some(faded);
+        if self.fade_left <= 0.0 {
+            return;
+        }
+        self.fade_left = (self.fade_left - dt).max(0.0);
+        let t = 3.0 - self.fade_left;
+        let alpha = if t < 1.0 {
+            t
+        } else if t < 2.0 {
+            1.0
+        } else {
+            3.0 - t
+        };
+        self.rect(view_min, view_size, [0.0, 0.0, 0.0, alpha], 4e9);
     }
 
     /// A small white burst where each recent hit landed.

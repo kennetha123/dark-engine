@@ -19,6 +19,8 @@ mod maps;
 mod nav;
 mod party;
 mod replication;
+mod save;
+mod story;
 mod talk;
 mod world_sim;
 
@@ -38,8 +40,10 @@ pub use replication::{
     CharacterSnapshot, ClientInputs, INPUT_REDUNDANCY, LocalInput, NetReceive, NetSend,
     ReplicationPlugin, SNAPSHOT_INTERVAL, Snapshot,
 };
+pub use save::{SAVE_VERSION, SavedCharacter, SavedPerson, SavedStructure, WorldSave};
+pub use story::{Conversing, Faded, StoryPlugin, StoryState, StoryView, story_view};
 pub use talk::{LEAVE_RANGE, Npc, SPEECH_TICKS, Speech, TALK_RANGE, TalkPlugin, talk_target};
-pub use world_sim::{WorldSimPlugin, WorldState, WorldStep, load_world};
+pub use world_sim::{WorldSimPlugin, WorldState, WorldStep, load_world, save_now};
 
 pub use maps::{
     BodyState, Exit, Map, MapId, Maps, MapsPlugin, MoveIntent, Physics, PreviousBody, StaysInMap,

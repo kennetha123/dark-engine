@@ -55,6 +55,8 @@ struct Predicted {
     /// Visual offset left over from a correction, decaying to zero so fixes never snap.
     smoothing: Vec2,
     speech: Option<Speech>,
+    /// Gone over to the enemies' side.
+    hostile: bool,
 }
 
 pub struct ClientSession {
@@ -129,6 +131,15 @@ impl ClientSession {
             (Some(s), Some(map)) if s.map == map => &s.structures,
             _ => &[],
         }
+    }
+
+    /// The local player's conversation choices, fades and the year's ending, from the newest
+    /// snapshot.
+    pub fn story(&self) -> crate::StoryView {
+        self.snapshots
+            .back()
+            .map(|s| s.story.clone())
+            .unwrap_or_default()
     }
 
     /// The others in the local player's party, from the newest snapshot.
@@ -247,6 +258,7 @@ impl ClientSession {
                 previous: (own.body.position, own.body.elevation),
                 smoothing: Vec2::ZERO,
                 speech: own.speech,
+                hostile: own.hostile,
             });
             let replay: Vec<TickInput> = self.pending.iter().map(|(_, i)| *i).collect();
             for input in replay {
@@ -289,7 +301,7 @@ impl ClientSession {
             state: me.state,
             you: true,
             npc: false,
-            hostile: false,
+            hostile: me.hostile,
             speech: me.speech.clone(),
         });
 

@@ -109,9 +109,48 @@ impl Society {
         actor: ActorId,
         hour: u32,
     ) -> Result<Vec<WorldEvent>, Refusal> {
+        self.check(world, rules, hero_party, leader, actor)?;
+        let regard = world.regard(actor, leader);
+        let remembered = self
+            .memory
+            .iter()
+            .find(|(m, _)| *m == actor)
+            .map(|(_, l)| *l);
+        let party = match self.index_of(leader) {
+            Some(i) => i,
+            None => {
+                self.parties.push(Party {
+                    leader,
+                    members: vec![leader],
+                    loyalty: Vec::new(),
+                });
+                self.parties.len() - 1
+            }
+        };
+        let p = &mut self.parties[party];
+        p.members.push(actor);
+        let fresh = (rules.loyalty_start + regard / 2).clamp(-1000, 1000);
+        p.loyalty
+            .push((actor, remembered.map_or(fresh, |l| l.min(fresh))));
+        self.memory.retain(|(m, _)| *m != actor);
+        world.sync_parties(&self.parties);
+        Ok(vec![joined(hour, actor, leader)])
+    }
+
+    /// Why NPC `actor` would not follow `leader` now, if it would not.
+    pub(crate) fn check(
+        &self,
+        world: &World,
+        rules: &Social,
+        hero_party: &[ActorId],
+        leader: ActorId,
+        actor: ActorId,
+    ) -> Result<(), Refusal> {
         let (l, a) = (world.get(leader), world.get(actor));
         let unable = !l.alive || l.player.is_none() || !a.alive || a.boss || a.player.is_some();
-        if unable || leader == actor {
+        // The demon army serves its master, not a party (its people make pacts; they do not
+        // travel as companions).
+        if unable || leader == actor || world.is_hostile(a.faction) {
             return Err(Refusal::Unable);
         }
         if self.index_of(actor).is_some() || hero_party.contains(&actor) {
@@ -135,29 +174,16 @@ impl Society {
         if remembered.is_some_and(|l| l < rules.desert_below) {
             return Err(Refusal::Grudge);
         }
-        let party = match self.index_of(leader) {
-            Some(i) if self.parties[i].leader != leader => return Err(Refusal::NotLeader),
-            Some(i) => i,
-            None => {
-                self.parties.push(Party {
-                    leader,
-                    members: vec![leader],
-                    loyalty: Vec::new(),
-                });
-                self.parties.len() - 1
+        if let Some(i) = self.index_of(leader) {
+            let p = &self.parties[i];
+            if p.leader != leader {
+                return Err(Refusal::NotLeader);
             }
-        };
-        let p = &mut self.parties[party];
-        if p.members.len() >= rules.max_party {
-            return Err(Refusal::Full);
+            if p.members.len() >= rules.max_party {
+                return Err(Refusal::Full);
+            }
         }
-        p.members.push(actor);
-        let fresh = (rules.loyalty_start + regard / 2).clamp(-1000, 1000);
-        p.loyalty
-            .push((actor, remembered.map_or(fresh, |l| l.min(fresh))));
-        self.memory.retain(|(m, _)| *m != actor);
-        world.sync_parties(&self.parties);
-        Ok(vec![joined(hour, actor, leader)])
+        Ok(())
     }
 
     /// Players `a` and `b` agree to travel together: into whichever party either leads or is in

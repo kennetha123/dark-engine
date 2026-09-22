@@ -3,8 +3,8 @@
 //!
 //! [`dark_sim::WorldSim`] steps in in-game hours; each tick this catches it up with the clock,
 //! after telling it where players are (their map's region) and so which regions the full
-//! simulation is running. What it reports goes to the log, and the whole world is saved at
-//! each new day when a save file is set.
+//! simulation is running. What it reports goes to the log, and the whole world ([`WorldSave`])
+//! is saved at each new day when a save file is set, and by [`save_now`] when the host quits.
 
 use std::path::{Path, PathBuf};
 
@@ -18,6 +18,7 @@ use dark_time::{ClockEvent, Presence, everyone_asleep};
 
 use crate::characters::{Asleep, CharacterState, PlayerAvatar};
 use crate::life::{NightPass, NightPassed, minute_of};
+use crate::save::{self, WorldSave};
 use crate::{MapId, Maps, NetHost, WorldClock};
 
 /// After physics (players have moved) and before snapshots (they show the new time).
@@ -37,6 +38,8 @@ pub struct WorldState {
     names: Localization,
     /// What happened this tick.
     recent: Vec<WorldEvent>,
+    /// Who hosted the save this world was carried on from (kept for a host with no player).
+    pub(crate) saved_host: Option<dark_net::PlayerId>,
 }
 
 impl WorldState {
@@ -50,24 +53,25 @@ impl WorldState {
     }
 }
 
-/// The world simulation, from the project's `world.ron`, or carried on from `save` if that file
-/// exists. `None` for a project without a world.
+/// The world, from the project's `world.ron`, or carried on from `save` if that file exists.
+/// `None` for a project without a world.
 pub fn load_world(
     project: &Project,
     save: Option<&Path>,
     seed: u64,
-) -> Result<Option<WorldSim>, String> {
+) -> Result<Option<WorldSave>, String> {
     if let Some(save) = save
         && save.exists()
     {
         let text = std::fs::read_to_string(save).map_err(|e| format!("{}: {e}", save.display()))?;
-        let sim = WorldSim::load(&text).map_err(|e| format!("{}: {e}", save.display()))?;
+        let world = WorldSave::parse(&text).map_err(|e| format!("{}: {e}", save.display()))?;
         tracing::info!(
-            "world carried on from {} (day {})",
+            "world carried on from {} (day {}, {} characters)",
             save.display(),
-            sim.day() + 1
+            world.sim.day() + 1,
+            world.characters.len()
         );
-        return Ok(Some(sim));
+        return Ok(Some(world));
     }
     let path = project.path("world.ron");
     if !path.exists() {
@@ -75,13 +79,15 @@ pub fn load_world(
     }
     let def = WorldDef::load(&path).map_err(|e| e.to_string())?;
     WorldSim::new(&def, seed)
-        .map(Some)
+        .map(|sim| Some(WorldSave::new(sim)))
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Runs the world simulation alongside the maps. Needs [`crate::MapsPlugin`] first.
+/// Runs the world simulation alongside the maps, and puts a saved world's characters,
+/// structures and people back. Needs [`crate::MapsPlugin`], [`crate::CharactersPlugin`] and (for
+/// a save that has them) [`crate::TalkPlugin`] and [`crate::LifePlugin`] first.
 pub struct WorldSimPlugin {
-    pub sim: WorldSim,
+    pub world: WorldSave,
     /// Autosave file, written at each new day.
     pub save: Option<PathBuf>,
     pub names: Localization,
@@ -89,13 +95,15 @@ pub struct WorldSimPlugin {
 
 impl Plugin for WorldSimPlugin {
     fn build(self, app: &mut App) {
+        self.world.restore(&mut app.world);
+        let WorldSave { sim, host, .. } = self.world;
         let maps = app.world.resource::<Maps>();
         let regions = maps
             .maps
             .iter()
             .map(|map| {
                 let region = map.def.region.as_deref()?;
-                let id = self.sim.world().region(region);
+                let id = sim.world().region(region);
                 if id.is_none() {
                     tracing::warn!("{}: region {region} is not in the world", map.name);
                 }
@@ -104,17 +112,18 @@ impl Plugin for WorldSimPlugin {
             .collect();
         // A world carried on from a save brings its time with it.
         let mut clock = app.world.resource_mut::<WorldClock>();
-        if self.sim.hour() > clock.0.day() * 24 + clock.0.hour() as u32 {
-            clock.0.set_time(self.sim.day(), self.sim.hour() % 24);
+        if sim.hour() > clock.0.day() * 24 + clock.0.hour() as u32 {
+            clock.0.set_time(sim.day(), sim.hour() % 24);
         }
-        let saved_day = self.sim.day();
+        let saved_day = sim.day();
         app.insert_resource(WorldState {
-            sim: self.sim,
+            sim,
             regions,
             save: self.save,
             saved_day,
             names: self.names,
             recent: Vec::new(),
+            saved_host: host,
         })
         .add_systems(
             FixedUpdate,
@@ -122,6 +131,7 @@ impl Plugin for WorldSimPlugin {
             (
                 sleep_consensus.in_set(NightPass),
                 advance_world.in_set(WorldStep),
+                autosave.in_set(WorldStep),
             )
                 .chain(),
         );
@@ -211,32 +221,36 @@ pub(crate) fn advance_world(
         tracing::info!("world: {}", world.sim.describe(event, &text));
     }
     world.recent = events;
-    if let Some(path) = world.save.clone()
-        && world.sim.day() != world.saved_day
-    {
-        world.saved_day = world.sim.day();
-        let written = world
-            .sim
-            .save()
-            .map_err(std::io::Error::other)
-            .and_then(|text| write_save(&path, &text));
-        match written {
-            Ok(()) => tracing::info!("world saved to {}", path.display()),
-            Err(err) => tracing::error!("cannot save the world to {}: {err}", path.display()),
-        }
+}
+
+/// At each new day, the whole world goes to the save file.
+fn autosave(world: &mut World) {
+    let due = world
+        .get_resource::<WorldState>()
+        .is_some_and(|w| w.save.is_some() && w.sim.day() != w.saved_day);
+    if due {
+        let _ = save_now(world);
     }
 }
 
-/// Writes beside the save first, so a crash mid-write never leaves half a world.
-fn write_save(path: &Path, text: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    let partial = path.with_extension("ron.partial");
-    let mut file = std::fs::File::create(&partial)?;
-    file.write_all(text.as_bytes())?;
-    // On disk before the rename, or a power cut could leave the new name on empty data.
-    file.sync_all()?;
-    drop(file);
-    std::fs::rename(&partial, path)
+/// Saves the whole world to the host's save file now (it quits, say). `None` without a save
+/// file.
+pub fn save_now(world: &mut World) -> Option<Result<PathBuf, String>> {
+    let (path, sim) = {
+        let mut state = world.get_resource_mut::<WorldState>()?;
+        let path = state.save.clone()?;
+        state.saved_day = state.sim.day();
+        (path, state.sim.clone())
+    };
+    let written = WorldSave::gather(world, sim)
+        .to_ron()
+        .map_err(|e| e.to_string())
+        .and_then(|text: String| save::write(&path, &text).map_err(|e| e.to_string()));
+    match &written {
+        Ok(()) => tracing::info!("world saved to {}", path.display()),
+        Err(err) => tracing::error!("cannot save the world to {}: {err}", path.display()),
+    }
+    Some(written.map(|()| path))
 }
 
 #[cfg(test)]
@@ -262,11 +276,15 @@ mod tests {
         let save = dir.join("world.save.ron");
         let _ = std::fs::remove_file(&save);
         let mut fresh = load_world(&project, Some(&save), 1).unwrap().unwrap();
-        assert_eq!(fresh.day(), 0, "no save yet: a new world");
-        fresh.advance_hours(24 * 3);
-        write_save(&save, &fresh.save().unwrap()).unwrap();
+        assert_eq!(fresh.sim.day(), 0, "no save yet: a new world");
+        fresh.sim.advance_hours(24 * 3);
+        save::write(&save, &fresh.to_ron().unwrap()).unwrap();
         let carried = load_world(&project, Some(&save), 99).unwrap().unwrap();
         assert_eq!(carried, fresh, "the save wins over the seed");
+        // A save from before M7 (the world simulation on its own) still loads.
+        save::write(&save, &fresh.sim.save().unwrap()).unwrap();
+        let old = load_world(&project, Some(&save), 99).unwrap().unwrap();
+        assert_eq!(old.sim, fresh.sim);
 
         // The host's clock resumes from the saved world's time.
         let mut app = App::new(dark_core::DEFAULT_TICK_RATE);
@@ -280,7 +298,7 @@ mod tests {
             params: dark_physics::MoveParams::default(),
         });
         app.add_plugin(WorldSimPlugin {
-            sim: carried,
+            world: carried,
             save: None,
             names: Localization::default(),
         });

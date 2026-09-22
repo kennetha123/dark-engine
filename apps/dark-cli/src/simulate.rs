@@ -47,6 +47,13 @@ pub fn run(project: &str, options: &Options) -> Result<(), Box<dyn std::error::E
         return Err(format!("the project has no language {lang:?}").into());
     }
     let text = |key: &str| strings.text(key).to_owned();
+    let story = dark_story::StoryDef::load_or_default(&project.path("story.ron"))?;
+    // Nobody played: the ending as the world alone leaves it.
+    let ending = |sim: &WorldSim| {
+        dark_story::Story::default()
+            .ending(&story, sim)
+            .map(|e| e.id.clone())
+    };
 
     if options.runs == 1 {
         let started = std::time::Instant::now();
@@ -54,6 +61,9 @@ pub fn run(project: &str, options: &Options) -> Result<(), Box<dyn std::error::E
         sim.run_year();
         for event in sim.take_events() {
             println!("{}", sim.describe(&event, &text));
+        }
+        if let Some(id) = ending(&sim) {
+            println!("ending: {id}");
         }
         eprintln!(
             "(seed {}, simulated in {:.0?})",
@@ -70,6 +80,9 @@ pub fn run(project: &str, options: &Options) -> Result<(), Box<dyn std::error::E
         sim.run_year();
         let events = sim.take_events();
         stats.add(&sim, &events);
+        if let Some(id) = ending(&sim) {
+            *stats.endings.entry(id).or_default() += 1;
+        }
     }
     stats.print(options.runs, started.elapsed());
     Ok(())
@@ -84,6 +97,7 @@ struct Stats {
     party_fell: u64,
     encounters: u64,
     retreats: u64,
+    endings: std::collections::BTreeMap<String, u64>,
 }
 
 impl Stats {
@@ -128,5 +142,8 @@ impl Stats {
         println!("boss fights lost:     {:.2} / year", per(self.retreats));
         println!("monster encounters:   {:.1} / year", per(self.encounters));
         println!("party wiped out:      {}/{runs}", self.party_fell);
+        for (id, n) in &self.endings {
+            println!("ending {id:<14} {n}/{runs}");
+        }
     }
 }

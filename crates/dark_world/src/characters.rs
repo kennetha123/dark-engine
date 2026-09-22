@@ -43,6 +43,9 @@ pub struct TickInput {
     pub recruit: bool,
     /// Use what is in hotbar slot `item` (1 to 8); 0 uses nothing.
     pub item: u8,
+    /// In a conversation, answer with the choice whose index (as the snapshot gives it) is
+    /// `choice - 1`; 0 answers nothing.
+    pub choice: u8,
 }
 
 impl TickInput {
@@ -68,6 +71,9 @@ impl TickInput {
         if other.item != 0 {
             self.item = other.item;
         }
+        if other.choice != 0 {
+            self.choice = other.choice;
+        }
     }
 
     /// Takes the latched presses (as an input with only presses set), leaving them clear.
@@ -83,6 +89,7 @@ impl TickInput {
             relieve: std::mem::take(&mut self.relieve),
             recruit: std::mem::take(&mut self.recruit),
             item: std::mem::take(&mut self.item),
+            choice: std::mem::take(&mut self.choice),
         }
     }
 }

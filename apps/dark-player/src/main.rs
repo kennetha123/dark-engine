@@ -17,12 +17,13 @@
 //!   --overlay               start with the collision overlay (F1) on
 //!   --lang <code>           text language, one of the project's (default: its first)
 //!   --save <file>           when hosting: carry the world on from this file, saving at each new day
+//!                           and on quitting (without `--player`, you play the save's host again)
 //!   --world-seed <n>        when hosting: the world simulation's seed (default: a new world)
 //!   --screenshot <png>      save the internal image after `--frames` frames (default 120) and exit;
 //!                           when hosting, frames then advance a fixed 1/60 s so the result is
 //!                           reproducible (a joined client keeps real time, like its host)
 //! Controls: WASD / arrows to walk, Shift to run, Space to jump, J to attack (again to combo),
-//! K to dodge, E to talk, Z to sleep (when every player online sleeps, the night passes), F1 for
+//! K to dodge, E to talk (number keys answer when a conversation offers choices), Z to sleep (when every player online sleeps, the night passes), F1 for
 //! the collision overlay, F2 to switch language.
 //! `--clients` passes `--project`, `--scene`, `--net-sim`, `--lang` and `--autopilot` on to the clients.
 
@@ -263,6 +264,17 @@ fn autopilot(from: u64, to: u64) -> TickInput {
     }
 }
 
+impl Player {
+    /// A number key: answers a conversation while choices show, else uses the hotbar.
+    fn number(&mut self, n: u8) {
+        match self.view.as_ref().and_then(|v| v.choice_for(n)) {
+            // A key past the last choice does nothing while choosing.
+            Some(choice) => self.presses.choice = choice.unwrap_or(0),
+            None => self.presses.item = n,
+        }
+    }
+}
+
 impl Game for Player {
     fn init(&mut self, window: Arc<Window>) {
         let mut renderer = match Renderer::new(window, self.internal_size) {
@@ -312,14 +324,14 @@ impl Game for Player {
                 KeyCode::KeyZ => self.presses.sleep = true,
                 KeyCode::KeyR => self.presses.relieve = true,
                 KeyCode::KeyQ => self.presses.recruit = true,
-                KeyCode::Digit1 => self.presses.item = 1,
-                KeyCode::Digit2 => self.presses.item = 2,
-                KeyCode::Digit3 => self.presses.item = 3,
-                KeyCode::Digit4 => self.presses.item = 4,
-                KeyCode::Digit5 => self.presses.item = 5,
-                KeyCode::Digit6 => self.presses.item = 6,
-                KeyCode::Digit7 => self.presses.item = 7,
-                KeyCode::Digit8 => self.presses.item = 8,
+                KeyCode::Digit1 => self.number(1),
+                KeyCode::Digit2 => self.number(2),
+                KeyCode::Digit3 => self.number(3),
+                KeyCode::Digit4 => self.number(4),
+                KeyCode::Digit5 => self.number(5),
+                KeyCode::Digit6 => self.number(6),
+                KeyCode::Digit7 => self.number(7),
+                KeyCode::Digit8 => self.number(8),
                 KeyCode::F2 => {
                     if let Some(view) = &mut self.view {
                         view.cycle_language();
@@ -417,7 +429,7 @@ impl Game for Player {
         self.seen = match (&mut self.mode, &mut self.view) {
             (Mode::Host(app), Some(view)) => match host_characters(app) {
                 Some((map, characters)) => {
-                    let (life, structures, party) = host_life(app, map);
+                    let (life, structures, party, story) = host_life(app, map);
                     let clock = &app.world.resource::<WorldClock>().0;
                     let frame = Frame {
                         maps: app.world.resource::<dark_world::Maps>(),
@@ -427,6 +439,7 @@ impl Game for Player {
                         life: life.as_ref(),
                         structures: &structures,
                         party: &party,
+                        story: &story,
                     };
                     view.draw(renderer, &frame, secs);
                     characters
@@ -439,6 +452,7 @@ impl Game for Player {
             (Mode::Join(session), Some(view)) => match session.map() {
                 Some(map) => {
                     let characters = session.characters();
+                    let story = session.story();
                     let frame = Frame {
                         maps: session.maps(),
                         map,
@@ -447,6 +461,7 @@ impl Game for Player {
                         life: session.life(),
                         structures: session.structures(),
                         party: session.party(),
+                        story: &story,
                     };
                     view.draw(renderer, &frame, secs);
                     characters
@@ -493,7 +508,11 @@ impl Game for Player {
     fn exiting(&mut self) {
         match &mut self.mode {
             // The host leaving ends the session; tell remote players now instead of letting them time out.
-            Mode::Host(app) => app.world.resource_mut::<NetHost>().0.shutdown(),
+            Mode::Host(app) => {
+                // A world with a save file keeps everything played until now.
+                let _ = dark_world::save_now(&mut app.world);
+                app.world.resource_mut::<NetHost>().0.shutdown();
+            }
             Mode::Join(session) => {
                 let net = session.net_mut();
                 net.quit();
@@ -528,6 +547,8 @@ enum Launch {
 struct Args {
     launch: Launch,
     player: PlayerId,
+    /// `--player` was given (else a save's host plays on as themselves).
+    player_given: bool,
     clock: ClockConfig,
     project: Option<PathBuf>,
     scene: String,
@@ -549,6 +570,7 @@ fn parse_args() -> Result<Args, String> {
     let mut args = Args {
         launch: Launch::SinglePlayer,
         player: PlayerId::random(),
+        player_given: false,
         clock: ClockConfig {
             tick_rate: DEFAULT_TICK_RATE,
             ..ClockConfig::default()
@@ -598,7 +620,10 @@ fn parse_args() -> Result<Args, String> {
         match arg.as_str() {
             "--host" => args.launch = Launch::Host(value.parse().map_err(|_| bad("a port"))?),
             "--join" => args.launch = Launch::Join(value.parse().map_err(|_| bad("ip:port"))?),
-            "--player" => args.player = PlayerId(value.parse().map_err(|_| bad("a uuid"))?),
+            "--player" => {
+                args.player = PlayerId(value.parse().map_err(|_| bad("a uuid"))?);
+                args.player_given = true;
+            }
             "--day-secs" => {
                 args.clock.day_length_secs = value
                     .parse()
@@ -764,7 +789,36 @@ fn main() -> ExitCode {
             if let Some(addr) = host.udp_addr() {
                 tracing::info!("hosting co-op on {addr}");
             }
-            host.connect_local(args.player);
+            // The world (and whose save it is) comes first: without `--player`, the one who
+            // hosted a save plays their own character again.
+            let world = match (&project, &scene) {
+                (Some(project), Some(_)) => {
+                    // Screenshots and the autopilot need the same world every run.
+                    let seed = args.world_seed.unwrap_or_else(|| {
+                        if args.screenshot.is_some() {
+                            1
+                        } else {
+                            time_seed()
+                        }
+                    });
+                    match load_world(project, args.save.as_deref(), seed) {
+                        Ok(world) => world,
+                        Err(err) => {
+                            tracing::error!("cannot load the world: {err}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
+                _ => None,
+            };
+            let player = match (&world, args.player_given) {
+                (Some(saved), false) => saved.host.unwrap_or(args.player),
+                _ => args.player,
+            };
+            if player != args.player {
+                tracing::info!("player id {player} (who hosted this save)");
+            }
+            host.connect_local(player);
             let mut app = App::new(DEFAULT_TICK_RATE);
             app.add_plugin(HostPlugin {
                 host,
@@ -772,29 +826,15 @@ fn main() -> ExitCode {
             });
             if let (Some(scene), Some(project)) = (&mut scene, &project) {
                 scene.install_host(&mut app);
-                // Screenshots and the autopilot need the same world every run.
-                let seed = args.world_seed.unwrap_or_else(|| {
-                    if args.screenshot.is_some() {
-                        1
-                    } else {
-                        time_seed()
-                    }
-                });
-                match load_world(project, args.save.as_deref(), seed) {
-                    Ok(Some(sim)) => {
-                        let names = Localization::load(project).unwrap_or_default();
-                        app.add_plugin(WorldSimPlugin {
-                            sim,
-                            save: args.save.clone(),
-                            names,
-                        })
-                        .add_plugin(dark_world::PartyPlugin);
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        tracing::error!("cannot load the world: {err}");
-                        return ExitCode::FAILURE;
-                    }
+                if let Some(world) = world {
+                    let names = Localization::load(project).unwrap_or_default();
+                    app.add_plugin(WorldSimPlugin {
+                        world,
+                        save: args.save.clone(),
+                        names,
+                    })
+                    .add_plugin(dark_world::PartyPlugin)
+                    .add_plugin(dark_world::StoryPlugin(scene.story_def()));
                 }
             }
             if let Launch::Host(port) = args.launch {

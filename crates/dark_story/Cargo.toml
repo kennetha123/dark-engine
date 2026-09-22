@@ -1,5 +1,5 @@
 [package]
-name = "dark-cli"
+name = "dark_story"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,9 +10,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-dark_assets.workspace = true
 dark_sim.workspace = true
-dark_story.workspace = true
-dark_spine.workspace = true
-glam.workspace = true
-image.workspace = true
+ron.workspace = true
+serde.workspace = true
+thiserror.workspace = true

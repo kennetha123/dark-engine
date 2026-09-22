@@ -94,10 +94,17 @@ fn main() -> ExitCode {
                     message: e.to_string(),
                 }
             })?;
-            Ok((p, maps, sheets, names, combat, life))
+            let story_path = p.path("story.ron");
+            let story = dark_story::StoryDef::load_or_default(&story_path).map_err(|e| {
+                dark_assets::AssetError::Invalid {
+                    path: story_path,
+                    message: e.to_string(),
+                }
+            })?;
+            Ok((p, maps, sheets, names, combat, life, story))
         });
         match world {
-            Ok((project, maps, sheets, names, combat, life)) => {
+            Ok((project, maps, sheets, names, combat, life, story)) => {
                 tracing::info!("hosting {} maps from {scene}", maps.maps.len());
                 app.add_plugin(MapsPlugin(maps))
                     .add_plugin(CharactersPlugin(sheets))
@@ -109,8 +116,13 @@ fn main() -> ExitCode {
                 match load_world(&project, save.as_deref(), seed) {
                     Ok(Some(sim)) => {
                         tracing::info!("world simulation running (seed {seed})");
-                        app.add_plugin(WorldSimPlugin { sim, save, names })
-                            .add_plugin(PartyPlugin);
+                        app.add_plugin(WorldSimPlugin {
+                            world: sim,
+                            save,
+                            names,
+                        })
+                        .add_plugin(PartyPlugin)
+                        .add_plugin(dark_world::StoryPlugin(story));
                     }
                     Ok(None) => tracing::info!("the project has no world.ron; no world simulation"),
                     Err(err) => {
@@ -126,13 +138,25 @@ fn main() -> ExitCode {
         }
     }
 
+    // Ctrl+C: save the world and close every connection before going.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopping = stop.clone();
+    if let Err(err) = ctrlc::set_handler(move || {
+        stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+    }) {
+        tracing::warn!("cannot catch Ctrl+C ({err}); the world saves only at each new day");
+    }
     let mut last = Instant::now();
-    loop {
+    while !stop.load(std::sync::atomic::Ordering::SeqCst) {
         let now = Instant::now();
         app.update(now - last);
         last = now;
         std::thread::sleep(Duration::from_millis(1));
     }
+    tracing::info!("stopping");
+    let _ = dark_world::save_now(&mut app.world);
+    app.world.resource_mut::<dark_world::NetHost>().0.shutdown();
+    ExitCode::SUCCESS
 }
 
 /// A fresh world each session unless `--world-seed` pins one.

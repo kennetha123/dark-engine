@@ -720,6 +720,28 @@ impl Renderer {
                 &sil.silhouette_mesh_pipeline,
             );
         }
+        // The interface last: nothing shows through it.
+        if !frame_batches.overlay.is_empty() {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("interface"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.target_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            self.draw_mixed(
+                &mut pass,
+                &frame_batches.overlay,
+                &self.main_pipeline,
+                &self.mesh_pipeline,
+            );
+        }
 
         let frame = self.acquire();
         if let Some((frame, _)) = &frame {

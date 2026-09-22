@@ -19,7 +19,8 @@ serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-# The project smoke test also checks the game's world.ron, combat.ron and life.ron.
+# The project smoke test also checks the game's world.ron, combat.ron, life.ron and story.ron.
 dark_sim.workspace = true
 dark_combat.workspace = true
 dark_life.workspace = true
+dark_story.workspace = true

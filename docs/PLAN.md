@@ -28,7 +28,7 @@ First game: 4-player co-op, low-fantasy life-sim action RPG on a 365-day clock.
 ## 2. Architecture rules (enforced)
 
 1. **Simulation never depends on presentation.** Sim crates (`dark_core`, `dark_time`, `dark_net`, `dark_world`,
-   `dark_sprite`, `dark_assets`, `dark_physics`, `dark_sim`, `dark_combat`, `dark_life`, and later `dark_ai`) must not depend on `winit`, `wgpu`,
+   `dark_sprite`, `dark_assets`, `dark_physics`, `dark_sim`, `dark_combat`, `dark_life`, `dark_story`, and later `dark_ai`) must not depend on `winit`, `wgpu`,
    FMOD or Spine. CI checks this with `tools/check-sim-deps.sh`.
 2. **Everything goes through the network path.** No separate single-player code path; loopback transport.
 3. **Fixed timestep simulation (60 Hz).** Rendering interpolates. Gameplay code never reads frame delta.
@@ -194,7 +194,7 @@ docs/            this plan
 | M4 ✅ | Combat slice | Combos, dodge, hitstop, 2 enemies with AI, FMOD, replicated (done; see §13) |
 | M5 ✅ | Actors, roles, parties, life sim | Mixed parties, betrayal, factions, needs, temperature, tents, intoxication (done; see §14, §15) |
 | M6 ✅ | Spine | Rendering + baked hitboxes (done; see §16) |
-| M7 | Narrative + save | Storylets, dialogue, relationships/marriage, endings, full world save |
+| M7 ✅ | Narrative + save | Storylets, dialogue, relationships/marriage, endings, full world save (done; see §17) |
 | M8 | Editor MVP | Maps + height, database, roles/factions, calendar, storylets, hitbox/enemy editors, multi-client playtest, manual slice overrides |
 | M9 | Polish + ship | Steam lobby/relay, lighting, particles, Luau, localization, export |
 
@@ -338,14 +338,13 @@ docs/            this plan
   moving gets up; when every online player sleeps (offline counts as asleep, grace as awake) the
   clock skips to morning, everyone wakes and the world simulation runs the skipped hours.
   `--save <file>` carries a world on from that file (the clock resumes at its time) and autosaves
-  at each new day (world simulation only; characters and maps join the save in M7).
+  at each new day (since M7 the whole world, §17).
 - Fast-forward: `dark-cli simulate <project> [--seed n] [--runs n] [--lang code]` prints a year's
   chronicle, or statistics over many seeds (500 years in about a second). Adventurer is tuned so
   the hero party alone defeats the Demon Lord in about two years of three, around day 300.
 - Known gaps: one directed party (other actors wait at home; no demon army raids, no NPC needs or
-  schedules — those are M5's `dark_life`); map NPCs (Borin) are not world actors yet; players
-  cannot yet accept an invitation or kill anyone in play (the API exists: `join_hero_party`,
-  `kill`), which needs M4 combat and M7 storylets; the clock does not pause in single-player
+  schedules — those are M5's `dark_life`); players cannot kill people of the world in play yet
+  (only monsters; the API exists: `kill`); the clock does not pause in single-player
   (no pause menu yet). Sleeping works anywhere; tents and inns (§14) only make it warmer, more
   restful and, at an inn, safe.
 
@@ -443,9 +442,8 @@ docs/            this plan
 - Scattered props now also keep 12 px out of hand-placed props' footprints (a house).
 - Known gaps: NPCs have no bodies or schedules yet (the model is shared, only players get one);
   no weather or seasons (climate by hour only); no social reaction to soiling or drunkenness;
-  items cannot be found, bought, dropped or given; no interiors; tents are not replicated to
-  other maps' players or saved (M7 saves characters and maps); relieving yourself anywhere is
-  fine; a new day's autosave does not carry bodies.
+  items cannot be found, bought or dropped (storylets can give them); no interiors; relieving
+  yourself anywhere is fine.
 
 ## 15. Factions, parties and loyalty (as built in M5)
 
@@ -488,12 +486,11 @@ docs/            this plan
   those in the map, top right, with health bars. `--autopilot-party` asks Borin along and fights.
 - Adventurer: Borin (kingdom, follows a newcomer) and Brother Oswin (church, `trust: 60`: about a
   dozen monsters slain first) stand in the meadow.
-- Known gaps: no PvP, so players cannot attack each other or their followers (betrayal by a
-  player is the world API only: `betray`, `defect`); no way to defect in play yet (M7 storylets);
+- Known gaps: a player betrays a party only by defecting (§17: then they are on the enemies'
+  side and can fight their old friends); the world API `betray` has no way in play;
   map NPCs do not walk home when sent away, have no schedules, and are not moved by the world
   simulation (one recruited by the hero party off-screen still stands in the meadow); standing is
-  not shown; followers do not share the leader's needs (NPCs have no bodies yet); invitations to
-  players from the hero party still wait for M7's storylets; kills by followers or other players
+  not shown; followers do not share the leader's needs (NPCs have no bodies yet); kills by followers or other players
   earn their followers nothing; a save from before M5 loads with every standing at 0 and default
   `social` numbers.
 
@@ -541,3 +538,58 @@ docs/            this plan
   death animation for the goblin (it holds its hit pose while it fades); binary `.skel` exports
   are not read yet (JSON only); a skeleton's root is taken as its feet (the goblin's stand a few
   pixels lower); the goblin has no bounding boxes, so its hits use its moveset's circle.
+
+## 17. Save, storylets and endings (as built in M7)
+
+- The whole world is saved (`dark_world::WorldSave`, one RON file, version 1): the world
+  simulation (clock, actors, titles, standing, parties), every player's character (map by scene
+  name, position, facing, health, body and pack), the structures set down, where the world's
+  people stand, the story's state, and who hosted. Enemies return to their posts; fights and
+  speech in progress are not kept. It is written at each new day and when the host quits (the
+  player's window closing; Ctrl+C on `dark-host`), through a partial file renamed into place.
+  Loading puts every character back asleep where it was, to wake when its player joins; the
+  one who hosted plays their own character again unless `--player` says otherwise. A save from
+  before M7 (the world simulation alone) still loads.
+- `dark_story` (sim crate): the project's `story.ron`. A storylet is a conversation with one
+  person of the world (`with`), offered while its conditions hold, told always, daily or once;
+  when several are open the highest `priority` is told; it counts as told once the player
+  answers or hears it out, so walking away loses nothing. Nodes are lines the person says, each
+  with choices the player may answer with (themselves conditional); a node without choices ends
+  the conversation. Conditions: standing, titles, the day, who lives, flags, the person's
+  affinity, marriage (the player's and the person's), whether the person follows or would,
+  the hero party, the player's faction, the goal's fate, `Not`.
+  Effects: flags, standing, affinity, follow, join the hero party, defect, marry, fade to black,
+  give items. `Story` (flags per player, affinity per person and player, marriages, what was
+  told when) is plain data changed only by choices, saved with the world.
+- Relationships: affinity (−1000 to 1000) is how a person feels about a player; storylets raise
+  and test it. Marriage joins two unmarried actors; the intimate scene is a fade to black, never
+  shown.
+- In play (`dark_world::StoryPlugin`): interact near a person with a storylet open for you and
+  they tell it instead of their plain lines. Their line stays up in your dialogue window; the
+  choices open to you now come in your snapshots only and show numbered above it; a number key
+  answers (while choices show, number keys answer instead of using the hotbar; the input names
+  the node's own choice index, so a list that changed meanwhile never picks the wrong one). Your
+  line shows, then theirs. Walking away ends it; on the last line interact does (and that press
+  starts nothing else). One conversation per person at a time: another player waits. Nobody
+  asleep, out cold or dead starts one; the person turns to the speaker. Deeds the game carries out: the fade (counted per player,
+  replicated), items into the pack, and sides: a player who serves a hostile faction is on the
+  enemies' side (they can fight their old friends and be fought; enemies leave them be), kept in
+  step with the world every tick, a saved defector included. The demon army's people make pacts
+  but follow nobody, a follower never fights its own leader, and killing a player earns no
+  standing.
+- Endings: when the year is over, the story's endings are tried in order (player conditions hold
+  if any player meets them); the first that holds is shown to everyone as a card. `dark-cli
+  simulate` prints each year's ending and tallies them.
+- The renderer draws interface layers (`layer::UI` and up) in a pass after silhouettes, so none
+  shows through a window or bubble.
+- Adventurer: Borin warms to you day by day, grows fond, courts and proposes (a wedding night at
+  the inn, faded to black), and greets you as your spouse after; Brother Oswin calls a player the
+  church trusts to the Hero's side; Tessa in the grove, a cultist in secret, offers the Demon
+  Lord's pact. Five endings: the dark pact, the player as Hero, the hero party's victory, a
+  married life, darkness.
+- Known gaps: conversations are one person and one player at a time (another player waits);
+  storylets are not predicted (a round trip before the line shows); no gifts, jealousy or
+  divorce; affinity is not shown; endings are one card, not a sequence; people do not keep their
+  day's routine between saves (they have none yet); a save written mid-conversation loses it;
+  a save carries its world as it was, so actors added to `world.ron` later are not in it (start
+  a new world to meet them); the save is written inside a tick (a short hitch once a day).

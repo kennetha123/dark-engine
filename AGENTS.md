@@ -40,13 +40,15 @@ cargo run -p dark-player -- --project ../adventurer --host 7777 --clients 1 --ne
 ```
 `--day-secs <n>` shortens the day for testing; `--player <uuid>` keeps a stable identity.
 In the game: WASD/arrows walk, Shift runs, Space jumps, J attacks (again to combo), K dodges,
-E talks to an NPC in reach (or packs up your tent), Z sleeps (when every player online sleeps,
+E talks to an NPC in reach (number keys answer when a conversation offers choices; on its last
+line E ends it; walking away ends it any time) or packs up your tent, Z sleeps (when every player online sleeps,
 the night passes), 1–8 use the hotbar (food, drink, the cloak on or off, tent, firewood, charm,
 soap), R relieves yourself, Q asks whoever is in reach to join you (again near your follower sends
 it away; with nobody near you leave your party), F1
 toggles the collision overlay (`--overlay` starts with it on), F2 switches language (`--lang ja`
-starts in Japanese). Hosts take `--save <file>` (carry the world on, autosave each new day) and
-`--world-seed <n>`.
+starts in Japanese). Hosts take `--save <file>` (carry the whole world on; it is saved at each new
+day and on quitting, Ctrl+C for `dark-host`; without `--player` the save's host plays on as
+themselves) and `--world-seed <n>`. The story is the project's `story.ron`.
 
 The world simulation, fast-forwarded:
 ```

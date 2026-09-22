@@ -256,6 +256,11 @@ impl WorldSim {
         self.events.extend(buried);
     }
 
+    /// `actor`'s standing with `faction` moves by `by` (a story choice, say).
+    pub fn adjust_standing(&mut self, actor: ActorId, faction: FactionId, by: i32) {
+        self.world.adjust_standing(actor, faction, by);
+    }
+
     /// `actor` slew one of the hostile side (a monster in play, say): every friendly faction
     /// thinks better of them.
     pub fn slain_enemy(&mut self, actor: ActorId) {
@@ -280,6 +285,17 @@ impl WorldSim {
         )?;
         self.events.extend(events);
         Ok(())
+    }
+
+    /// Why `actor` would not follow `leader` if asked now (`Ok` if it would).
+    pub fn would_follow(&self, leader: ActorId, actor: ActorId) -> Result<(), Refusal> {
+        self.society.check(
+            &self.world,
+            &self.social,
+            &self.party.members,
+            leader,
+            actor,
+        )
     }
 
     /// Players `a` and `b` both agreed to travel together.

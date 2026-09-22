@@ -72,8 +72,11 @@ type Target = (
     Has<crate::Asleep>,
 );
 
-/// Players and those who fight at their side.
-type Targetable = Or<(With<PlayerAvatar>, With<crate::Companion>)>;
+/// Players and those who fight at their side (not a player gone over to the enemy).
+type Targetable = (
+    Or<(With<PlayerAvatar>, With<crate::Companion>)>,
+    Without<Hostile>,
+);
 
 type Mindful = (
     Entity,

@@ -138,6 +138,11 @@ fn every_line_and_name_has_text_in_every_language_and_faces_and_font_load() {
     ] {
         keys.push(key.to_owned());
     }
+    // The story: it validates, every storylet is with a person of the world, and every line,
+    // choice and ending has text.
+    let story = dark_story::StoryDef::load_or_default(&project.path("story.ron"))
+        .unwrap_or_else(|e| panic!("{e}"));
+    keys.extend(story.keys());
     // Audio: the banks the project names are there.
     if let Some(audio) = &project.settings.audio {
         for bank in &audio.banks {
@@ -154,6 +159,14 @@ fn every_line_and_name_has_text_in_every_language_and_faces_and_font_load() {
         keys.extend(world.factions.iter().map(|f| f.name.clone()));
         keys.extend(world.titles.iter().map(|t| t.name.clone()));
         keys.extend(world.actors.iter().map(|a| a.name.clone()));
+        for storylet in &story.storylets {
+            assert!(
+                world.actor(&storylet.with).is_some(),
+                "story.ron: {} is with unknown actor {}",
+                storylet.id,
+                storylet.with
+            );
+        }
         for region in life.climates.keys() {
             assert!(
                 world.region(region).is_some(),

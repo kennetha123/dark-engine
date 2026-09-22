@@ -78,6 +78,18 @@ fn project_with(enemies: &str) -> Project {
 }
 
 /// Ale (slot 1), a tent (2) and firewood (3).
+/// The hermit (at 300,250) has a storylet: a gift, a wedding, or a pact with the demons.
+const TEST_STORY: &str = r#"(
+    storylets: [(id: "hermit", with: "hermit", start: "hello", nodes: {
+        "hello": (line: "hm.hello", choices: [
+            (says: "hm.gift", then: [Give(item: "ale", count: 2)], next: "thanks"),
+            (says: "hm.wed", when: [Unmarried], then: [Marry, FadeToBlack]),
+            (says: "hm.dark", then: [Defect("demons")]),
+        ]),
+        "thanks": (line: "hm.thanks"),
+    })],
+)"#;
+
 const TEST_LIFE: &str = r#"(
     items: {
         "ale": (name: "item.ale", use: Consume((thirst: -100, bladder: 150, alcohol: 1000))),
@@ -165,6 +177,17 @@ impl Net {
     }
 
     fn with_project(players: usize, conditions: Option<NetConditions>, project: Project) -> Self {
+        let ids = (0..players).map(|_| PlayerId::random()).collect();
+        Self::with_world(ids, conditions, project, None)
+    }
+
+    /// A host on `project`'s world, or on `saved` when given, and a client for each of `players`.
+    fn with_world(
+        players: Vec<PlayerId>,
+        conditions: Option<NetConditions>,
+        project: Project,
+        saved: Option<crate::WorldSave>,
+    ) -> Self {
         let host = Host::new(HostConfig {
             bind: Some("127.0.0.1:0".parse().unwrap()),
         })
@@ -183,18 +206,24 @@ impl Net {
         .add_plugin(crate::LifePlugin(
             dark_life::LifeDef::parse(TEST_LIFE).unwrap(),
         ));
-        let sim = crate::load_world(&project, None, 1)
-            .unwrap()
-            .expect("the test project has a world");
+        let world = saved.unwrap_or_else(|| {
+            crate::load_world(&project, None, 1)
+                .unwrap()
+                .expect("the test project has a world")
+        });
         app.add_plugin(crate::WorldSimPlugin {
-            sim,
+            world,
             save: None,
             names: dark_assets::Localization::default(),
         })
-        .add_plugin(crate::PartyPlugin);
-        let clients = (0..players)
-            .map(|_| {
-                let mut net = RemoteClient::connect(addr, PlayerId::random()).unwrap();
+        .add_plugin(crate::PartyPlugin)
+        .add_plugin(crate::StoryPlugin(
+            dark_story::StoryDef::parse(TEST_STORY).unwrap(),
+        ));
+        let clients = players
+            .into_iter()
+            .map(|player| {
+                let mut net = RemoteClient::connect(addr, player).unwrap();
                 net.set_conditions(conditions);
                 ClientSession::new(net, maps(&project), looks(&project))
             })
@@ -466,6 +495,7 @@ fn hostile_input_messages_are_ignored() {
         relieve: true,
         recruit: true,
         item: 200,
+        choice: 250,
     };
     let hostile = [
         ClientInputs {
@@ -1135,4 +1165,136 @@ fn slaying_a_monster_earns_the_player_standing() {
         .map(|i| dark_sim::ActorId(i as u16))
         .unwrap();
     assert_eq!(w.sim.world().standing(actor, kingdom), 505);
+}
+
+#[test]
+fn a_saved_world_brings_back_characters_bodies_packs_tents_and_people() {
+    let project = project();
+    let player = PlayerId::random();
+    let mut net = Net::with_world(vec![player], None, project.clone(), None);
+    net.connect();
+    walk_to_the_squire(&mut net);
+    // Hungry, a tent pitched, the squire asked along; then east a way, where he follows.
+    let id = net.me(0).id;
+    net.host_life(id).body.set_need(Need::Hunger, 640);
+    net.press(TickInput {
+        item: 2,
+        ..TickInput::default()
+    });
+    net.press(TickInput {
+        recruit: true,
+        ..TickInput::default()
+    });
+    net.run(90, &[Vec2::X]);
+    net.run(60, &[Vec2::ZERO]);
+    let (at, health) = (net.me(0).body.position, net.me(0).state.fighter.health);
+    let squire_at = squire(&net).ground;
+
+    let sim = world(&mut net).sim.clone();
+    let saved = crate::WorldSave::gather(&mut net.host.world, sim);
+    let text = saved.to_ron().unwrap();
+    let saved = crate::WorldSave::parse(&text).unwrap();
+    assert_eq!(saved.characters.len(), 1);
+    assert_eq!(saved.structures.len(), 1);
+    drop(net);
+
+    // A new host carries the world on; the same player comes back to the same character.
+    let mut net = Net::with_world(vec![player], None, project, Some(saved));
+    net.connect();
+    net.run(10, &[Vec2::ZERO]);
+    let me = net.me(0);
+    assert!(
+        me.body.position.distance(at) < 0.01,
+        "{} vs {at}",
+        me.body.position
+    );
+    assert_eq!(me.state.fighter.health, health);
+    let life = net.clients[0].life().unwrap().clone();
+    assert!(life.needs[0] >= 640, "still hungry: {:?}", life.needs);
+    assert_eq!(life.slots[1], ("tent".to_owned(), 0));
+    assert_eq!(
+        net.clients[0].structures().len(),
+        1,
+        "the tent still stands"
+    );
+    // The squire is where he was, and follows her again.
+    assert!(squire(&net).ground.distance(squire_at) < 20.0);
+    assert_eq!(net.clients[0].party(), [SQUIRE]);
+}
+
+/// Client 0 walks from the spawn to the hermit at (300, 250).
+fn walk_to_the_hermit(net: &mut Net) {
+    let to = (Vec2::new(300.0, 236.0) - Vec2::new(100.0, 100.0)).normalize();
+    net.run(185, &[to]);
+    net.run(10, &[Vec2::ZERO]);
+}
+
+fn said(net: &Net, pred: impl Fn(&crate::DrawCharacter) -> bool) -> Option<String> {
+    net.clients[0]
+        .characters()
+        .into_iter()
+        .find(|c| pred(c))
+        .and_then(|c| c.speech)
+        .map(|s| s.line)
+}
+
+#[test]
+fn a_storylet_offers_choices_and_what_is_chosen_happens() {
+    let mut net = Net::new(1, None);
+    net.connect();
+    walk_to_the_hermit(&mut net);
+    let press = |net: &mut Net, input: TickInput| net.press(input);
+    let talk = TickInput {
+        interact: true,
+        ..TickInput::default()
+    };
+    let choose = |n: u8| TickInput {
+        choice: n,
+        ..TickInput::default()
+    };
+    let hermit = |c: &crate::DrawCharacter| c.npc && c.id != SQUIRE;
+    press(&mut net, talk);
+    assert_eq!(said(&net, hermit).as_deref(), Some("hm.hello"));
+    let says = |net: &Net| -> Vec<String> {
+        net.clients[0]
+            .story()
+            .choices
+            .into_iter()
+            .map(|(_, s)| s)
+            .collect()
+    };
+    assert_eq!(says(&net), ["hm.gift", "hm.wed", "hm.dark"]);
+    // A gift: she thanks him for it, he thanks her back; two more ales in the pack.
+    press(&mut net, choose(1));
+    assert_eq!(said(&net, |c| c.you).as_deref(), Some("hm.gift"));
+    assert!(
+        net.clients[0].story().choices.is_empty(),
+        "no choosing while answering"
+    );
+    net.run(100, &[Vec2::ZERO]);
+    assert_eq!(said(&net, hermit).as_deref(), Some("hm.thanks"));
+    assert_eq!(
+        net.clients[0].life().unwrap().slots[0],
+        ("ale".to_owned(), 7)
+    );
+    // The last line: interact ends it (without plain talk), and again starts it over.
+    press(&mut net, talk);
+    assert_eq!(
+        said(&net, hermit),
+        None,
+        "heard out; he does not start on his plain lines"
+    );
+    press(&mut net, talk);
+    assert_eq!(said(&net, hermit).as_deref(), Some("hm.hello"));
+    // A wedding: the screen fades, and the choice is gone once married.
+    press(&mut net, choose(2));
+    net.run(100, &[Vec2::ZERO]);
+    assert_eq!(net.clients[0].story().faded, 1);
+    press(&mut net, talk);
+    assert_eq!(says(&net), ["hm.gift", "hm.dark"]);
+    // Choices are sent by the node's own index: the pact is still the third.
+    assert_eq!(net.clients[0].story().choices[1].0, 2);
+    press(&mut net, choose(3));
+    net.run(10, &[Vec2::ZERO]);
+    assert!(net.me(0).hostile, "gone over to the enemy");
 }
