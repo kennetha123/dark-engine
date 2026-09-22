@@ -19,7 +19,7 @@ use crate::characters::{Asleep, CharacterState, Control, ControlInput, NetId, Pl
 use crate::combat::Hostile;
 use crate::life::Life;
 use crate::party::Person;
-use crate::talk::{LEAVE_RANGE, Npc, Speech, talk_target};
+use crate::talk::{HELD_TICKS, LEAVE_RANGE, Npc, Speech, talk_target};
 use crate::world_sim::{WorldState, advance_world};
 use crate::{BodyState, MapId, WorldStep};
 
@@ -133,6 +133,7 @@ fn converse(
     people: Query<Listener, With<Npc>>,
     mut facings: Query<&mut CharacterState, (With<Npc>, Without<PlayerAvatar>)>,
     speeches: Query<&Speech>,
+    npcs: Query<&Npc>,
     mut lives: Query<&mut Life>,
     mut faded: Query<&mut Faded>,
 ) {
@@ -174,7 +175,13 @@ fn converse(
             match next.take() {
                 Some(next) => {
                     let view = state.story.view(&state.def, &world.sim, &next);
-                    say(&mut commands, talk.person, &view.line, *player_id, u32::MAX);
+                    say(
+                        &mut commands,
+                        talk.person,
+                        &view.line,
+                        *player_id,
+                        HELD_TICKS,
+                    );
                     talk.conversation = next;
                     talk.answering = None;
                 }
@@ -250,8 +257,13 @@ fn converse(
         let Ok((person_entity, .., who)) = people.get(target) else {
             continue;
         };
-        // One conversation at a time: another player waits their turn.
-        if state.talks.iter().any(|t| t.person == person_entity) {
+        // One conversation at a time, a storylet or plain talk: another player waits their turn.
+        let plain = npcs
+            .get(person_entity)
+            .ok()
+            .and_then(Npc::talking_with)
+            .is_some_and(|with| with != *id);
+        if plain || state.talks.iter().any(|t| t.person == person_entity) {
             continue;
         }
         let Some(person) = world.sim.world().actor(&who.0) else {
@@ -266,7 +278,7 @@ fn converse(
             .entity(entity)
             .insert(Conversing)
             .remove::<Speech>();
-        say(&mut commands, person_entity, &view.line, *id, u32::MAX);
+        say(&mut commands, person_entity, &view.line, *id, HELD_TICKS);
         if let Ok(mut facing) = facings.get_mut(person_entity)
             && let Some(towards) = dark_sprite::Facing::from_vector(
                 body.0.position - people_position(&people, person_entity),

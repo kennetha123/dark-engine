@@ -32,6 +32,24 @@ fn every_sheet_and_scene_in_the_project_loads() {
                 }
             } else {
                 let scene = project.load_scene(&name).unwrap_or_else(|e| panic!("{e}"));
+                // What the editor saves loads back as the same scene.
+                let copy = std::env::temp_dir().join(format!(
+                    "dark_smoke_{}_{}",
+                    std::process::id(),
+                    entry.file_name().to_string_lossy()
+                ));
+                project
+                    .save_scene(&copy, &scene)
+                    .unwrap_or_else(|e| panic!("{name}: {e}"));
+                let again = project
+                    .load_scene(&copy)
+                    .unwrap_or_else(|e| panic!("{name} as saved: {e}"));
+                assert_eq!(
+                    format!("{again:?}"),
+                    format!("{scene:?}"),
+                    "{name}: save round trip"
+                );
+                let _ = std::fs::remove_file(&copy);
                 for prop in scene.placed_props(0.0, &[], |_, _| true) {
                     let sheet = project
                         .load_sheet(&prop.sheet)

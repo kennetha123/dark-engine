@@ -50,6 +50,14 @@ starts in Japanese). Hosts take `--save <file>` (carry the whole world on; it is
 day and on quitting, Ctrl+C for `dark-host`; without `--player` the save's host plays on as
 themselves) and `--world-seed <n>`. The story is the project's `story.ron`.
 
+The editor (maps, villagers, enemies, exits, text; Play needs `dark-player` built beside it):
+```
+cargo build -p dark-player && cargo run -p dark-editor -- --project ../adventurer
+cargo run -p dark-editor -- --project ../adventurer --script "click 234,15; drag 660,700 900,780" --screenshot out.png --frames 5
+```
+Scripted runs save what they save: point them at a copy of the project (with `Art/` a junction
+to the real one, not copied; remove the junction on its own before deleting the copy).
+
 The world simulation, fast-forwarded:
 ```
 cargo run -p dark-cli -- simulate ../adventurer --seed 3          # one year's chronicle

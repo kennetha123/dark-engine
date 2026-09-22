@@ -22,7 +22,7 @@ First game: 4-player co-op, low-fantasy life-sim action RPG on a 365-day clock.
 | Networking (game 1) | Host-authoritative **listen server**, max **4 players**. Single-player = host with zero remote clients. |
 | Networking (later) | SpacetimeDB for persistent backends (cloud saves, accounts, extraction-style games). Dedicated `dark-server` for PvPvE. |
 | Scripting | Luau via `mlua` (advanced event commands, mods). |
-| Editor | egui + egui_dock, RPG Maker-style, separate binary; playtest runs the player as a separate process. |
+| Editor | egui in fixed panels (no docking: one simple layout), RPG Maker-style, WYSIWYG (maps drawn by the game's own renderer), no programming needed; separate binary; playtest runs the player as a separate process. |
 | Distribution | Internal studio tool. No public API stability promise. |
 
 ## 2. Architecture rules (enforced)
@@ -51,7 +51,7 @@ First game: 4-player co-op, low-fantasy life-sim action RPG on a 365-day clock.
 | Images | `image`, `asefile` |
 | Hot reload | `notify` |
 | Localization | RON string tables per language (`locale/<code>.ron`, see §11); `fluent` if plurals and grammar need it |
-| Editor | `egui`, `egui_dock`, `egui-wgpu` |
+| Editor | `egui`, `egui-wgpu`, `egui-winit`, `rfd` (native file dialogs) |
 | Profiling/logging | `tracing`, `tracy-client`/`puffin` |
 
 ## 4. Game 1 requirements on the engine
@@ -170,13 +170,14 @@ crates/
   dark_time      calendar, day length, sleep consensus     (sim)
   dark_net       transport, channels, sessions             (sim)
   dark_platform  winit window + input                      (presentation)
-  dark_render    wgpu renderer                             (presentation)
+  dark_render    wgpu renderer (window or offscreen)       (presentation)
+  dark_view      a map's sprites, shared by game and editor (presentation)
   … added per milestone: dark_assets, dark_sprite, dark_tilemap, dark_physics, dark_combat,
     dark_ai, dark_world, dark_life, dark_ui, dark_audio, dark_spine, dark_script, dark_data
 apps/
   dark-player    client (window, render; hosts or joins)
   dark-host      headless host (sim + transport only)
-  dark-editor    (M8)
+  dark-editor    content editor (M8, see §18)
 tools/           dev scripts (dependency guard, packaging)
 docs/            this plan
 ```
@@ -195,7 +196,7 @@ docs/            this plan
 | M5 ✅ | Actors, roles, parties, life sim | Mixed parties, betrayal, factions, needs, temperature, tents, intoxication (done; see §14, §15) |
 | M6 ✅ | Spine | Rendering + baked hitboxes (done; see §16) |
 | M7 ✅ | Narrative + save | Storylets, dialogue, relationships/marriage, endings, full world save (done; see §17) |
-| M8 | Editor MVP | Maps + height, database, roles/factions, calendar, storylets, hitbox/enemy editors, multi-client playtest, manual slice overrides |
+| M8 | Editor MVP | Maps + height (stage 1 done; see §18), database, roles/factions, calendar, storylets, hitbox/enemy editors, multi-client playtest, manual slice overrides |
 | M9 | Polish + ship | Steam lobby/relay, lighting, particles, Luau, localization, export |
 
 ## 8. Risks
@@ -280,11 +281,16 @@ docs/            this plan
   same project files.
 - NPCs: scenes list `npcs` (sheet, position, facing, `lines`). They are ordinary characters with an
   `Npc` component and no player; they replicate like anyone else. Interact (E) within 32 px and
-  8 px of height turns the nearest NPC to the speaker and moves that talker's place in its
-  conversation on one line (each player hears it from the start): a plain key the NPC says,
-  `(reply: key)` the one talking says back. One side speaks at a time; a line lasts 5 s, or until
-  the one spoken to is more than 96 px away or in another map. An NPC nobody is speaking with
-  turns back to its own facing.
+  8 px of height turns the nearest NPC to the speaker and starts its conversation from the top;
+  each press moves it on one line: a plain key the NPC says, `(reply: key)` the one talking says
+  back. While a conversation is under way the press goes to it, whoever else is nearer. The
+  press after the last line closes it, and the next press starts it again. One conversation per
+  NPC at a time (plain or a storylet): another player waits, then hears it from the start. One
+  side speaks at a time; a line stays up (`HELD_TICKS`) until the next press. The conversation
+  ends when the talker is more than 96 px away or in another map, asleep, out cold or dead, or a
+  storylet takes over. The dialogue window shows `E ▼` on a held line with no choices. Remarks
+  said in passing (a follower's) last 5 s. An NPC nobody is speaking with turns back to its own
+  facing.
   `Speech` carries who it is said `to`.
 - Faces and names: a look may name a `face` (RPG Maker 4×2 faceset and index; painted art, so
   resized smoothly to 72 px) and a `name` key. The local player's own conversation (lines by them
@@ -294,7 +300,8 @@ docs/            this plan
   is her battler's swing row, mirrored to face right; up and down use the side poses.
 - Lines are string-table keys, never text: the host replicates the key in `Speech`, each client
   shows it in its own language. `locale/<code>.ron` holds each language (project `languages`, first
-  is the fallback); a missing string falls back to the first language, then shows the key.
+  is the fallback), with `locale/<code>.editor.ron` (text written in the editor, §18) read over it;
+  a missing string falls back to the first language, then shows the key.
   Adventurer ships `en` and `ja`; F2 or `--lang` switches.
 - Text: `dark_render::TextSystem` shapes and wraps with cosmic-text (words for Latin, between
   characters for Japanese), rasterises each glyph once into a 1024² atlas and draws glyph sprites.
@@ -593,3 +600,48 @@ docs/            this plan
   day's routine between saves (they have none yet); a save written mid-conversation loses it;
   a save carries its world as it was, so actors added to `world.ron` later are not in it (start
   a new world to meet them); the save is written inside a tick (a short hitch once a day).
+
+## 18. Editor (M8, stage 1: maps)
+
+- `dark-editor` (app, presentation) makes a game's content by pointing, clicking and typing:
+  nothing is written by hand and nothing needs programming. It opens a project folder (asked
+  for with a native dialog, or `--project`).
+- The window, RPG Maker-style, in fixed panels: tools and Save / Undo / Redo / Play along the
+  top; the project's maps (and New map) with a palette of every prop sheet's pictures on the
+  left; the map in the middle; what is selected (or the map's own properties) on the right; a
+  status line below. Tools: Select (click, drag to move, Delete), Terrain (paint ground, hills
+  1–3 and walls; the right button paints plain ground), Props (click a palette picture, then
+  the map; solid or not), Villager, Enemy (a kind from `combat.ron`), Exit and Inn (drag a
+  box), Player start, Erase. The mouse wheel zooms (1×–6×); middle or right drag pans. Ctrl+S,
+  Ctrl+Z, Ctrl+Y.
+- WYSIWYG: the map is built exactly as the game builds it (`dark_world::Map::preview`: terrain,
+  scattered props, colliders), laid out by `dark_view::MapView` (the game's own code), and drawn
+  by `dark_render` into an offscreen target that egui shows (read as plain bytes,
+  `Renderer::shared_view`, so its colours are the game's; GLES cannot, and shows them dark).
+  Characters stand where they will,
+  in their idle pose, with silhouettes behind props (a Spine character, which has no still
+  frame, is a marked spot); exits, inns, the player start, names and the selection are drawn
+  over it. Scattered props keep clear of where other maps' exits land, as in the game. The Collision toggle shows the game's own overlay.
+- Text: a villager's name and lines are typed as plain text in the language chosen in the
+  toolbar; the editor makes the string keys (`name.<map>.<n>`, `npc.<map>.<n>`) and writes the
+  text to `locale/<code>.editor.ron`, which the game loads over the hand-written
+  `locale/<code>.ron` (never rewritten, so its comments stay). If a table does not read, the
+  editor refuses to save text rather than lose it.
+- Saving writes the scene as RON (terrain painted tile by tile is packed back into rectangles);
+  comments in a hand-written scene are not kept. After saving, the editor loads the maps as the
+  game will and reports anything the game would refuse (a spawn inside a wall, say) in the
+  status line. Opening another map, making a new one or closing with changes unsaved asks
+  first (Save, Don't save, which drops the typed text too, or Cancel). Play saves, checks the
+  game loads the map (and says why not), then starts `dark-player` (built next to the editor)
+  on this map from its player start, in the language being written. Showing a field never
+  edits the map (a value out of the field's range stays until changed).
+- Undo keeps whole scene snapshots (200 steps); a burst of typing in one field, a drag or a
+  paint stroke is one step. Text edits are not undone.
+- Checking without a person at the screen: `--script` feeds clicks, drags, keys and typing as
+  if a person did them, and `--screenshot <png> --frames <n>` saves the whole window.
+- Known gaps (later stages): the database (items, movesets, enemies, people, factions,
+  regions), the storylet editor, sheet slicing and hitbox editing (with a Spine bake button),
+  the calendar, multi-client playtest. Spine characters are not drawn in the editor.
+  Scattered-prop groups are shown but not edited; placed
+  props get a round footprint a third of their width (edit `colliders` by hand for more); an
+  exit's arrival point is typed as numbers, not picked on the other map.

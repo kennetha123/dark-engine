@@ -63,6 +63,7 @@ struct Silhouettes {
     silhouette_mesh_pipeline: wgpu::RenderPipeline,
     mask_view: wgpu::TextureView,
     mask_bind_group: wgpu::BindGroup,
+    mask_layout: wgpu::BindGroupLayout,
 }
 
 struct GpuTexture {
@@ -79,17 +80,16 @@ struct Globals {
 }
 
 pub struct Renderer {
-    instance: wgpu::Instance,
-    window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
+    /// The window it shows in; `None` offscreen (the editor shows the target itself).
+    output: Option<Output>,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    view_format: wgpu::TextureFormat,
 
     internal_size: (u32, u32),
     target: wgpu::Texture,
     target_view: wgpu::TextureView,
+    /// The target can also be viewed as plain (not sRGB) bytes: see [`Renderer::shared_view`].
+    shared: bool,
 
     sampler: wgpu::Sampler,
     /// For painted art drawn smaller or turned (skeletons): see [`Renderer::create_texture_smooth`].
@@ -112,10 +112,88 @@ pub struct Renderer {
     blit_pipeline: wgpu::RenderPipeline,
 }
 
+/// Where a windowed renderer shows its frames.
+struct Output {
+    instance: wgpu::Instance,
+    window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    view_format: wgpu::TextureFormat,
+}
+
 impl Renderer {
     /// `internal_size` is the project's render resolution (docs/PLAN.md §1).
     pub fn new(window: Arc<Window>, internal_size: (u32, u32)) -> Result<Self, RenderError> {
         pollster::block_on(Self::new_async(window, internal_size))
+    }
+
+    /// A renderer that draws only into its internal target, on someone else's device (the
+    /// editor, which shows the target in its own interface). See [`Renderer::shared_view`].
+    pub fn offscreen(
+        adapter: &wgpu::Adapter,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        internal_size: (u32, u32),
+    ) -> Self {
+        let masks = masks_supported(adapter);
+        let mut renderer = Self::build(device, queue, internal_size, None, masks);
+        renderer.shared = adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::VIEW_FORMATS);
+        if !renderer.shared {
+            tracing::warn!("this GPU cannot share the target as plain bytes: colours show dark");
+        }
+        renderer.replace_target();
+        renderer
+    }
+
+    /// The internal target as last rendered, read as plain gamma-encoded bytes: how interfaces
+    /// such as egui sample an image (they would darken an sRGB view). Made anew on each call,
+    /// and after [`Renderer::set_internal_size`] the old one shows the old target. Where the GPU
+    /// cannot view the target so (GLES), it is the sRGB view.
+    pub fn shared_view(&self) -> wgpu::TextureView {
+        let format = self.shared.then(|| TARGET_FORMAT.remove_srgb_suffix());
+        self.target.create_view(&wgpu::TextureViewDescriptor {
+            format,
+            ..Default::default()
+        })
+    }
+
+    /// Draws at a new internal size from the next frame on (an editor's viewport resized).
+    pub fn set_internal_size(&mut self, size: (u32, u32)) {
+        let size = (size.0.max(1), size.1.max(1));
+        if size == self.internal_size {
+            return;
+        }
+        self.internal_size = size;
+        self.replace_target();
+    }
+
+    /// Makes the internal target (and what reads it) anew at the internal size.
+    fn replace_target(&mut self) {
+        let size = self.internal_size;
+        let (target, target_view) = create_target(&self.device, size, self.shared);
+        self.blit_bind_group = texture_bind_group(
+            &self.device,
+            &self.texture_layout,
+            &target_view,
+            &self.sampler,
+            "blit",
+        );
+        self.target = target;
+        self.target_view = target_view;
+        if let Some(sil) = &mut self.silhouettes {
+            sil.mask_view = create_mask(&self.device, size);
+            sil.mask_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("occlusion mask"),
+                layout: &sil.mask_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&sil.mask_view),
+                }],
+            });
+        }
     }
 
     async fn new_async(
@@ -165,7 +243,30 @@ impl Renderer {
             config.view_formats.push(view_format);
         }
         surface.configure(&device, &config);
+        let output = Output {
+            instance,
+            window,
+            surface,
+            config,
+            view_format,
+        };
+        let masks = masks_supported(&adapter);
+        Ok(Self::build(
+            device,
+            queue,
+            internal_size,
+            Some(output),
+            masks,
+        ))
+    }
 
+    fn build(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        internal_size: (u32, u32),
+        output: Option<Output>,
+        mask_supported: bool,
+    ) -> Self {
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("nearest"),
             mag_filter: wgpu::FilterMode::Nearest,
@@ -227,7 +328,7 @@ impl Renderer {
             }],
         });
 
-        let (target, target_view) = create_target(&device, internal_size);
+        let (target, target_view) = create_target(&device, internal_size, false);
         let blit_bind_group =
             texture_bind_group(&device, &texture_layout, &target_view, &sampler, "blit");
 
@@ -253,12 +354,6 @@ impl Renderer {
                 count: None,
             }],
         });
-        let mask_features = adapter.get_texture_format_features(MASK_FORMAT);
-        let mask_supported = mask_features.allowed_usages.contains(
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        ) && mask_features
-            .flags
-            .contains(wgpu::TextureFormatFeatureFlags::BLENDABLE);
         if !mask_supported {
             tracing::warn!(
                 "{MASK_FORMAT:?} cannot be blended on this GPU; character silhouettes are off"
@@ -397,6 +492,7 @@ impl Renderer {
                 ),
                 mask_view,
                 mask_bind_group,
+                mask_layout,
             }
         });
         let blit_pipeline = {
@@ -422,7 +518,8 @@ impl Renderer {
                     entry_point: Some("fs_blit"),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: view_format,
+                        // Offscreen there is no window; the pipeline is never used then.
+                        format: output.as_ref().map_or(TARGET_FORMAT, |o| o.view_format),
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -434,17 +531,14 @@ impl Renderer {
         let instances = create_instance_buffer(&device, MIN_INSTANCE_CAPACITY);
         let mesh_vertices = create_instance_buffer(&device, MIN_INSTANCE_CAPACITY);
 
-        Ok(Self {
-            instance,
-            window,
-            surface,
+        Self {
+            output,
             device,
             queue,
-            config,
-            view_format,
             internal_size,
             target,
             target_view,
+            shared: false,
             sampler,
             smooth_sampler,
             texture_layout,
@@ -460,7 +554,7 @@ impl Renderer {
             silhouettes,
             blit_bind_group,
             blit_pipeline,
-        })
+        }
     }
 
     pub fn internal_size(&self) -> (u32, u32) {
@@ -600,12 +694,15 @@ impl Renderer {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
+        let Some(out) = &mut self.output else {
+            return;
+        };
         if width == 0 || height == 0 {
             return;
         }
-        self.config.width = width;
-        self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        out.config.width = width;
+        out.config.height = height;
+        out.surface.configure(&self.device, &out.config);
     }
 
     /// Draws one frame. `camera` is the world position at the centre of the view; `clear` is
@@ -744,13 +841,12 @@ impl Renderer {
         }
 
         let frame = self.acquire();
-        if let Some((frame, _)) = &frame {
+        if let (Some((frame, _)), Some(out)) = (&frame, &self.output) {
             let view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
-                format: Some(self.view_format),
+                format: Some(out.view_format),
                 ..Default::default()
             });
-            let viewport =
-                fit_viewport(self.internal_size, (self.config.width, self.config.height));
+            let viewport = fit_viewport(self.internal_size, (out.config.width, out.config.height));
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("blit"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -780,18 +876,19 @@ impl Renderer {
         if let Some((frame, suboptimal)) = frame {
             self.queue.present(frame);
             // Reconfigure only after the acquired frame is released.
-            if suboptimal {
-                self.surface.configure(&self.device, &self.config);
+            if suboptimal && let Some(out) = &self.output {
+                out.surface.configure(&self.device, &out.config);
             }
         }
     }
 
     fn acquire(&mut self) -> Option<(wgpu::SurfaceTexture, bool)> {
-        match self.surface.get_current_texture() {
+        let out = self.output.as_ref()?;
+        match out.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => Some((frame, false)),
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => Some((frame, true)),
             wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.device, &self.config);
+                out.surface.configure(&self.device, &out.config);
                 None
             }
             wgpu::CurrentSurfaceTexture::Lost => {
@@ -808,10 +905,13 @@ impl Renderer {
 
     /// A lost surface cannot be reconfigured; it must be created again from the window.
     fn recreate_surface(&mut self) {
-        match self.instance.create_surface(self.window.clone()) {
+        let Some(out) = &mut self.output else {
+            return;
+        };
+        match out.instance.create_surface(out.window.clone()) {
             Ok(surface) => {
-                surface.configure(&self.device, &self.config);
-                self.surface = surface;
+                surface.configure(&self.device, &out.config);
+                out.surface = surface;
             }
             Err(err) => tracing::error!("failed to recreate lost surface: {err}"),
         }
@@ -880,10 +980,24 @@ impl Renderer {
     }
 }
 
+/// Whether the GPU can blend into the occlusion mask (character silhouettes).
+fn masks_supported(adapter: &wgpu::Adapter) -> bool {
+    let features = adapter.get_texture_format_features(MASK_FORMAT);
+    features
+        .allowed_usages
+        .contains(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
+        && features
+            .flags
+            .contains(wgpu::TextureFormatFeatureFlags::BLENDABLE)
+}
+
+/// The internal target; `shared`, it can also be viewed as plain bytes (not on GLES).
 fn create_target(
     device: &wgpu::Device,
     (width, height): (u32, u32),
+    shared: bool,
 ) -> (wgpu::Texture, wgpu::TextureView) {
+    let plain = [TARGET_FORMAT.remove_srgb_suffix()];
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("internal target"),
         size: wgpu::Extent3d {
@@ -898,7 +1012,7 @@ fn create_target(
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
+        view_formats: if shared { &plain } else { &[] },
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     (texture, view)

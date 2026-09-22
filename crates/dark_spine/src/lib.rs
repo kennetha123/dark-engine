@@ -138,9 +138,9 @@ fn prepare(image: Image, scale: f32, premultiplied: bool) -> Image {
     }
     for p in rgba.pixels_mut() {
         let a = u16::from(p[3]);
-        if a > 0 {
-            for c in 0..3 {
-                p[c] = ((u16::from(p[c]) * 255 + a / 2) / a).min(255) as u8;
+        for c in 0..3 {
+            if let Some(v) = (u16::from(p[c]) * 255 + a / 2).checked_div(a) {
+                p[c] = v.min(255) as u8;
             }
         }
     }
@@ -179,10 +179,10 @@ fn bleed(rgba: &mut image::RgbaImage) {
                         n += 1;
                     }
                 }
-                if n > 0 {
-                    let p = rgba.get_pixel_mut(x, y);
-                    for c in 0..3 {
-                        p[c] = (sum[c] / n) as u8;
+                let p = rgba.get_pixel_mut(x, y);
+                for c in 0..3 {
+                    if let Some(average) = sum[c].checked_div(n) {
+                        p[c] = average as u8;
                     }
                 }
             }

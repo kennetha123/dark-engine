@@ -138,6 +138,7 @@ impl Maps {
     }
 }
 
+/// A scene path as maps know it: `./a\b.ron` is `a/b.ron`.
 fn normalise(path: &str) -> String {
     let path = path.replace('\\', "/");
     path.trim_start_matches("./").to_owned()
@@ -300,6 +301,54 @@ fn build_map(
     })
 }
 
+impl Map {
+    /// Scene `path` built on its own, as the game would build it, for an editor to show: exits
+    /// lead nowhere (they all point at this map), and nothing is checked beyond what building
+    /// needs. `landings` are where other scenes' exits arrive in this one: scattered props keep
+    /// clear of them, as in the game.
+    pub fn preview(
+        path: &str,
+        def: SceneDef,
+        tile: u32,
+        landings: &[(f32, f32)],
+    ) -> Result<Map, String> {
+        let ids: HashMap<String, MapId> =
+            def.exits.iter().map(|e| (e.to.clone(), MapId(0))).collect();
+        let own = normalise(path);
+        let arrivals: Vec<(f32, f32)> = def
+            .npcs
+            .iter()
+            .map(|n| n.position)
+            .chain(def.enemies.iter().map(|e| e.position))
+            .chain(def.inns.iter().map(|i| i.bed))
+            .chain(landings.iter().copied())
+            // An exit back into this same scene lands here too.
+            .chain(
+                def.exits
+                    .iter()
+                    .filter(|e| normalise(&e.to) == own)
+                    .map(|e| e.spawn),
+            )
+            .collect();
+        build_map(own, def, tile, &ids, &arrivals).map_err(|(_, m)| m)
+    }
+
+    /// Where exits of `scenes` (path and scene) arrive in scene `path`.
+    pub fn landings<'a>(
+        path: &str,
+        scenes: impl IntoIterator<Item = (&'a str, &'a SceneDef)>,
+    ) -> Vec<(f32, f32)> {
+        let own = normalise(path);
+        scenes
+            .into_iter()
+            .filter(|(from, _)| normalise(from) != own)
+            .flat_map(|(_, def)| &def.exits)
+            .filter(|e| normalise(&e.to) == own)
+            .map(|e| e.spawn)
+            .collect()
+    }
+}
+
 /// Simulates bodies in all loaded maps.
 pub struct MapsPlugin(pub Maps);
 
@@ -430,6 +479,31 @@ mod tests {
         let project = project();
         std::fs::write(project.path("scenes/b.ron"), b).unwrap();
         project
+    }
+
+    #[test]
+    fn a_preview_scatters_props_exactly_as_the_game_does() {
+        // Dense scatter in b, which a's exit lands in: the landing must be kept clear in both.
+        let project = project_with_b(
+            r#"(size: (160, 160), ground: (sheet: "g", frame: 0),
+                exits: [(area: (0, 150, 160, 10), to: "scenes/a.ron", spawn: (20, 20))],
+                scatter: [(sheet: "p", frames: [0], count: 60, min_spacing: 12, seed: 5)])"#,
+        );
+        let maps = Maps::load(&project, "scenes/a.ron").unwrap();
+        let game = &maps.get(MapId(1)).props;
+        let (a, b) = (
+            project.load_scene("scenes/a.ron").unwrap(),
+            project.load_scene("scenes/b.ron").unwrap(),
+        );
+        let landings = Map::landings(
+            "scenes/b.ron",
+            [("scenes/a.ron", &a), ("./scenes/b.ron", &b)],
+        );
+        assert_eq!(landings, vec![(40.0, 40.0)], "a's exit, not b's own");
+        let preview = Map::preview("scenes/b.ron", b.clone(), 16, &landings).unwrap();
+        assert_eq!(&preview.props, game);
+        let careless = Map::preview("scenes/b.ron", b, 16, &[]).unwrap();
+        assert_ne!(&careless.props, game, "the landing does clear props");
     }
 
     #[test]

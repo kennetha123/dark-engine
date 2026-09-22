@@ -20,6 +20,7 @@ dark_story.workspace = true
 dark_life.workspace = true
 dark_audio.workspace = true
 dark_spine.workspace = true
+dark_view.workspace = true
 bevy_ecs.workspace = true
 dark_net.workspace = true
 dark_platform.workspace = true

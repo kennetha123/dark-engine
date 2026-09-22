@@ -600,29 +600,33 @@ fn talking_to_an_npc_shows_its_lines_to_the_client_in_turn() {
     assert_eq!((bye.line.as_str(), bye.to), ("bye", Some(me.id)));
     assert_eq!(net.me(0).speech, None);
 
-    // Walking away ends the conversation well before the line would run out (100 ticks of 300).
-    net.run(100, &[Vec2::NEG_Y]);
-    assert_eq!(
-        npc(&net).speech,
-        None,
-        "the NPC stops when its listener leaves"
-    );
-
-    // Lines also end on their own, and the NPC faces its own way again.
-    net.run(100, &[Vec2::Y]);
-    press(&mut net);
-    assert!(npc(&net).speech.is_some());
+    // A line waits for the next press, however long that takes.
     net.run(crate::SPEECH_TICKS as usize + 30, &[Vec2::ZERO]);
-    let after = npc(&net);
-    assert_eq!(after.speech, None);
-    assert_eq!(after.state.facing, dark_sprite::Facing::Down);
+    assert_eq!(npc(&net).speech.map(|s| s.line), Some("bye".into()));
 
-    // After a reply (said by the player, to the NPC) the NPC also turns back once it ends.
+    // The press after the last line closes the conversation, and the NPC faces its own way.
+    press(&mut net);
+    assert_eq!(npc(&net).speech, None, "closed");
+    assert_eq!(net.me(0).speech, None);
+    assert_eq!(npc(&net).state.facing, dark_sprite::Facing::Down);
+
+    // The next press starts it again from the top.
+    press(&mut net);
+    assert_eq!(npc(&net).speech.map(|s| s.line), Some("hello".into()));
+
+    // Walking away ends it too; coming back starts it again.
     press(&mut net);
     assert_eq!(net.me(0).speech.map(|s| s.line), Some("thanks".into()));
-    assert_eq!(npc(&net).state.facing, dark_sprite::Facing::Up);
-    net.run(crate::SPEECH_TICKS as usize + 30, &[Vec2::ZERO]);
+    net.run(100, &[Vec2::NEG_Y]);
+    assert_eq!(
+        net.me(0).speech,
+        None,
+        "the reply stops when its listener is left"
+    );
     assert_eq!(npc(&net).state.facing, dark_sprite::Facing::Down);
+    net.run(100, &[Vec2::Y]);
+    press(&mut net);
+    assert_eq!(npc(&net).speech.map(|s| s.line), Some("hello".into()));
 }
 
 #[test]
@@ -649,7 +653,15 @@ fn each_player_hears_an_npc_conversation_from_the_start() {
     };
     talk(&mut net, 0);
     assert_eq!(npc_line(&net), Some(("hello".into(), Some(net.me(0).id))));
-    // The second player starts at the beginning too, not at the first player's reply.
+    // One conversation at a time: the second player waits.
+    talk(&mut net, 1);
+    assert_eq!(npc_line(&net), Some(("hello".into(), Some(net.me(0).id))));
+    // The first goes on (their reply, the NPC's goodbye) and closes it.
+    for _ in 0..3 {
+        talk(&mut net, 0);
+    }
+    assert_eq!(npc_line(&net), None);
+    // Then the second starts at the beginning too, not where the first left off.
     talk(&mut net, 1);
     assert_eq!(npc_line(&net), Some(("hello".into(), Some(net.me(1).id))));
 }

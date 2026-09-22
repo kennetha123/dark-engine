@@ -1,11 +1,12 @@
 //! NPCs placed by scenes, and talking to them.
 //!
-//! Pressing interact next to an NPC makes it turn to the speaker and say its next line. A line is
+//! Pressing interact next to an NPC makes it turn to the speaker and start its conversation; each
+//! press moves it on a line, and the press after the last line closes it (the next one starts it
+//! again from the top). A line stays up until then, or until the talker walks away. One
+//! conversation at a time per NPC: another talker waits. A line is
 //! a string-table key, not text ([`dark_assets::Localization`]): the host only decides *what* is
 //! said, and every player reads it in their own language. Speech is part of the character's
 //! replicated state, so anyone in the map sees the bubble, including players who arrive mid-line.
-
-use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::IntoScheduleConfigs;
@@ -27,17 +28,28 @@ pub const TALK_RANGE: f32 = 32.0;
 const TALK_HEIGHT: f32 = 8.0;
 /// A conversation ends when the two are further apart than this.
 pub const LEAVE_RANGE: f32 = 3.0 * TALK_RANGE;
-/// How long a line stays up: 5 s.
+/// How long a line said in passing stays up (a follower's remark): 5 s.
 pub const SPEECH_TICKS: u32 = 300;
+/// A conversation's line (plain talk or a storylet) stays up until the next press or the end of
+/// the conversation: in practice, for ever. Anything longer than [`SPEECH_TICKS`] is one such.
+pub const HELD_TICKS: u32 = u32::MAX;
 
-/// A character the world placed, with a conversation to go through one line per talk.
+/// A character the world placed, with a conversation to go through one line per press.
 #[derive(Component, Clone, Debug)]
 pub struct Npc {
     pub lines: Vec<LineDef>,
-    /// Where each talker is in the conversation: everyone hears it from the start.
-    next: HashMap<NetId, usize>,
+    /// The conversation under way: who with, and the next line. One at a time; anyone else
+    /// waits, and everyone hears it from the start.
+    talking: Option<(NetId, usize)>,
     /// Faces this way again when not talking.
     home: Facing,
+}
+
+impl Npc {
+    /// Who it is in plain talk with, if anyone.
+    pub(crate) fn talking_with(&self) -> Option<NetId> {
+        self.talking.map(|(with, _)| with)
+    }
 }
 
 /// A line a character is saying, as a string-table key.
@@ -84,7 +96,7 @@ impl Plugin for TalkPlugin {
                     CharacterState::new(sheets, look, npc.facing),
                     Npc {
                         lines: npc.lines.clone(),
-                        next: HashMap::new(),
+                        talking: None,
                         home: npc.facing,
                     },
                     npc.actor.clone().map(crate::Person),
@@ -104,7 +116,7 @@ impl Plugin for TalkPlugin {
         // Before the controllers, so an NPC turned to its speaker shows that way in the same tick.
         app.add_systems(
             FixedUpdate,
-            (age_speech, face_home, talk)
+            (age_speech, end_talks, face_home, talk)
                 .chain()
                 .before(control_characters)
                 .in_set(Control),
@@ -112,7 +124,7 @@ impl Plugin for TalkPlugin {
     }
 }
 
-/// Lines run out after [`SPEECH_TICKS`], or as soon as the one spoken to walks away (further than
+/// Lines run out when their time does, or as soon as the one spoken to walks away (further than
 /// [`LEAVE_RANGE`] or into another map): the conversation is over.
 fn age_speech(
     mut commands: Commands,
@@ -128,6 +140,79 @@ fn age_speech(
         });
         if speech.ticks_left == 0 || left {
             commands.entity(entity).remove::<Speech>();
+        }
+    }
+}
+
+/// A possible side of a conversation, and whether a storylet has them.
+type Party = (
+    Entity,
+    &'static NetId,
+    &'static MapId,
+    &'static BodyState,
+    &'static CharacterState,
+    Has<crate::Conversing>,
+);
+
+/// A conversation ends when its talker walks away (further than [`LEAVE_RANGE`] or into
+/// another map), leaves the game, lies down asleep or out cold, or dies; both sides fall quiet.
+fn end_talks(
+    mut commands: Commands,
+    mut npcs: Query<(Entity, &mut Npc, &MapId, &BodyState)>,
+    everyone: Query<Party>,
+    speeches: Query<&Speech>,
+    talkers: Query<(Entity, &Speech), Without<Npc>>,
+) {
+    for (entity, mut npc, map, body) in &mut npcs {
+        let Some((with, _)) = npc.talking else {
+            continue;
+        };
+        let talker = everyone.iter().find(|(_, id, ..)| **id == with);
+        // A storylet that took over ends plain talk, and its own line stays.
+        if talker.is_some_and(|(.., storylet)| storylet) {
+            npc.talking = None;
+            continue;
+        }
+        let still = talker.is_some_and(|(_, _, m, b, state, _)| {
+            m == map
+                && b.0.position.distance(body.0.position) <= LEAVE_RANGE
+                && !state.sleeping
+                && !state.impaired.out
+                && !state.fighter.is_dead()
+        });
+        if still {
+            continue;
+        }
+        npc.talking = None;
+        let own_id = everyone.get(entity).map(|(_, id, ..)| *id).ok();
+        if speeches.get(entity).is_ok_and(|s| s.to == Some(with)) {
+            commands.entity(entity).remove::<Speech>();
+        }
+        if let Some((talker, ..)) = talker
+            && speeches
+                .get(talker)
+                .is_ok_and(|s| s.to.is_some() && s.to == own_id)
+        {
+            commands.entity(talker).remove::<Speech>();
+        }
+    }
+    // A talker's held reply lives only inside a conversation: one with no NPC talking with
+    // them any more (it turned on them, say) goes. A storylet's answer is never held.
+    for (talker, speech) in &talkers {
+        if speech.ticks_left <= SPEECH_TICKS {
+            continue;
+        }
+        let Ok((_, talker_id, ..)) = everyone.get(talker) else {
+            continue;
+        };
+        let owned = npcs.iter().any(|(npc, owner, ..)| {
+            owner.talking.is_some_and(|(with, _)| with == *talker_id)
+                && everyone
+                    .get(npc)
+                    .is_ok_and(|(_, id, ..)| speech.to == Some(*id))
+        });
+        if !owned {
+            commands.entity(talker).remove::<Speech>();
         }
     }
 }
@@ -179,6 +264,7 @@ pub(crate) fn talk(
     mut commands: Commands,
     talkers: Query<Talker, FreeToTalk>,
     mut npcs: Query<Listener>,
+    speeches: Query<&Speech>,
 ) {
     for (talker, talker_id, map, body, control, state) in &talkers {
         // Lying down asleep or out cold, nobody talks.
@@ -186,28 +272,56 @@ pub(crate) fn talk(
             continue;
         }
         let feet = (body.0.position, body.0.elevation);
-        let in_map =
-            npcs.iter()
-                .filter(|(_, _, m, ..)| *m == map)
-                .map(|(entity, _, _, npc_body, ..)| {
-                    (entity, npc_body.0.position, npc_body.0.elevation)
-                });
-        let Some(target) = talk_target(feet, in_map) else {
+        // A press goes on with the conversation under way, whoever else is nearer; otherwise
+        // it starts one with the nearest NPC in reach.
+        let under_way = npcs
+            .iter()
+            .find(|(.., npc, _)| npc.talking.is_some_and(|(with, _)| with == *talker_id))
+            .map(|(entity, ..)| entity);
+        let target = under_way.or_else(|| {
+            let in_map = npcs.iter().filter(|(_, _, m, ..)| *m == map).map(
+                |(entity, _, _, npc_body, ..)| (entity, npc_body.0.position, npc_body.0.elevation),
+            );
+            talk_target(feet, in_map)
+        });
+        let Some(target) = target else {
             continue;
         };
         let Ok((entity, npc_id, _, npc_body, mut npc, mut state)) = npcs.get_mut(target) else {
             continue;
         };
+        // One conversation at a time: someone else's is under way (plain talk, or a storylet
+        // holding the NPC's line to them), so this talker waits.
+        let step = match npc.talking {
+            Some((with, step)) if with == *talker_id => step,
+            Some(_) => continue,
+            None => 0,
+        };
+        let busy = speeches
+            .get(entity)
+            .is_ok_and(|s| s.ticks_left > SPEECH_TICKS && s.to != Some(*talker_id));
+        if step == 0 && busy {
+            continue;
+        }
         if npc.lines.is_empty() {
             continue;
         }
         if let Some(facing) = Facing::from_vector(feet.0 - npc_body.0.position) {
             state.facing = facing;
         }
-        let Npc { lines, next, .. } = &mut *npc;
-        let step = next.entry(*talker_id).or_default();
-        let line = lines[*step % lines.len()].clone();
-        *step = (*step + 1) % lines.len();
+        if step >= npc.lines.len() {
+            // Past the last line: this press closes the conversation.
+            npc.talking = None;
+            if speeches.get(entity).is_ok_and(|s| s.to == Some(*talker_id)) {
+                commands.entity(entity).remove::<Speech>();
+            }
+            if speeches.get(talker).is_ok_and(|s| s.to == Some(*npc_id)) {
+                commands.entity(talker).remove::<Speech>();
+            }
+            continue;
+        }
+        let line = npc.lines[step].clone();
+        npc.talking = Some((*talker_id, step + 1));
         // One line of the conversation is up at a time: the other side falls quiet.
         let (speaker, silent, to) = match &line {
             LineDef::Says(_) => (entity, talker, *talker_id),
@@ -219,10 +333,11 @@ pub(crate) fn talk(
             line.key()
         );
         commands.entity(silent).remove::<Speech>();
+        // It stays up until the next press or the conversation ends, like a storylet's.
         commands.entity(speaker).insert(Speech {
             line: line.key().to_owned(),
             to: Some(to),
-            ticks_left: SPEECH_TICKS,
+            ticks_left: HELD_TICKS,
         });
     }
 }

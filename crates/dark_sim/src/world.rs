@@ -460,13 +460,10 @@ impl World {
         let mut prev = vec![None; n];
         let mut done = vec![false; n];
         dist[usize::from(from.0)] = 0;
-        loop {
-            let Some(u) = (0..n)
-                .filter(|&i| !done[i] && dist[i] != u32::MAX)
-                .min_by_key(|&i| (dist[i], i))
-            else {
-                break;
-            };
+        while let Some(u) = (0..n)
+            .filter(|&i| !done[i] && dist[i] != u32::MAX)
+            .min_by_key(|&i| (dist[i], i))
+        {
             done[u] = true;
             if u == usize::from(to.0) {
                 break;

@@ -42,7 +42,9 @@ pub use replication::{
 };
 pub use save::{SAVE_VERSION, SavedCharacter, SavedPerson, SavedStructure, WorldSave};
 pub use story::{Conversing, Faded, StoryPlugin, StoryState, StoryView, story_view};
-pub use talk::{LEAVE_RANGE, Npc, SPEECH_TICKS, Speech, TALK_RANGE, TalkPlugin, talk_target};
+pub use talk::{
+    HELD_TICKS, LEAVE_RANGE, Npc, SPEECH_TICKS, Speech, TALK_RANGE, TalkPlugin, talk_target,
+};
 pub use world_sim::{WorldSimPlugin, WorldState, WorldStep, load_world, save_now};
 
 pub use maps::{

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use dark_physics::{Cell, Shape, Terrain};
 use dark_sprite::{AutoSlice, CharacterLayout, Clip, Facing, Frame, Pivot, Rect, SpriteSheet};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 mod spine;
 pub use spine::{BakedClip, SpineBake, SpineDef, SpineSheet, skeleton_hash};
@@ -483,7 +483,7 @@ fn isolate(image: &Image, islands: &dark_sprite::Islands) -> (Image, Vec<Rect>) 
 }
 
 /// A `scenes/*.ron` file: ground, the local player's sheets, and props.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SceneDef {
     /// World size in pixels, origin top-left.
     pub size: (f32, f32),
@@ -514,7 +514,7 @@ pub struct SceneDef {
 /// An inn's rooms. There are no interiors yet, so the inn is an `area` (by its door): sleeping
 /// there is sleeping indoors (warm, the best rest, and enemies leave you be). A character sent to
 /// the inn (its player quit or lost connection) is put to bed at `bed`.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct InnDef {
     /// x, y, width, height in pixels.
     pub area: (f32, f32, f32, f32),
@@ -529,7 +529,7 @@ impl InnDef {
 }
 
 /// An enemy of a kind the project's `combat.ron` defines, guarding `position`.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EnemyPlacement {
     pub kind: String,
     pub position: (f32, f32),
@@ -538,7 +538,7 @@ pub struct EnemyPlacement {
 }
 
 /// Height levels and walls, painted as rectangles of tiles in order (later ones win).
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct TerrainDef {
     /// Pixels per level; defaults to the project tile size.
     #[serde(default)]
@@ -552,7 +552,7 @@ pub struct TerrainDef {
     pub face_frame: Option<u32>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct FillDef {
     /// Column, row, width, height in tiles.
     pub tiles: (u32, u32, u32, u32),
@@ -560,7 +560,7 @@ pub struct FillDef {
 }
 
 /// A prop's footprint, relative to its pivot on the ground plane.
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
 pub struct ColliderDef {
     pub shape: Shape,
     #[serde(default)]
@@ -575,7 +575,7 @@ fn default_collider_height() -> f32 {
 }
 
 /// Walking into `area` moves the body to `spawn` in scene `to`.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct ExitDef {
     /// x, y, width, height in pixels.
     pub area: (f32, f32, f32, f32),
@@ -622,7 +622,7 @@ impl SceneDef {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GroundDef {
     pub sheet: String,
     /// Seamless texture frame, repeated over the whole scene.
@@ -645,14 +645,14 @@ pub struct LookDef {
 
 /// A face for dialogue, from an RPG Maker faceset: a 4×2 grid of faces, `index` counting
 /// across then down.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub struct FaceDef {
     pub image: String,
     #[serde(default)]
     pub index: u32,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PlayerDef {
     #[serde(alias = "walk")]
     pub sheet: String,
@@ -681,7 +681,7 @@ impl PlayerDef {
 
 /// One step of an NPC's conversation, as a string-table key (see [`Localization`]): written
 /// `"key"` the NPC says it, `(reply: "key")` whoever is talking to the NPC says it back.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum LineDef {
     Says(String),
@@ -696,9 +696,9 @@ impl LineDef {
     }
 }
 
-/// A character the world places in a scene. Each time someone talks to it, the conversation
-/// moves on one line, wrapping round at the end.
-#[derive(Clone, Debug, Deserialize)]
+/// A character the world places in a scene. Talking to it starts its conversation; each press
+/// moves it on one line, and the press after the last closes it.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct NpcDef {
     pub sheet: String,
     #[serde(default)]
@@ -732,6 +732,22 @@ impl NpcDef {
 }
 
 impl Project {
+    /// Writes `def` to scene file `path` (the editor's save). Comments in the file are not kept.
+    pub fn save_scene(&self, path: impl AsRef<Path>, def: &SceneDef) -> Result<(), AssetError> {
+        let path = self.path(path);
+        let config = ron::ser::PrettyConfig::default()
+            .extensions(ron::extensions::Extensions::IMPLICIT_SOME)
+            .struct_names(false);
+        let body = ron::ser::to_string_pretty(def, config)
+            .map_err(|e| invalid(&path, format!("cannot write the scene: {e}")))?;
+        let text = format!(
+            "// A Dark Engine scene: made in the editor (dark-editor). Positions are pixels.
+{body}
+"
+        );
+        std::fs::write(&path, text).map_err(|source| AssetError::Io { path, source })
+    }
+
     /// The face `def` names, resized to `size`×`size` with a smooth filter: faces are painted
     /// art, not pixel art, so they are scaled like a picture.
     pub fn load_face(&self, def: &FaceDef, size: u32) -> Result<Image, AssetError> {
@@ -814,7 +830,14 @@ impl Localization {
             .iter()
             .map(|code| {
                 let path = project.path(format!("locale/{code}.ron"));
-                Ok((code.clone(), read_ron(&path)?))
+                let mut table: std::collections::HashMap<String, String> = read_ron(&path)?;
+                // Text written in the editor lives beside the hand-written table, and wins.
+                let edited = project.path(format!("locale/{code}.editor.ron"));
+                if edited.exists() {
+                    let more: std::collections::HashMap<String, String> = read_ron(&edited)?;
+                    table.extend(more);
+                }
+                Ok((code.clone(), table))
             })
             .collect::<Result<_, AssetError>>()?;
         Ok(Self { tables, current: 0 })
@@ -865,7 +888,7 @@ impl Localization {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct PlacedProp {
     pub sheet: String,
     pub frame: u32,
@@ -876,7 +899,7 @@ pub struct PlacedProp {
 }
 
 /// Deterministic random placement, for filling a scene before hand-placed props exist.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ScatterDef {
     pub sheet: String,
     pub frames: Vec<u32>,

@@ -168,10 +168,7 @@ impl Host {
             }
         }
         for client in self.clients() {
-            loop {
-                let Some(server) = self.server_of(client) else {
-                    break;
-                };
+            while let Some(server) = self.server_of(client) {
                 let Some(bytes) = server.receive_message(client, Channel::Control) else {
                     break;
                 };
