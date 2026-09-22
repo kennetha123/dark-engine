@@ -61,6 +61,13 @@ cargo run -p dark-player -- --project ../adventurer --autopilot-fight --screensh
 cargo run -p dark-player -- --project ../adventurer --autopilot-camp --screenshot out.png --frames 190
 cargo run -p dark-player -- --project ../adventurer --autopilot-party --screenshot out.png --frames 240
 cargo run -p dark-cli -- preview-sheet ../adventurer sheets/grass_props.sheet.ron out.png
+cargo run -p dark-cli -- preview-spine ../adventurer sheets/goblin.spine.ron attack_down 20 out.png
+```
+
+Spine skeletons (4.1 JSON exports) must be baked for the host after every export; with
+`DARK_TEST_PROJECT=<abs path to ../adventurer>`, `cargo test` fails on a stale bake:
+```
+cargo run -p dark-cli -- bake-spine ../adventurer sheets/goblin.spine.ron
 ```
 
 Sound is FMOD Studio (runtime 2.02.30, loaded at run time; silent without it). To change the

@@ -20,6 +20,16 @@ fn every_sheet_and_scene_in_the_project_loads() {
             if folder == "sheets" {
                 let sheet = project.load_sheet(&name).unwrap_or_else(|e| panic!("{e}"));
                 assert!(!sheet.sheet.frames.is_empty(), "{name} has no frames");
+                // A skeleton exported again must be baked again.
+                if let Some(spine) = &sheet.spine {
+                    let json = std::fs::read_to_string(project.path(&spine.def.skeleton))
+                        .unwrap_or_else(|e| panic!("{name}: {e}"));
+                    assert_eq!(
+                        dark_assets::skeleton_hash(&json).as_deref(),
+                        Some(spine.bake.skeleton_hash.as_str()),
+                        "{name}: the skeleton changed since it was baked"
+                    );
+                }
             } else {
                 let scene = project.load_scene(&name).unwrap_or_else(|e| panic!("{e}"));
                 for prop in scene.placed_props(0.0, &[], |_, _| true) {

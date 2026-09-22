@@ -707,6 +707,7 @@ version = "0.1.0"
 dependencies = [
  "dark_assets",
  "dark_sim",
+ "dark_spine",
  "glam 0.33.8",
  "image",
 ]
@@ -740,6 +741,7 @@ dependencies = [
  "dark_physics",
  "dark_platform",
  "dark_render",
+ "dark_spine",
  "dark_sprite",
  "dark_time",
  "dark_world",
@@ -855,6 +857,19 @@ dependencies = [
  "ron",
  "serde",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "dark_spine"
+version = "0.1.0"
+dependencies = [
+ "dark_assets",
+ "glam 0.33.8",
+ "image",
+ "ron",
+ "rusty_spine",
+ "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]
@@ -1680,6 +1695,12 @@ dependencies = [
  "adler2",
  "simd-adler32",
 ]
+
+[[package]]
+name = "mint"
+version = "0.5.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e53debba6bda7a793e5f99b8dacf19e626084f525f7829104ba9898f367d85ff"
 
 [[package]]
 name = "moxcms"
@@ -2569,6 +2590,15 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "rusty_spine"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32f5a05599e1bf7b889783c18ccd33630adaea1c9f7fa22c7b3e7c21f89dcc8f"
+dependencies = [
+ "mint",
+]
 
 [[package]]
 name = "same-file"

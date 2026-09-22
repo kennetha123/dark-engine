@@ -228,14 +228,19 @@ impl CharacterSheets {
                         .ok_or_else(|| invalid(format!("unknown moveset {id}")))?,
                     None => Moveset::default(),
                 };
-                Ok(Look {
+                let mut look = Look {
                     base: sheet(&def.sheet)?,
                     attack: match &def.attack {
                         Some(path) => sheet(path)?,
                         None => SpriteSheet::default(),
                     },
-                    moveset,
-                })
+                    moveset: Moveset::default(),
+                };
+                let mut moveset = moveset;
+                timed_by_animation(&mut moveset, &look)
+                    .map_err(|m| invalid(format!("{}: {m}", def.sheet)))?;
+                look.moveset = moveset;
+                Ok(look)
             })
             .collect::<Result<_, AssetError>>()?;
         Ok(Self { looks, defs })
@@ -274,6 +279,51 @@ impl CharacterSheets {
             .position(|d| d == def)
             .map(|i| LookId(i as u16))
     }
+}
+
+/// A look whose clips were baked from a skeleton (docs/PLAN.md §16) has its attacks timed by
+/// the animation: each attack lands on the frame its clip's `strike` event is on and recovers for
+/// the rest of the clip, so the swing on screen and the hit on the host agree. Every direction of
+/// an attack must strike on the same frame and last as long (one moveset times them all).
+///
+/// An attack's clip starts on the tick the attack does and steps once in that same tick, so the
+/// frame drawn is always one ahead of the fighter's tick: striking on frame `s` is fighter tick
+/// `s - 1`, and a clip of `n` frames is over after `n - 1` ticks.
+fn timed_by_animation(moveset: &mut Moveset, look: &Look) -> Result<(), String> {
+    for (i, attack) in moveset.combo.iter_mut().enumerate() {
+        let mut baked: Vec<(u32, u32)> = Vec::new();
+        for facing in Facing::ALL {
+            let name = format!("{}_{}", attack.clip, facing.name());
+            // The sheet the controller plays it from: the attack sheet first, as `show` does.
+            let found = [&look.attack, &look.base]
+                .into_iter()
+                .find_map(|sheet| sheet.clip_id(&name).map(|id| (sheet, id)));
+            let Some((sheet, id)) = found else {
+                continue;
+            };
+            if let Some(strike) = sheet.timing(id).and_then(|t| t.event("strike")) {
+                let ticks = sheet.clips[usize::from(id.0)].frames.len() as u32;
+                baked.push((strike, ticks));
+            }
+        }
+        let Some(&(strike, ticks)) = baked.first() else {
+            continue;
+        };
+        if baked.iter().any(|&b| b != (strike, ticks)) {
+            return Err(format!(
+                "attack {i} ({}): its directions strike on different frames or last differently",
+                attack.clip
+            ));
+        }
+        let startup = strike.saturating_sub(1).min(u32::from(u16::MAX)) as u16;
+        let rest = ticks
+            .saturating_sub(1)
+            .saturating_sub(u32::from(startup) + u32::from(attack.active));
+        attack.startup = startup;
+        attack.recovery = rest.clamp(1, u32::from(u16::MAX)) as u16;
+        attack.chain_from = attack.chain_from.min(attack.recovery);
+    }
+    Ok(())
 }
 
 /// How an enemy kind looks, from the project's combat definitions.
@@ -966,6 +1016,79 @@ pub(crate) mod tests {
             control(&mut state, true, walk, &sheets).velocity,
             Vec2::ZERO
         );
+    }
+
+    #[test]
+    fn a_baked_strike_times_the_attack() {
+        let mut sheet = SpriteSheet::default();
+        for dir in ["down", "up"] {
+            sheet.add_clip(Clip {
+                name: format!("attack_{dir}"),
+                frames: (0..40).collect(),
+                ticks_per_frame: 1,
+                looping: false,
+                flip_x: false,
+            });
+            sheet.timing.push(dark_sprite::ClipTiming {
+                events: vec![("strike".into(), 18)],
+                ..Default::default()
+            });
+        }
+        let look = Look {
+            base: sheet.clone(),
+            ..Look::default()
+        };
+        let mut m = moveset();
+        timed_by_animation(&mut m, &look).unwrap();
+        let a = &m.combo[0];
+        assert_eq!((a.startup, a.active, a.recovery), (17, 5, 17));
+        assert!(a.chain_from <= a.recovery);
+
+        // On screen: the hit starts on the very tick frame 18 (the strike) is drawn, and the
+        // fighter is free when the clip has played out.
+        let sheets = CharacterSheets::single(Look {
+            base: sheet.clone(),
+            attack: SpriteSheet::default(),
+            moveset: m.clone(),
+        });
+        let mut state = CharacterState::new(&sheets, LookId(0), Facing::Down);
+        let press = TickInput {
+            attack: true,
+            ..Default::default()
+        };
+        control(&mut state, true, press, &sheets);
+        let mut ticks = 1;
+        while state.fighter.hitbox(&m, Vec2::ZERO, Vec2::Y).is_none() {
+            control(&mut state, true, TickInput::default(), &sheets);
+            ticks += 1;
+        }
+        assert_eq!(
+            state.anim.step(),
+            18,
+            "the hit and the strike frame together"
+        );
+        while !state.fighter.is_free() {
+            control(&mut state, true, TickInput::default(), &sheets);
+            ticks += 1;
+        }
+        assert_eq!(ticks, 40, "over with the clip");
+
+        // Directions that disagree are refused.
+        let mut uneven = sheet;
+        uneven.timing[1].events = vec![("strike".into(), 12)];
+        let uneven = Look {
+            base: uneven,
+            ..Look::default()
+        };
+        assert!(timed_by_animation(&mut moveset(), &uneven).is_err());
+        // A plain sheet leaves the authored timing alone.
+        let mut plain = moveset();
+        timed_by_animation(&mut plain, &sheets_plain()).unwrap();
+        assert_eq!(plain.combo[0].startup, 5);
+    }
+
+    fn sheets_plain() -> Look {
+        sheets().looks[0].clone()
     }
 
     #[test]

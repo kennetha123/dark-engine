@@ -1,4 +1,5 @@
-// Sprite passes: instanced quads into the low-resolution target.
+// Sprite passes: instanced quads into the low-resolution target; meshes (posed skeletons) are
+// triangles with the same attributes per vertex, drawn by vs_mesh in the main pass.
 //   fs_sprite      main pass (plain sprites, character bodies, blob shadows, debug outlines)
 //   fs_mask        occluders write their draw order into the occlusion mask (max blend)
 //   fs_silhouette  character bodies, only where the mask holds a later draw order
@@ -71,6 +72,23 @@ fn vs_sprite(@builtin(vertex_index) vertex: u32, instance: Instance) -> SpriteOu
     out.tiles = instance.tiles;
     out.order = instance.order;
     out.mode = instance.mode;
+    return out;
+}
+
+// A mesh vertex: `pos` is its world position and `uv_min` its texture coordinate; with no quad
+// to tile, the fragment samples exactly there.
+@vertex
+fn vs_mesh(vertex: Instance) -> SpriteOut {
+    let ndc = (vertex.pos - globals.origin) / globals.size * vec2(2.0, -2.0) + vec2(-1.0, 1.0);
+    var out: SpriteOut;
+    out.clip = vec4(ndc, 0.0, 1.0);
+    out.local = vec2(0.0);
+    out.uv_min = vertex.uv_min;
+    out.uv_size = vec2(0.0);
+    out.color = vertex.color;
+    out.tiles = vec2(1.0);
+    out.order = vertex.order;
+    out.mode = vertex.mode;
     return out;
 }
 

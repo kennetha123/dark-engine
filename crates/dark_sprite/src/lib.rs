@@ -88,9 +88,48 @@ pub struct Frame {
 pub struct SpriteSheet {
     pub frames: Vec<Frame>,
     pub clips: Vec<Clip>,
+    /// What clips mean for the game beyond pictures, by clip id: baked from skeletal animation
+    /// (docs/PLAN.md §16). Empty for plain sheets; may be shorter than `clips`.
+    #[serde(default)]
+    pub timing: Vec<ClipTiming>,
+}
+
+/// A clip's events and boxes, one entry per frame of the clip (each frame is one tick in baked
+/// clips).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClipTiming {
+    /// Named moments, by frame of the clip. `strike` is when an attack lands.
+    #[serde(default)]
+    pub events: Vec<(String, u32)>,
+    /// Where a blow lands this frame (ground plane, relative to the feet); empty if the clip
+    /// has none, `None` on frames without one.
+    #[serde(default)]
+    pub hitboxes: Vec<Option<Circle>>,
+    /// Where the body can be hit this frame; empty for the default footprint.
+    #[serde(default)]
+    pub hurtboxes: Vec<Option<Circle>>,
+}
+
+impl ClipTiming {
+    /// The first frame an event of this name happens on.
+    pub fn event(&self, name: &str) -> Option<u32> {
+        self.events.iter().find(|(n, _)| n == name).map(|(_, f)| *f)
+    }
+}
+
+/// A circle on the ground plane, relative to a character's feet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Circle {
+    pub offset: Vec2,
+    pub radius: f32,
 }
 
 impl SpriteSheet {
+    /// Baked timing of clip `id`, if any.
+    pub fn timing(&self, id: ClipId) -> Option<&ClipTiming> {
+        self.timing.get(usize::from(id.0))
+    }
+
     pub fn clip_id(&self, name: &str) -> Option<ClipId> {
         self.clips
             .iter()

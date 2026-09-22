@@ -22,6 +22,7 @@ dark_physics = { path = "crates/dark_physics" }
 dark_sim = { path = "crates/dark_sim" }
 dark_combat = { path = "crates/dark_combat" }
 dark_audio = { path = "crates/dark_audio" }
+dark_spine = { path = "crates/dark_spine" }
 dark_life = { path = "crates/dark_life" }
 
 bevy_ecs = "0.18.1"
@@ -37,6 +38,8 @@ libloading = "0.9.0"
 naga = { version = "=30.0.1", features = ["wgsl-in"] }
 # integer128: player ids (u128) are saved in the world simulation.
 ron = { version = "0.12.2", features = ["integer128"] }
+# Spine 4.1 runtime (spine-c transpiled): pinned to the Spine editor the studio exports from.
+rusty_spine = "=0.7.1"
 pollster = "1.0.1"
 postcard = { version = "1.1.3", features = ["alloc"] }
 renet = "2.0.0"

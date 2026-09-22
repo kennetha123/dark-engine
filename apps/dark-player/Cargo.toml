@@ -18,6 +18,7 @@ dark_assets.workspace = true
 dark_combat.workspace = true
 dark_life.workspace = true
 dark_audio.workspace = true
+dark_spine.workspace = true
 bevy_ecs.workspace = true
 dark_net.workspace = true
 dark_platform.workspace = true

@@ -116,11 +116,60 @@ impl Plugin for CombatPlugin {
     }
 }
 
+/// Where `state`'s current attack lands this tick, feet at `feet`: the baked hitbox of its
+/// clip's frame when the clip has any (none on frames without one), else the moveset's circle.
+pub(crate) fn hit_circle(
+    state: &CharacterState,
+    sheets: &CharacterSheets,
+    feet: Vec2,
+) -> Option<(Vec2, f32)> {
+    let look = sheets.look(state.look);
+    match frame_box(state, sheets, |t| &t.hitboxes) {
+        Some(frame) => {
+            let circle = frame?;
+            matches!(state.fighter.action, Action::Attack { .. })
+                .then(|| (feet + circle.offset, circle.radius))
+        }
+        None => state
+            .fighter
+            .hitbox(&look.moveset, feet, state.facing.vector()),
+    }
+}
+
+/// Where `state` can be hit, feet at `feet`: its clip frame's baked hurtbox, else its footprint.
+pub(crate) fn hurt_circle(
+    state: &CharacterState,
+    sheets: &CharacterSheets,
+    feet: Vec2,
+) -> (Vec2, f32) {
+    match frame_box(state, sheets, |t| &t.hurtboxes).flatten() {
+        Some(circle) => (feet + circle.offset, circle.radius),
+        None => (feet, CHARACTER_RADIUS),
+    }
+}
+
+/// The baked box of the current frame: `None` if the clip has no such boxes at all, `Some(None)`
+/// on a frame without one.
+fn frame_box(
+    state: &CharacterState,
+    sheets: &CharacterSheets,
+    boxes: impl Fn(&dark_sprite::ClipTiming) -> &Vec<Option<dark_sprite::Circle>>,
+) -> Option<Option<dark_sprite::Circle>> {
+    let sheet = crate::characters::sheet_of(state, sheets);
+    let frames = boxes(sheet.timing(state.anim.clip())?);
+    if frames.is_empty() {
+        return None;
+    }
+    Some(frames.get(state.anim.step() as usize).copied().flatten())
+}
+
 /// One fighter as the hit check sees it.
 struct Contender {
     entity: Entity,
     map: MapId,
+    /// Centre and radius of where it can be hit.
     at: Vec2,
+    radius: f32,
     elevation: f32,
     hostile: bool,
     /// Friendly NPCs are never hit.
@@ -149,22 +198,23 @@ pub(crate) fn resolve_hits(
     let contenders: Vec<Contender> = fighters
         .iter()
         .map(
-            |(entity, _, map, body, _, hostile, (npc, companion), _)| Contender {
-                entity,
-                map: *map,
-                at: body.0.position,
-                elevation: body.0.elevation,
-                hostile,
-                untouchable: npc && !companion,
+            |(entity, _, map, body, state, hostile, (npc, companion), _)| {
+                let (at, radius) = hurt_circle(state, &sheets, body.0.position);
+                Contender {
+                    entity,
+                    map: *map,
+                    at,
+                    radius,
+                    elevation: body.0.elevation,
+                    hostile,
+                    untouchable: npc && !companion,
+                }
             },
         )
         .collect();
     let mut landed: Vec<(Entity, Entity, u32, u8, Vec2)> = Vec::new();
     for (entity, id, map, body, state, hostile, _, hits) in &fighters {
-        let look = sheets.look(state.look);
-        let facing = state.facing.vector();
-        let Some((center, radius)) = state.fighter.hitbox(&look.moveset, body.0.position, facing)
-        else {
+        let Some((center, radius)) = hit_circle(state, &sheets, body.0.position) else {
             continue;
         };
         let Action::Attack { step, .. } = state.fighter.action else {
@@ -175,7 +225,7 @@ pub(crate) fn resolve_hits(
                 .is_some_and(|h| h.swing == state.fighter.swing && h.hit.contains(&victim))
         };
         for victim in &contenders {
-            let reaches = victim.at.distance(center) <= radius + CHARACTER_RADIUS;
+            let reaches = victim.at.distance(center) <= radius + victim.radius;
             let level = (victim.elevation - body.0.elevation).abs() <= HIT_HEIGHT;
             if victim.entity != entity
                 && victim.map == *map
@@ -350,4 +400,51 @@ pub(crate) fn place(
         position: at,
         elevation: placed.elevation,
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::characters::tests::sheets;
+    use crate::characters::{LookId, TickInput, control};
+    use dark_sprite::{Circle, ClipTiming};
+
+    #[test]
+    fn a_baked_hitbox_lands_only_on_its_frames_and_the_footprint_is_the_default_hurtbox() {
+        let mut sheets = sheets();
+        // Every attack clip strikes on its second frame only, 12 px ahead-right of the feet.
+        let attack = &mut sheets.looks[0].attack;
+        let hit = Circle {
+            offset: Vec2::new(12.0, 0.0),
+            radius: 7.0,
+        };
+        attack.timing = attack
+            .clips
+            .iter()
+            .map(|_| ClipTiming {
+                hitboxes: vec![None, Some(hit), None, None],
+                ..Default::default()
+            })
+            .collect();
+        let mut state = CharacterState::new(&sheets, LookId(0), Facing::Down);
+        let feet = Vec2::new(100.0, 100.0);
+        let press = TickInput {
+            attack: true,
+            ..Default::default()
+        };
+        control(&mut state, true, press, &sheets);
+        assert_eq!(
+            hit_circle(&state, &sheets, feet),
+            None,
+            "first frame: nothing"
+        );
+        for _ in 0..5 {
+            control(&mut state, true, TickInput::default(), &sheets);
+        }
+        assert_eq!(
+            hit_circle(&state, &sheets, feet),
+            Some((Vec2::new(112.0, 100.0), 7.0))
+        );
+        assert_eq!(hurt_circle(&state, &sheets, feet), (feet, CHARACTER_RADIUS));
+    }
 }

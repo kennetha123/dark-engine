@@ -74,6 +74,11 @@ impl AnimationPlayer {
         self.clip
     }
 
+    /// Which of the clip's frames is showing, from 0.
+    pub fn step(&self) -> u32 {
+        self.step
+    }
+
     /// A non-looping clip has shown its last frame for its full duration.
     pub fn finished(&self) -> bool {
         self.finished

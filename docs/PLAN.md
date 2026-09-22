@@ -193,7 +193,7 @@ docs/            this plan
 | M3 ✅ | World sim prototype | Headless: 365-day clock, sleep consensus, hero party plan, off-screen sim, title transfer, fast-forward (done; see §12) |
 | M4 ✅ | Combat slice | Combos, dodge, hitstop, 2 enemies with AI, FMOD, replicated (done; see §13) |
 | M5 ✅ | Actors, roles, parties, life sim | Mixed parties, betrayal, factions, needs, temperature, tents, intoxication (done; see §14, §15) |
-| M6 | Spine | Rendering + baked hitboxes |
+| M6 ✅ | Spine | Rendering + baked hitboxes (done; see §16) |
 | M7 | Narrative + save | Storylets, dialogue, relationships/marriage, endings, full world save |
 | M8 | Editor MVP | Maps + height, database, roles/factions, calendar, storylets, hitbox/enemy editors, multi-client playtest, manual slice overrides |
 | M9 | Polish + ship | Steam lobby/relay, lighting, particles, Luau, localization, export |
@@ -379,7 +379,7 @@ docs/            this plan
   bars over enemies and the hurt; the local player's top left; dead enemies fade.
 - Clips can be `flip_x` and carry their own `pivot` (battler rows stand at different places in
   their cells). Pitaya's combo is lunge, swing and spin slash from her battler sheet.
-- `dark_audio` (presentation): FMOD Studio loaded at run time with `libloading` (the one place
+- `dark_audio` (presentation): FMOD Studio loaded at run time with `libloading` (one of two places
   `unsafe` is allowed), so the engine builds and runs silently without the SDK. One-shot events
   by path at world positions (pixels / tile size = metres, north ahead), listener at the camera.
   The project names the runtime library per platform, the banks and the runtime version.
@@ -496,3 +496,48 @@ docs/            this plan
   players from the hero party still wait for M7's storylets; kills by followers or other players
   earn their followers nothing; a save from before M5 loads with every standing at 0 and default
   `social` numbers.
+
+## 16. Spine (as built in M6)
+
+- The runtime is `rusty_spine` 0.7.1 (spine-c transpiled to Rust, so nothing to build), pinned
+  exactly: it reads Spine **4.1** exports, the editor version the studio's art comes from. Only
+  presentation and tools use it (`dark_spine`, `dark-player`, `dark-cli`); the sim-dependency
+  guard keeps it out of simulation crates. `dark_spine::raw` is the second place `unsafe` is
+  allowed (the runtime's page pointers and bounding-box vertex math), beside FMOD's.
+- A look's sheet may be a `*.spine.ron`: skeleton JSON, atlas, a baked file, `scale` (Spine
+  units to world pixels), `texture_scale` (how small the pages are drawn), how animations are
+  named (`pattern`, default `{dir}_{action}`; `actions` maps engine actions such as `walk` to
+  Spine's; `directions` maps the eight facings, compass points by default), which actions loop,
+  and the `strike_event`.
+- Baked for the host: `dark-cli bake-spine <project> <sheet>` poses every clip a tick at a time
+  and writes each clip's length in ticks, its events (the strike event as `strike`), and per tick
+  the circle around any bounding box named `hitbox` or `hurtbox` (drawn on the ground where the
+  blow lands or the body stands, feet-relative). Loading the sheet builds plain clips from that,
+  one frame per tick, so the controller, prediction and replication are unchanged and the
+  headless host never runs Spine. A clip that plays once is `floor(duration × 60) + 1` ticks (its
+  last key shown), a looping one `round(duration × 60)`; an event is on the first tick at or past
+  its key. Baking is deterministic; with `DARK_TEST_PROJECT` set, a test re-bakes every sheet and
+  fails on a stale bake, and the smoke test checks each bake's skeleton hash.
+- The host uses the bake: an attack whose clip has a `strike` lands on the tick that frame is
+  drawn (an attack's clip steps once on its first tick, so the drawn frame runs one ahead of the
+  fighter's tick) and recovers until the clip has played out; every direction must agree, or the
+  look is refused. A clip with baked hitboxes hits only on frames that have one, where the box
+  is; a baked hurtbox replaces the footprint.
+- The view poses each skeletal character exactly at its replicated clip and frame (no blending)
+  and draws it as triangle meshes. The renderer draws meshes in the main pass, sorted among the
+  sprites by layer and feet (`Renderer::render_with`), with the same shader attributes per vertex;
+  their pages are smoothly filtered (`create_texture_smooth`), shrunk once to the size they are
+  drawn at, turned from premultiplied to straight alpha, and their colour bled into transparent
+  texels so filtering draws no dark fringes. Bubbles and health bars sit at the skeleton's baked
+  height.
+- `dark-cli preview-spine <project> <sheet> <clip> <tick> <out.png>` draws a pose on the CPU.
+- Adventurer: the goblin from Echoes Below (eight-way top-down animations, `OnEventAttack` on
+  its strike frame) guards the meadow beside the sprite enemies.
+- Skeletal characters are bodies like sprite characters: covered by a prop drawn after them,
+  they show as a silhouette (their triangles are drawn again in the silhouette pass). Meshes
+  themselves never hide anyone.
+- Known gaps: blend modes other than normal
+  draw as normal; no mixing between animations (turns and changes snap, as with sprites); no
+  death animation for the goblin (it holds its hit pose while it fades); binary `.skel` exports
+  are not read yet (JSON only); a skeleton's root is taken as its feet (the goblin's stand a few
+  pixels lower); the goblin has no bounding boxes, so its hits use its moveset's circle.

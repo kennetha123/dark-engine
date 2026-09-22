@@ -4,7 +4,8 @@
 //! All gameplay is `dark_world` simulation. This module loads the project's scene, sheets, font
 //! and strings, and draws: a list of [`DrawCharacter`]s in one map, from the host's own world or
 //! from a client's [`dark_world::ClientSession`], with speech bubbles in the reader's language,
-//! the tents and fires set down there, and the local player's body and hotbar.
+//! the tents and fires set down there, and the local player's body and hotbar. Looks made from
+//! Spine skeletons are posed each frame from the host's clip and frame, and drawn as meshes.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -16,8 +17,10 @@ use dark_core::{App, FrameTime};
 use dark_life::{LifeDef, Need, Structure};
 use dark_physics::{Cell, Shape};
 use dark_render::{
-    Outline, RenderError, Renderer, Sprite, SpriteKind, TextLayout, TextSystem, TextureId, layer,
+    Mesh, MeshVertex, Outline, RenderError, Renderer, Sprite, SpriteKind, TextLayout, TextSystem,
+    TextureId, layer,
 };
+use dark_spine::{Pose, Rig};
 use dark_sprite::{Rect, SpriteSheet};
 use dark_world::{
     BodyState, CharacterSheets, CharacterState, CharactersPlugin, CombatPlugin, Dormant,
@@ -50,6 +53,8 @@ pub struct DemoScene {
     life: LifeDef,
     /// Each item's hotbar icon, by item id.
     icons: Vec<(String, Image)>,
+    /// Skeletons, by the `*.spine.ron` sheet path they are loaded from.
+    rigs: HashMap<String, Rig>,
 }
 
 /// One frame's world, as the view draws it.
@@ -120,6 +125,20 @@ impl DemoScene {
                 slot.insert(sheet);
             }
         }
+        // Spine sheets carry a skeleton, not an image: load it for the view.
+        let mut rigs = HashMap::new();
+        for (path, loaded) in &sheets {
+            if let Some(spine) = &loaded.spine {
+                let rig = Rig::load(project, &spine.def).map_err(|e| AssetError::Invalid {
+                    path: project.path(path),
+                    message: e.to_string(),
+                })?;
+                if spine.bake.skeleton_hash != rig.hash() {
+                    tracing::warn!("{path}: the skeleton changed since it was baked; bake again");
+                }
+                rigs.insert(path.clone(), rig);
+            }
+        }
         // The same looks the headless host loads, from the sheets loaded here.
         let characters = CharacterSheets::build(&maps, &combat, project, |path| {
             Ok(sheets[path].sheet.clone())
@@ -156,6 +175,7 @@ impl DemoScene {
             combat,
             life,
             icons,
+            rigs,
         })
     }
 
@@ -217,6 +237,38 @@ impl DemoScene {
         };
         let tent = structure(&self.life.art.tent);
         let campfire = structure(&self.life.art.campfire);
+        // Each skeleton's pages, smooth (painted art drawn turned and small), and its clips.
+        let mut skeletons: Vec<SkeletonView> = Vec::new();
+        let mut skeleton_of = HashMap::new();
+        for (path, rig) in self.rigs {
+            let spine = self.sheets[&path]
+                .spine
+                .as_ref()
+                .expect("rigs come from Spine sheets");
+            let mut pages = Vec::new();
+            for page in &rig.pages {
+                let image = &page.image;
+                pages.push(renderer.create_texture_smooth(
+                    &format!("{path} {}", page.name),
+                    image.width,
+                    image.height,
+                    &image.rgba,
+                )?);
+            }
+            let clips = spine
+                .bake
+                .clips
+                .iter()
+                .map(|(name, c)| (name.clone(), (c.animation.clone(), c.looping)))
+                .collect();
+            skeleton_of.insert(path, skeletons.len());
+            skeletons.push(SkeletonView {
+                height: spine.bake.height,
+                rig,
+                pages,
+                clips,
+            });
+        }
         let mut looks = Vec::with_capacity(self.looks.len());
         for (i, (look, face)) in self.looks.iter().enumerate() {
             let base = textures[&look.sheet];
@@ -234,6 +286,7 @@ impl DemoScene {
                 attack: look.attack.as_ref().map_or(base, |a| textures[a]),
                 face,
                 name: look.name.clone(),
+                skeleton: skeleton_of.get(&look.sheet).copied(),
             });
         }
         Ok(DemoView {
@@ -258,6 +311,9 @@ impl DemoScene {
             campfire,
             comfort: self.life.rates.comfort,
             seconds: 0.0,
+            skeletons,
+            poses: HashMap::new(),
+            frame_meshes: Vec::new(),
         })
     }
 }
@@ -617,6 +673,27 @@ struct LookView {
     face: Option<TextureId>,
     /// String-table key.
     name: Option<String>,
+    /// A Spine skeleton instead of sprites: index into [`DemoView::skeletons`].
+    skeleton: Option<usize>,
+}
+
+/// A loaded skeleton for drawing.
+struct SkeletonView {
+    rig: Rig,
+    pages: Vec<TextureId>,
+    /// Engine clip name to the Spine animation and whether it loops.
+    clips: HashMap<String, (String, bool)>,
+    /// World pixels, for what shows over heads.
+    height: f32,
+}
+
+/// How far above `c`'s feet bubbles, prompts and health bars go: a skeleton's own height, else
+/// the sprite characters' head.
+fn head_height(looks: &[LookView], skeletons: &[SkeletonView], c: &DrawCharacter) -> f32 {
+    looks
+        .get(usize::from(c.state.look.0))
+        .and_then(|l| l.skeleton)
+        .map_or(HEAD_HEIGHT, |s| skeletons[s].height + 6.0)
 }
 
 /// GPU side: turns characters and maps into sprites each frame.
@@ -652,6 +729,10 @@ pub struct DemoView {
     comfort: (i32, i32),
     /// Seconds drawn, for animating structures.
     seconds: f32,
+    skeletons: Vec<SkeletonView>,
+    /// Each skeletal character's posed skeleton, by who it is.
+    poses: HashMap<NetId, (usize, Pose)>,
+    frame_meshes: Vec<Mesh>,
 }
 
 impl DemoView {
@@ -697,9 +778,11 @@ impl DemoView {
         let characters = shown.as_slice();
         let collision = &maps.get(map).collision;
         self.frame_sprites.clear();
+        self.frame_meshes.clear();
         self.draw_structures(frame.structures, collision);
-        let view = &self.maps[map.0 as usize];
-        self.frame_sprites.extend_from_slice(&view.statics);
+        let map_view = map.0 as usize;
+        self.frame_sprites
+            .extend_from_slice(&self.maps[map_view].statics);
         let mut focus = None;
 
         for c in characters {
@@ -722,7 +805,18 @@ impl DemoView {
             } else {
                 look.base
             };
-            if let Some(frame) = c
+            // Flushed red when hit; fading when a dead enemy is about to go.
+            let flash = self.fx.flash(c.id);
+            let tint = [
+                1.0,
+                1.0 - 0.7 * flash,
+                1.0 - 0.7 * flash,
+                fx::corpse_alpha(c),
+            ];
+            if let Some(skeleton) = look.skeleton {
+                let feet = (c.ground - Vec2::new(0.0, c.elevation)).round();
+                self.draw_skeleton(c, skeleton, feet, sort_y, tint);
+            } else if let Some(frame) = c
                 .state
                 .anim
                 .frame(&sheet.clips)
@@ -740,14 +834,7 @@ impl DemoView {
                 sprite.kind = SpriteKind::Character;
                 sprite.lift = c.elevation;
                 sprite.sort_y = sort_y;
-                // Flushed red when hit; fading when a dead enemy is about to go.
-                let flash = self.fx.flash(c.id);
-                sprite.color = [
-                    1.0,
-                    1.0 - 0.7 * flash,
-                    1.0 - 0.7 * flash,
-                    fx::corpse_alpha(c),
-                ];
+                sprite.color = tint;
                 self.frame_sprites.push(sprite);
             }
             // Blob shadow on the surface below, shrinking with height; a little below the pivot
@@ -783,7 +870,7 @@ impl DemoView {
             }
         }
         if self.debug {
-            for s in &view.overlay {
+            for s in &self.maps[map_view].overlay {
                 let mut s = *s;
                 s.layer = layer::DEBUG;
                 self.frame_sprites.push(s);
@@ -805,15 +892,24 @@ impl DemoView {
                 }
                 ground - Vec2::new(0.0, self.camera_floor)
             }
-            None => view.size / 2.0,
+            None => self.maps[map_view].size / 2.0,
         };
-        let camera = focus_point.clamp(half, (view.size - half).max(half)) + self.fx.shake();
+        let size = self.maps[map_view].size;
+        let camera = focus_point.clamp(half, (size - half).max(half)) + self.fx.shake();
         self.camera = camera;
         self.draw_sparks();
         self.draw_health(characters, dt);
         let screen = (camera - half, half * 2.0);
         self.draw_interface(renderer, characters, frame, screen, dt);
-        renderer.render(camera, [0.0; 3], &mut self.frame_sprites);
+        // Skeletons of those no longer here are dropped.
+        self.poses
+            .retain(|id, _| characters.iter().any(|c| c.id == *id));
+        renderer.render_with(
+            camera,
+            [0.0; 3],
+            &mut self.frame_sprites,
+            &self.frame_meshes,
+        );
     }
 
     /// Speech bubbles, sleepers' snores, the talk prompt, the local player's dialogue window, the
@@ -871,7 +967,11 @@ impl DemoView {
         let mut bubbles: Vec<(TextLayout, Vec2, f32, bool)> = Vec::new();
         for c in characters.iter().filter(|c| !mine(c)) {
             if let Some(speech) = &c.speech {
-                let head = c.ground - Vec2::new(0.0, c.elevation + HEAD_HEIGHT);
+                let head = c.ground
+                    - Vec2::new(
+                        0.0,
+                        c.elevation + head_height(&self.looks, &self.skeletons, c),
+                    );
                 let said = layout(self.strings.text(&speech.line), BUBBLE_WIDTH);
                 bubbles.push((said, head, c.ground.y, false));
             }
@@ -882,7 +982,11 @@ impl DemoView {
             .iter()
             .filter(|c| (c.state.sleeping || c.state.impaired.out) && c.speech.is_none())
         {
-            let head = c.ground - Vec2::new(0.0, c.elevation + HEAD_HEIGHT);
+            let head = c.ground
+                - Vec2::new(
+                    0.0,
+                    c.elevation + head_height(&self.looks, &self.skeletons, c),
+                );
             bubbles.push((layout("z Z z", BUBBLE_WIDTH), head, c.ground.y, true));
         }
         // Who the local player would talk to, unless a conversation is already showing.
@@ -897,7 +1001,11 @@ impl DemoView {
                 && npc.speech.is_none()
             {
                 let prompt = format!("E  {}", self.strings.text("ui.talk"));
-                let head = npc.ground - Vec2::new(0.0, npc.elevation + HEAD_HEIGHT);
+                let head = npc.ground
+                    - Vec2::new(
+                        0.0,
+                        npc.elevation + head_height(&self.looks, &self.skeletons, npc),
+                    );
                 bubbles.push((layout(&prompt, BUBBLE_WIDTH), head, npc.ground.y, true));
             }
         }
@@ -1314,6 +1422,59 @@ impl DemoView {
         ));
     }
 
+    /// A skeletal character: its skeleton posed at the replicated clip and frame (one frame is one
+    /// tick in a baked clip), as meshes standing at `feet`.
+    fn draw_skeleton(
+        &mut self,
+        c: &DrawCharacter,
+        skeleton: usize,
+        feet: Vec2,
+        sort_y: f32,
+        tint: [f32; 4],
+    ) {
+        let sheet = sheet_of(&c.state, &self.sheets);
+        let Some(clip) = sheet.clips.get(usize::from(c.state.anim.clip().0)) else {
+            return;
+        };
+        let view = &self.skeletons[skeleton];
+        let Some((animation, looping)) = view.clips.get(&clip.name) else {
+            return;
+        };
+        let time = c.state.anim.step() as f32 / 60.0;
+        let entry = self
+            .poses
+            .entry(c.id)
+            .or_insert_with(|| (skeleton, Pose::new(&view.rig)));
+        if entry.0 != skeleton {
+            *entry = (skeleton, Pose::new(&view.rig));
+        }
+        let pose = &mut entry.1;
+        pose.pose(animation, *looping, time);
+        for mesh in pose.meshes(&view.rig) {
+            let vertices = mesh
+                .vertices
+                .iter()
+                .map(|v| MeshVertex {
+                    position: feet + v.position,
+                    uv: v.uv,
+                    color: [
+                        v.color[0] * tint[0],
+                        v.color[1] * tint[1],
+                        v.color[2] * tint[2],
+                        v.color[3] * tint[3],
+                    ],
+                })
+                .collect();
+            self.frame_meshes.push(Mesh {
+                texture: view.pages[mesh.page],
+                vertices,
+                layer: layer::WORLD,
+                sort_y,
+                body: true,
+            });
+        }
+    }
+
     /// A small white burst where each recent hit landed.
     fn draw_sparks(&mut self) {
         let sparks: Vec<(Vec2, f32)> = self
@@ -1358,7 +1519,11 @@ impl DemoView {
                 continue;
             }
             let trail = self.trails.trail(c.id).unwrap_or(f32::from(health));
-            let head = c.ground - Vec2::new(0.0, c.elevation + HEAD_HEIGHT - 6.0);
+            let head = c.ground
+                - Vec2::new(
+                    0.0,
+                    c.elevation + head_height(&self.looks, &self.skeletons, c) - 6.0,
+                );
             let bar = Bar {
                 health,
                 trail,

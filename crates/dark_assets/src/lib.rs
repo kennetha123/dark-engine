@@ -9,6 +9,9 @@ use dark_physics::{Cell, Shape, Terrain};
 use dark_sprite::{AutoSlice, CharacterLayout, Clip, Facing, Frame, Pivot, Rect, SpriteSheet};
 use serde::Deserialize;
 
+mod spine;
+pub use spine::{BakedClip, SpineBake, SpineDef, SpineSheet, skeleton_hash};
+
 #[derive(Debug, thiserror::Error)]
 pub enum AssetError {
     #[error("{path}: {source}")]
@@ -114,9 +117,13 @@ impl Project {
         self.root.join(relative)
     }
 
-    /// Loads a sheet definition and the image it slices.
+    /// Loads a sheet definition and the image it slices; a `*.spine.ron` sheet loads its baked
+    /// clips instead (see [`SpineDef`]).
     pub fn load_sheet(&self, definition: impl AsRef<Path>) -> Result<LoadedSheet, AssetError> {
         let def_path = self.path(definition);
+        if def_path.to_string_lossy().ends_with(".spine.ron") {
+            return self.load_spine_sheet(&def_path);
+        }
         let def: SheetDef = read_ron(&def_path)?;
         let image_path = self.path(&def.image);
         let mut image = load_image(&image_path)?;
@@ -137,6 +144,7 @@ impl Project {
             image_path,
             image,
             sheet,
+            spine: None,
         })
     }
 }
@@ -185,6 +193,8 @@ pub struct LoadedSheet {
     pub image_path: PathBuf,
     pub image: Image,
     pub sheet: SpriteSheet,
+    /// A skeleton instead of an image (`image` is then a transparent pixel).
+    pub spine: Option<SpineSheet>,
 }
 
 /// A `*.sheet.ron` file.

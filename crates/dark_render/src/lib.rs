@@ -12,7 +12,9 @@ use std::sync::Arc;
 use glam::Vec2;
 use winit::window::Window;
 
-pub use sprite::{Outline, Sprite, SpriteKind, TextureId, Viewport, fit_viewport, layer};
+pub use sprite::{
+    Mesh, MeshVertex, Outline, Sprite, SpriteKind, TextureId, Viewport, fit_viewport, layer,
+};
 pub use text::{FontError, GlyphQuad, TextLayout, TextSystem};
 
 /// Sprite textures and the internal target share this format; blending happens in linear space.
@@ -58,6 +60,7 @@ pub struct Capture {
 struct Silhouettes {
     mask_pipeline: wgpu::RenderPipeline,
     silhouette_pipeline: wgpu::RenderPipeline,
+    silhouette_mesh_pipeline: wgpu::RenderPipeline,
     mask_view: wgpu::TextureView,
     mask_bind_group: wgpu::BindGroup,
 }
@@ -89,6 +92,8 @@ pub struct Renderer {
     target_view: wgpu::TextureView,
 
     sampler: wgpu::Sampler,
+    /// For painted art drawn smaller or turned (skeletons): see [`Renderer::create_texture_smooth`].
+    smooth_sampler: wgpu::Sampler,
     texture_layout: wgpu::BindGroupLayout,
     textures: Vec<GpuTexture>,
 
@@ -96,7 +101,10 @@ pub struct Renderer {
     globals_bind_group: wgpu::BindGroup,
     instances: wgpu::Buffer,
     instance_capacity: usize,
+    mesh_vertices: wgpu::Buffer,
+    mesh_capacity: usize,
     main_pipeline: wgpu::RenderPipeline,
+    mesh_pipeline: wgpu::RenderPipeline,
     /// `None` where the GPU cannot blend into the occlusion mask.
     silhouettes: Option<Silhouettes>,
 
@@ -162,6 +170,12 @@ impl Renderer {
             label: Some("nearest"),
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let smooth_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("linear"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -255,12 +269,15 @@ impl Renderer {
             0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2, 4 => Float32x2,
             5 => Float32x4, 6 => Float32, 7 => Uint32
         ];
-        // The three sprite passes share the vertex stage and differ in fragment entry and target.
-        let sprite_pipeline = |label: &str,
-                               entry: &str,
-                               layouts: &[Option<&wgpu::BindGroupLayout>],
-                               format: wgpu::TextureFormat,
-                               blend: wgpu::BlendState| {
+        // The three sprite passes share the vertex stage and differ in fragment entry and target;
+        // meshes use the same attributes per vertex instead of per instance.
+        let pipeline = |label: &str,
+                        vertex_entry: &str,
+                        step_mode: wgpu::VertexStepMode,
+                        entry: &str,
+                        layouts: &[Option<&wgpu::BindGroupLayout>],
+                        format: wgpu::TextureFormat,
+                        blend: wgpu::BlendState| {
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(label),
                 bind_group_layouts: layouts,
@@ -271,11 +288,11 @@ impl Renderer {
                 layout: Some(&layout),
                 vertex: wgpu::VertexState {
                     module: &sprite_shader,
-                    entry_point: Some("vs_sprite"),
+                    entry_point: Some(vertex_entry),
                     compilation_options: Default::default(),
                     buffers: &[Some(wgpu::VertexBufferLayout {
                         array_stride: size_of::<sprite::Instance>() as u64,
-                        step_mode: wgpu::VertexStepMode::Instance,
+                        step_mode,
                         attributes: &attributes,
                     })],
                 },
@@ -296,6 +313,21 @@ impl Renderer {
                 cache: None,
             })
         };
+        let sprite_pipeline = |label: &str,
+                               entry: &str,
+                               layouts: &[Option<&wgpu::BindGroupLayout>],
+                               format: wgpu::TextureFormat,
+                               blend: wgpu::BlendState| {
+            pipeline(
+                label,
+                "vs_sprite",
+                wgpu::VertexStepMode::Instance,
+                entry,
+                layouts,
+                format,
+                blend,
+            )
+        };
         let base_layouts = [Some(&globals_layout), Some(&texture_layout)];
         let max = wgpu::BlendComponent {
             src_factor: wgpu::BlendFactor::One,
@@ -304,6 +336,15 @@ impl Renderer {
         };
         let main_pipeline = sprite_pipeline(
             "sprite",
+            "fs_sprite",
+            &base_layouts,
+            TARGET_FORMAT,
+            wgpu::BlendState::ALPHA_BLENDING,
+        );
+        let mesh_pipeline = pipeline(
+            "mesh",
+            "vs_mesh",
+            wgpu::VertexStepMode::Vertex,
             "fs_sprite",
             &base_layouts,
             TARGET_FORMAT,
@@ -332,6 +373,19 @@ impl Renderer {
                 ),
                 silhouette_pipeline: sprite_pipeline(
                     "silhouette",
+                    "fs_silhouette",
+                    &[
+                        Some(&globals_layout),
+                        Some(&texture_layout),
+                        Some(&mask_layout),
+                    ],
+                    TARGET_FORMAT,
+                    wgpu::BlendState::ALPHA_BLENDING,
+                ),
+                silhouette_mesh_pipeline: pipeline(
+                    "mesh silhouette",
+                    "vs_mesh",
+                    wgpu::VertexStepMode::Vertex,
                     "fs_silhouette",
                     &[
                         Some(&globals_layout),
@@ -378,6 +432,7 @@ impl Renderer {
             })
         };
         let instances = create_instance_buffer(&device, MIN_INSTANCE_CAPACITY);
+        let mesh_vertices = create_instance_buffer(&device, MIN_INSTANCE_CAPACITY);
 
         Ok(Self {
             instance,
@@ -391,13 +446,17 @@ impl Renderer {
             target,
             target_view,
             sampler,
+            smooth_sampler,
             texture_layout,
             textures: Vec::new(),
             globals,
             globals_bind_group,
             instances,
             instance_capacity: MIN_INSTANCE_CAPACITY,
+            mesh_vertices,
+            mesh_capacity: MIN_INSTANCE_CAPACITY,
             main_pipeline,
+            mesh_pipeline,
             silhouettes,
             blit_bind_group,
             blit_pipeline,
@@ -408,13 +467,36 @@ impl Renderer {
         self.internal_size
     }
 
-    /// Uploads RGBA8 (sRGB) pixels.
+    /// Uploads RGBA8 (sRGB) pixels, sampled nearest: pixel art.
     pub fn create_texture(
         &mut self,
         label: &str,
         width: u32,
         height: u32,
         rgba: &[u8],
+    ) -> Result<TextureId, RenderError> {
+        self.upload(label, width, height, rgba, false)
+    }
+
+    /// Like [`Renderer::create_texture`], sampled smoothly: painted art that is drawn turned or
+    /// not texel for pixel (skeleton atlases).
+    pub fn create_texture_smooth(
+        &mut self,
+        label: &str,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<TextureId, RenderError> {
+        self.upload(label, width, height, rgba, true)
+    }
+
+    fn upload(
+        &mut self,
+        label: &str,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+        smooth: bool,
     ) -> Result<TextureId, RenderError> {
         let max = self.device.limits().max_texture_dimension_2d;
         if width == 0 || height == 0 || width > max || height > max {
@@ -464,13 +546,13 @@ impl Renderer {
             extent,
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = texture_bind_group(
-            &self.device,
-            &self.texture_layout,
-            &view,
-            &self.sampler,
-            label,
-        );
+        let sampler = if smooth {
+            &self.smooth_sampler
+        } else {
+            &self.sampler
+        };
+        let bind_group =
+            texture_bind_group(&self.device, &self.texture_layout, &view, sampler, label);
         self.textures.push(GpuTexture {
             texture,
             bind_group,
@@ -529,8 +611,20 @@ impl Renderer {
     /// Draws one frame. `camera` is the world position at the centre of the view; `clear` is
     /// linear RGB. Sprites are sorted in place.
     pub fn render(&mut self, camera: Vec2, clear: [f64; 3], sprites: &mut [Sprite]) {
+        self.render_with(camera, clear, sprites, &[]);
+    }
+
+    /// Like [`Renderer::render`], with meshes drawn among the sprites in sort order.
+    pub fn render_with(
+        &mut self,
+        camera: Vec2,
+        clear: [f64; 3],
+        sprites: &mut [Sprite],
+        meshes: &[Mesh],
+    ) {
         let textures = &self.textures;
-        let frame_batches = sprite::build_batches(sprites, |id| textures[id.0 as usize].size);
+        let frame_batches =
+            sprite::build_batches(sprites, meshes, |id| textures[id.0 as usize].size);
         let instances = &frame_batches.instances;
         if instances.len() > self.instance_capacity {
             self.instance_capacity = instances.len().next_power_of_two();
@@ -539,6 +633,15 @@ impl Renderer {
         if !instances.is_empty() {
             self.queue
                 .write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));
+        }
+        let vertices = &frame_batches.vertices;
+        if vertices.len() > self.mesh_capacity {
+            self.mesh_capacity = vertices.len().next_power_of_two();
+            self.mesh_vertices = create_instance_buffer(&self.device, self.mesh_capacity);
+        }
+        if !vertices.is_empty() {
+            self.queue
+                .write_buffer(&self.mesh_vertices, 0, bytemuck::cast_slice(vertices));
         }
         let internal = Vec2::new(self.internal_size.0 as f32, self.internal_size.1 as f32);
         let globals = Globals {
@@ -568,8 +671,12 @@ impl Renderer {
                 })],
                 ..Default::default()
             });
-            pass.set_pipeline(&self.main_pipeline);
-            self.draw_batches(&mut pass, &frame_batches.main);
+            self.draw_mixed(
+                &mut pass,
+                &frame_batches.main,
+                &self.main_pipeline,
+                &self.mesh_pipeline,
+            );
         }
         if let Some(sil) = &self.silhouettes
             && !frame_batches.silhouettes.is_empty()
@@ -605,9 +712,13 @@ impl Renderer {
                 })],
                 ..Default::default()
             });
-            pass.set_pipeline(&sil.silhouette_pipeline);
             pass.set_bind_group(2, &sil.mask_bind_group, &[]);
-            self.draw_batches(&mut pass, &frame_batches.silhouettes);
+            self.draw_mixed(
+                &mut pass,
+                &frame_batches.silhouettes,
+                &sil.silhouette_pipeline,
+                &sil.silhouette_mesh_pipeline,
+            );
         }
 
         let frame = self.acquire();
@@ -773,6 +884,37 @@ fn create_target(
 
 /// Binds globals and instances, then draws each batch with its texture. The pipeline is set.
 impl Renderer {
+    /// Sprite runs and mesh runs in order, each with its pipeline (the main and silhouette
+    /// passes).
+    fn draw_mixed(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        batches: &[sprite::Batch],
+        quads: &wgpu::RenderPipeline,
+        triangles: &wgpu::RenderPipeline,
+    ) {
+        pass.set_bind_group(0, &self.globals_bind_group, &[]);
+        let mut meshes = None;
+        for batch in batches {
+            if meshes != Some(batch.triangles) {
+                meshes = Some(batch.triangles);
+                if batch.triangles {
+                    pass.set_pipeline(triangles);
+                    pass.set_vertex_buffer(0, self.mesh_vertices.slice(..));
+                } else {
+                    pass.set_pipeline(quads);
+                    pass.set_vertex_buffer(0, self.instances.slice(..));
+                }
+            }
+            pass.set_bind_group(1, &self.textures[batch.texture.0 as usize].bind_group, &[]);
+            if batch.triangles {
+                pass.draw(batch.start..batch.end, 0..1);
+            } else {
+                pass.draw(0..6, batch.start..batch.end);
+            }
+        }
+    }
+
     fn draw_batches(&self, pass: &mut wgpu::RenderPass<'_>, batches: &[sprite::Batch]) {
         pass.set_bind_group(0, &self.globals_bind_group, &[]);
         pass.set_vertex_buffer(0, self.instances.slice(..));
