@@ -15,6 +15,7 @@
 //!   --autopilot-camp        pitch the tent, light a fire, drink four ales and stagger off
 //!   --autopilot-party       ask Borin along, then lead him against the meadow's enemies
 //!   --overlay               start with the collision overlay (F1) on
+//!   --menu                  start with the Esc menu open
 //!   --lang <code>           text language, one of the project's (default: its first)
 //!   --save <file>           when hosting: carry the world on from this file, saving at each new day
 //!                           and on quitting (without `--player`, you play the save's host again)
@@ -24,7 +25,8 @@
 //!                           reproducible (a joined client keeps real time, like its host)
 //! Controls: WASD / arrows to walk, Shift to run, Space to jump, J to attack (again to combo),
 //! K to dodge, E to talk (number keys answer when a conversation offers choices), Z to sleep (when every player online sleeps, the night passes), F1 for
-//! the collision overlay, F2 to switch language.
+//! the collision overlay, F2 to switch language, Esc for the menu (the world waits while nobody
+//! else is online).
 //! `--clients` passes `--project`, `--scene`, `--net-sim`, `--lang` and `--autopilot` on to the clients.
 
 mod demo;
@@ -49,7 +51,7 @@ use dark_world::{
     ClientSession, DrawCharacter, HostPlugin, LocalInput, NetHost, TickInput, WorldClock,
     WorldSimPlugin, load_world,
 };
-use demo::{DemoScene, DemoView, Frame, host_characters, host_life};
+use demo::{DemoScene, DemoView, Frame, Menu, host_characters, host_life};
 use glam::Vec2;
 
 /// Used when no project is given.
@@ -87,6 +89,9 @@ struct Player {
     seen: Vec<DrawCharacter>,
     audio: Audio,
     overlay: bool,
+    /// The Esc menu is open: the character takes no input, and the world waits while nobody
+    /// else is online.
+    menu: bool,
     /// Language to start in, applied once the view exists.
     lang: Option<String>,
     screenshot: Option<Screenshot>,
@@ -324,6 +329,7 @@ impl Game for Player {
                 KeyCode::KeyZ => self.presses.sleep = true,
                 KeyCode::KeyR => self.presses.relieve = true,
                 KeyCode::KeyQ => self.presses.recruit = true,
+                KeyCode::Escape => self.menu = !self.menu,
                 KeyCode::Digit1 => self.number(1),
                 KeyCode::Digit2 => self.number(2),
                 KeyCode::Digit3 => self.number(3),
@@ -364,7 +370,14 @@ impl Game for Player {
         } else {
             dt
         };
-        let input = self.input(dt);
+        // Behind the menu the character stands still, presses made there are dropped, and the
+        // autopilots wait.
+        let input = if self.menu {
+            self.presses = TickInput::default();
+            TickInput::default()
+        } else {
+            self.input(dt)
+        };
         self.frames += 1;
         let log_now = self.autopilot && self.frames.is_multiple_of(30);
 
@@ -373,10 +386,15 @@ impl Game for Player {
         let clear = match &mut self.mode {
             Mode::Host(app) => {
                 if let Some(mut local) = app.world.get_resource_mut::<LocalInput>() {
+                    // A press latched before the menu opened is dropped, not kept for after.
+                    if self.menu {
+                        local.0 = TickInput::default();
+                    }
                     local.0.movement = input.movement;
                     local.0.run = input.run;
                     local.0.latch(input);
                 }
+                app.insert_resource(dark_world::Pause(self.menu));
                 app.update(dt);
                 if log_now && let Some((map, characters)) = host_characters(app) {
                     for c in characters.iter().filter(|c| c.you) {
@@ -440,6 +458,13 @@ impl Game for Player {
                         structures: &structures,
                         party: &party,
                         story: &story,
+                        menu: self.menu.then(|| {
+                            if dark_world::paused(&app.world) {
+                                Menu::Paused
+                            } else {
+                                Menu::OthersPlaying
+                            }
+                        }),
                     };
                     view.draw(renderer, &frame, secs);
                     characters
@@ -462,6 +487,8 @@ impl Game for Player {
                         structures: session.structures(),
                         party: session.party(),
                         story: &story,
+                        // The host's world goes on.
+                        menu: self.menu.then_some(Menu::OthersPlaying),
                     };
                     view.draw(renderer, &frame, secs);
                     characters
@@ -559,6 +586,7 @@ struct Args {
     camp: bool,
     recruit: bool,
     overlay: bool,
+    menu: bool,
     lang: Option<String>,
     save: Option<PathBuf>,
     world_seed: Option<u64>,
@@ -584,6 +612,7 @@ fn parse_args() -> Result<Args, String> {
         camp: false,
         recruit: false,
         overlay: false,
+        menu: false,
         lang: None,
         save: None,
         world_seed: None,
@@ -611,6 +640,10 @@ fn parse_args() -> Result<Args, String> {
             }
             "--overlay" => {
                 args.overlay = true;
+                continue;
+            }
+            "--menu" => {
+                args.menu = true;
                 continue;
             }
             _ => {}
@@ -712,7 +745,7 @@ fn main() -> ExitCode {
             eprintln!("error: {err}");
             eprintln!(
                 "usage: dark-player [--project <dir>] [--scene <file>] [--host <port> [--clients <n>] | --join <ip:port>] \
-                 [--net-sim <ms,ms,%>] [--player <uuid>] [--day-secs <s>] [--autopilot] [--overlay] \
+                 [--net-sim <ms,ms,%>] [--player <uuid>] [--day-secs <s>] [--autopilot] [--overlay] [--menu] \
                  [--screenshot <png> [--frames <n>]]"
             );
             return ExitCode::FAILURE;
@@ -871,6 +904,7 @@ fn main() -> ExitCode {
         seen: Vec::new(),
         audio,
         overlay: args.overlay,
+        menu: args.menu,
         screenshot: args.screenshot.map(|path| Screenshot {
             path,
             after_frames: args.frames,

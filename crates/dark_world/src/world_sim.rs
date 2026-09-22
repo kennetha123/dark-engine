@@ -143,6 +143,13 @@ impl Plugin for WorldSimPlugin {
                 autosave.in_set(WorldStep),
             )
                 .chain(),
+        )
+        // Before anything else can make a player's actor (asking along, a storylet, a kill).
+        .add_systems(
+            FixedUpdate,
+            meet_the_world
+                .after(crate::replication::handle_sessions)
+                .in_set(crate::NetReceive),
         );
     }
 }
@@ -188,6 +195,23 @@ fn sleep_consensus(
     }
     for (_, mut state, _) in &mut players {
         state.sleeping = false;
+    }
+}
+
+/// A player new to the world gets their actor the tick they arrive, not at the next hour, so
+/// their standing is known (and shown) from the start.
+fn meet_the_world(mut world: ResMut<WorldState>, players: Query<(&PlayerAvatar, &MapId)>) {
+    for (avatar, map) in &players {
+        let key = avatar.0.0.as_u128();
+        if !world
+            .sim
+            .world()
+            .actors
+            .iter()
+            .any(|a| a.player == Some(key))
+        {
+            crate::party::player_actor(&mut world, avatar.0, *map);
+        }
     }
 }
 

@@ -1177,6 +1177,38 @@ fn slaying_a_monster_earns_the_player_standing() {
         .map(|i| dark_sim::ActorId(i as u16))
         .unwrap();
     assert_eq!(w.sim.world().standing(actor, kingdom), 505);
+    // And their screen is told, for the menu.
+    net.run(10, &[Vec2::ZERO]);
+    assert!(
+        net.clients[0]
+            .story()
+            .standing
+            .contains(&("Kingdom".into(), 505)),
+        "{:?}",
+        net.clients[0].story().standing
+    );
+}
+
+#[test]
+fn a_pause_holds_the_world_until_someone_else_is_online() {
+    let mut net = Net::with_world(Vec::new(), None, project(), None);
+    net.host.insert_resource(crate::Pause(true));
+    let hour = |net: &Net| net.host.world.resource::<crate::WorldClock>().0.hour();
+    let start = hour(&net);
+    net.run(120, &[]);
+    assert!(crate::paused(&net.host.world));
+    assert_eq!(hour(&net), start, "the clock stands still");
+    // Someone joining is let in, and the world goes on while they are there.
+    net.clients.push(ClientSession::new(
+        RemoteClient::connect(net.addr, PlayerId::random()).unwrap(),
+        maps(&net.project),
+        looks(&net.project),
+    ));
+    net.connect();
+    assert!(!crate::paused(&net.host.world));
+    net.run(60, &[Vec2::X]);
+    assert!(hour(&net) > start);
+    assert!(net.me(0).body.position.x > 101.0, "they walk");
 }
 
 #[test]

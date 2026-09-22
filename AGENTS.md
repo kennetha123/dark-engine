@@ -46,7 +46,8 @@ the night passes), 1–8 use the hotbar (food, drink, the cloak on or off, tent,
 soap), R relieves yourself, Q asks whoever is in reach to join you (again near your follower sends
 it away; with nobody near you leave your party), F1
 toggles the collision overlay (`--overlay` starts with it on), F2 switches language (`--lang ja`
-starts in Japanese). Hosts take `--save <file>` (carry the whole world on; it is saved at each new
+starts in Japanese), Esc opens the menu (standing and people's feelings; the world waits while
+nobody else is online; `--menu` starts with it open). Hosts take `--save <file>` (carry the whole world on; it is saved at each new
 day and on quitting, Ctrl+C for `dark-host`; without `--player` the save's host plays on as
 themselves) and `--world-seed <n>`. The story is the project's `story.ron`.
 

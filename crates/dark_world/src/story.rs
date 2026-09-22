@@ -12,7 +12,7 @@ use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use dark_core::{App, FixedUpdate, Plugin};
 use dark_net::PlayerId;
-use dark_sim::ActorId;
+use dark_sim::{ActorId, FactionId};
 use dark_story::{Conversation, Deed, Story, StoryDef};
 
 use crate::characters::{Asleep, CharacterState, Control, ControlInput, NetId, PlayerAvatar};
@@ -398,6 +398,35 @@ pub(crate) fn choices_of(
         .unwrap_or_default()
 }
 
+/// A player's faction standing and people's feelings (see [`StoryView`]).
+pub type Ties = (Vec<(String, i32)>, Vec<(String, i32)>);
+
+/// Where `player` stands with each faction, and how the people who feel anything about them
+/// feel, as name keys and values.
+pub(crate) fn ties_of(state: &StoryState, sim: &WorldState, player: PlayerId) -> Ties {
+    let Some(me) = actor_of(sim, player) else {
+        return Ties::default();
+    };
+    let world = sim.sim.world();
+    let standing = world
+        .factions
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.name.clone(), world.standing(me, FactionId(i as u16))))
+        .collect();
+    let feelings = world
+        .actors
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.player.is_none() && a.alive)
+        .filter_map(|(i, a)| {
+            let felt = state.story.affinity(ActorId(i as u16), me);
+            (felt != 0).then(|| (a.name.clone(), felt))
+        })
+        .collect();
+    (standing, feelings)
+}
+
 /// What `player`'s screen shows of the story: the choices open to them, fades so far, and the
 /// ending once the year is over.
 pub fn story_view(world: &mut World, player: PlayerId) -> StoryView {
@@ -416,12 +445,15 @@ pub fn story_view(world: &mut World, player: PlayerId) -> StoryView {
     ) else {
         return StoryView::default();
     };
+    let (standing, feelings) = ties_of(state, sim, player);
     StoryView {
         choices: entity
             .map(|e| choices_of(state, sim, e))
             .unwrap_or_default(),
         faded,
         ending: state.ending.clone(),
+        standing,
+        feelings,
     }
 }
 
@@ -432,4 +464,8 @@ pub struct StoryView {
     pub choices: Vec<(u8, String)>,
     pub faded: u32,
     pub ending: Option<String>,
+    /// The player's standing with each faction (name key, −1000 to 1000).
+    pub standing: Vec<(String, i32)>,
+    /// How people feel about the player (name key, −1000 to 1000), those who feel anything.
+    pub feelings: Vec<(String, i32)>,
 }

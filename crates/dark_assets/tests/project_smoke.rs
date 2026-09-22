@@ -84,6 +84,11 @@ fn every_line_and_name_has_text_in_every_language_and_faces_and_font_load() {
         "ui.talk".to_owned(),
         "ui.language".to_owned(),
         "ui.day".to_owned(),
+        "ui.paused".to_owned(),
+        "ui.others_playing".to_owned(),
+        "ui.standing".to_owned(),
+        "ui.feelings".to_owned(),
+        "ui.resume".to_owned(),
     ];
     for entry in entries.flatten() {
         let name = format!("scenes/{}", entry.file_name().to_string_lossy());

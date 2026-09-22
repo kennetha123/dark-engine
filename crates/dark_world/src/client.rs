@@ -76,6 +76,8 @@ pub struct ClientSession {
     last_correction: f32,
     /// Tick rate multiplier from the host's input queue depth; see [`PACE_ADJUST`].
     pace: f64,
+    /// The player's standing and people's feelings, as last sent.
+    ties: crate::story::Ties,
 }
 
 impl ClientSession {
@@ -94,6 +96,7 @@ impl ClientSession {
             presses: TickInput::default(),
             last_correction: 0.0,
             pace: 1.0,
+            ties: Default::default(),
         }
     }
 
@@ -136,10 +139,13 @@ impl ClientSession {
     /// The local player's conversation choices, fades and the year's ending, from the newest
     /// snapshot.
     pub fn story(&self) -> crate::StoryView {
-        self.snapshots
+        let mut story = self
+            .snapshots
             .back()
             .map(|s| s.story.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        (story.standing, story.feelings) = self.ties.clone();
+        story
     }
 
     /// The others in the local player's party, from the newest snapshot.
@@ -221,7 +227,7 @@ impl ClientSession {
         );
     }
 
-    fn on_snapshot(&mut self, snapshot: Snapshot) {
+    fn on_snapshot(&mut self, mut snapshot: Snapshot) {
         // Unreliable delivery can reorder; anything older than what we have is stale.
         if self.newest.is_some_and(|n| snapshot.tick <= n) {
             return;
@@ -278,6 +284,9 @@ impl ClientSession {
             }
         }
 
+        if let Some(ties) = snapshot.ties.take() {
+            self.ties = ties;
+        }
         self.snapshots.push_back(snapshot);
         while self.snapshots.len() > 32 {
             self.snapshots.pop_front();

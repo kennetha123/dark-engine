@@ -73,6 +73,17 @@ pub struct Frame<'a> {
     pub party: &'a [NetId],
     /// The local player's conversation choices, fades and the year's ending.
     pub story: &'a dark_world::StoryView,
+    /// The Esc menu, while it is open.
+    pub menu: Option<Menu>,
+}
+
+/// The Esc menu: whether the world waits, where the player stands and who feels for them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Menu {
+    /// Nobody else is online: the world stands still.
+    Paused,
+    /// Others are playing, so the world goes on.
+    OthersPlaying,
 }
 
 impl DemoScene {
@@ -447,6 +458,10 @@ const ENDING_WIDTH: f32 = 360.0;
 const PARTY_BAR: f32 = 40.0;
 /// Statuses listed under the gauges.
 const MAX_STATUSES: usize = 4;
+/// The Esc menu's lines wrap at this width.
+const MENU_WIDTH: f32 = 220.0;
+/// People listed in the Esc menu: those who feel most strongly, the warmest first.
+const MAX_FEELINGS: usize = 8;
 
 /// Each need's gauge colour.
 fn need_colour(need: Need) -> [f32; 4] {
@@ -923,6 +938,36 @@ impl DemoView {
             .ending
             .as_ref()
             .map(|key| layout(self.strings.text(key), ENDING_WIDTH));
+        let menu: Vec<(TextLayout, [f32; 4])> = frame
+            .menu
+            .map(|menu| {
+                let title = match menu {
+                    Menu::Paused => "ui.paused",
+                    Menu::OthersPlaying => "ui.others_playing",
+                };
+                let mut lines = vec![(layout(self.strings.text(title), MENU_WIDTH), NAME)];
+                let mut section = |header: &str, entries: &[(String, i32)]| {
+                    if entries.is_empty() {
+                        return;
+                    }
+                    lines.push((layout(self.strings.text(header), MENU_WIDTH), NAME));
+                    for (name, value) in entries {
+                        let line = format!("  {}  {value:+}", self.strings.text(name));
+                        lines.push((layout(&line, MENU_WIDTH), PAPER));
+                    }
+                };
+                section("ui.standing", &frame.story.standing);
+                // The strongest feelings, warm or cold, then the warmest first.
+                let mut feelings = frame.story.feelings.clone();
+                feelings.sort_by_key(|(_, felt)| std::cmp::Reverse(felt.abs()));
+                feelings.truncate(MAX_FEELINGS);
+                feelings.sort_by_key(|(_, felt)| std::cmp::Reverse(*felt));
+                section("ui.feelings", &feelings);
+                let resume = format!("Esc  {}", self.strings.text("ui.resume"));
+                lines.push((layout(&resume, MENU_WIDTH), NAME));
+                lines
+            })
+            .unwrap_or_default();
         self.language_shown = (self.language_shown - dt).max(0.0);
         let banner = (self.language_shown > 0.0)
             .then(|| layout(self.strings.text("ui.language"), BUBBLE_WIDTH));
@@ -1057,6 +1102,26 @@ impl DemoView {
                 layer::UI,
                 3.5e9 + 0.01,
             ));
+        }
+        if !menu.is_empty() {
+            let pad = Vec2::splat(10.0);
+            let width = menu.iter().map(|(l, _)| l.size.x).fold(0.0, f32::max);
+            let height: f32 = menu.iter().map(|(l, _)| l.size.y).sum();
+            let size = Vec2::new(width, height) + pad * 2.0;
+            let at = (view_min + (view_size - size) / 2.0).round();
+            self.panel(at, size, [0.02, 0.02, 0.04, 0.92], Some(NAME), 3.6e9);
+            let mut pen = at + pad;
+            for (line, colour) in &menu {
+                self.frame_sprites.extend(TextSystem::sprites(
+                    line,
+                    texture,
+                    pen,
+                    *colour,
+                    layer::UI,
+                    3.6e9 + 0.01,
+                ));
+                pen.y += line.size.y;
+            }
         }
         let mut pen = view_min + Vec2::new(view_size.x - 8.0, 24.0);
         for (name, bar) in &party {

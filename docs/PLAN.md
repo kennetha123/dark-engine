@@ -57,7 +57,13 @@ First game: 4-player co-op, low-fantasy life-sim action RPG on a 365-day clock.
 ## 4. Game 1 requirements on the engine
 
 ### 4.1 Time (modelled on The Forest)
-- Clock always runs; paused only in single-player.
+- Clock always runs; paused only in single-player. Esc opens the menu; while nobody but the
+  local player is online (a connection in its grace window counts as someone) the world waits
+  there: the host still reads and writes the network every tick, and any session change (someone
+  joining, a connection lost) moves the world on so it is never missed. Enemies' respawn times
+  wait too. Behind the menu the character takes no input. The menu shows the player's standing
+  with each faction and how the living people who feel anything about them feel (`StoryView`;
+  sent to a client when it changes and once a second, not in every snapshot).
 - Default day length **24 real minutes** (tunable).
 - **Sleep consensus:** when every *online* player is asleep, skip to morning.
   Offline characters count as asleep. Players inside the reconnect grace window count as **awake**.
@@ -356,8 +362,8 @@ docs/            this plan
   the hero party alone defeats the Demon Lord in about two years of three, around day 300.
 - Known gaps: one directed party (other actors wait at home; no demon army raids, no NPC needs or
   schedules — those are M5's `dark_life`); players cannot kill people of the world in play yet
-  (only monsters; the API exists: `kill`); the clock does not pause in single-player
-  (no pause menu yet). Sleeping works anywhere; tents and inns (§14) only make it warmer, more
+  (only monsters; the API exists: `kill`). A player's actor is made the tick they arrive.
+  Sleeping works anywhere; tents and inns (§14) only make it warmer, more
   restful and, at an inn, safe.
 
 ## 13. Combat and audio (as built in M4)
@@ -602,7 +608,7 @@ docs/            this plan
   married life, darkness.
 - Known gaps: conversations are one person and one player at a time (another player waits);
   storylets are not predicted (a round trip before the line shows); no gifts, jealousy or
-  divorce; affinity is not shown; endings are one card, not a sequence; people do not keep their
+  divorce; affinity shows only as a number in the Esc menu (§4.1); endings are one card, not a sequence; people do not keep their
   day's routine between saves (they have none yet); a save written mid-conversation loses it;
   a save carries its world as it was, so actors added to `world.ron` later are not in it (start
   a new world to meet them); the save is written inside a tick (a short hitch once a day).

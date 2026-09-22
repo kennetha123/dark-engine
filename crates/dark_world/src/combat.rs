@@ -112,7 +112,21 @@ impl Plugin for CombatPlugin {
             (resolve_hits, fall_and_rise, return_dormant)
                 .chain()
                 .in_set(Fight),
+        )
+        .add_systems(
+            FixedUpdate,
+            hold_dormant
+                .run_if(not(crate::running))
+                .after(crate::HostReceive)
+                .before(crate::HostSend),
         );
+    }
+}
+
+/// Paused, a dormant enemy's return waits too: its time is counted in ticks the world ran.
+fn hold_dormant(mut dormant: Query<&mut Dormant>) {
+    for mut dormant in &mut dormant {
+        dormant.until += 1;
     }
 }
 

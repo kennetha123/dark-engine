@@ -72,9 +72,16 @@ pub struct Snapshot {
     pub life: Option<LifeView>,
     /// The others in the client's party.
     pub party: Vec<NetId>,
-    /// The client's conversation choices, fades and the year's ending.
+    /// The client's conversation choices, fades and the year's ending (its standing and
+    /// feelings are left empty: they come in `ties`).
     pub story: crate::StoryView,
+    /// The client's faction standing and people's feelings, when they changed and once every
+    /// [`TIES_RESEND`] ticks (a lost snapshot is not lost for long); else the client keeps its own.
+    pub ties: Option<crate::story::Ties>,
 }
+
+/// Ticks between resends of a client's standing and feelings.
+pub const TIES_RESEND: u64 = 60;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CharacterSnapshot {
@@ -134,7 +141,7 @@ impl Plugin for ReplicationPlugin {
 }
 
 /// Joining spawns a character, or wakes the one the player left asleep; leaving puts it to sleep.
-fn handle_sessions(
+pub(crate) fn handle_sessions(
     mut commands: Commands,
     events: Res<SessionEvents>,
     maps: Res<Maps>,
@@ -346,13 +353,15 @@ struct Personal<'w, 's> {
     story: Option<Res<'w, crate::StoryState>>,
     world: Option<Res<'w, crate::WorldState>>,
     faded: Query<'w, 's, &'static crate::Faded>,
+    /// Each player's standing and feelings as last sent.
+    sent_ties: Local<'s, std::collections::HashMap<PlayerId, crate::story::Ties>>,
 }
 
 fn send_snapshots(
     tick: Res<SimTick>,
     clock: Res<WorldClock>,
     mut host: ResMut<NetHost>,
-    personal: Personal,
+    mut personal: Personal,
     avatars: Query<Recipient>,
     characters: Query<Replicated, Without<crate::Dormant>>,
     structures: Query<(&NetId, &MapId, &Placed)>,
@@ -369,7 +378,7 @@ fn send_snapshots(
         if !online || Some(avatar.0) == local {
             continue;
         }
-        let snapshot = Snapshot {
+        let mut snapshot = Snapshot {
             tick: tick.0,
             acked: queue.acked,
             queued: queue.pending.len().min(255) as u8,
@@ -417,8 +426,18 @@ fn send_snapshots(
                     .unwrap_or_default(),
                 faded: personal.faded.get(entity).map_or(0, |f| f.0),
                 ending: personal.story.as_ref().and_then(|s| s.ending.clone()),
+                ..Default::default()
             },
+            ties: None,
         };
+        if let (Some(s), Some(w)) = (personal.story.as_ref(), personal.world.as_ref()) {
+            let ties = crate::story::ties_of(s, w, avatar.0);
+            let resend = tick.0.is_multiple_of(TIES_RESEND);
+            if resend || personal.sent_ties.get(&avatar.0) != Some(&ties) {
+                personal.sent_ties.insert(avatar.0, ties.clone());
+                snapshot.ties = Some(ties);
+            }
+        }
         host.0.send(avatar.0, Channel::State, encode(&snapshot));
     }
 }

@@ -58,7 +58,7 @@ pub const SPAWN_CLEARING: f32 = 90.0;
 use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use dark_core::{App, FixedDelta, FixedUpdate, Plugin};
-use dark_net::{Host, SessionEvent};
+use dark_net::{Host, SessionEvent, SessionState};
 use dark_time::{ClockConfig, ClockEvent, GameClock};
 
 /// Reads the network and advances the clock; first in every tick.
@@ -78,6 +78,37 @@ pub struct WorldClock(pub GameClock);
 /// Session changes produced this tick, for gameplay systems to act on.
 #[derive(Resource, Default)]
 pub struct SessionEvents(pub Vec<SessionEvent>);
+
+/// The local player asked the game to pause. Honoured only while nobody else is online: the
+/// network is still read and written every tick, and the world moves again for any session
+/// change (someone joining, a connection lost) so it is never missed.
+#[derive(Resource, Default)]
+pub struct Pause(pub bool);
+
+/// Whether the world moves this tick (see [`Pause`]).
+pub(crate) fn running(
+    pause: Option<Res<Pause>>,
+    host: Option<Res<NetHost>>,
+    events: Option<Res<SessionEvents>>,
+) -> bool {
+    !pause.is_some_and(|p| p.0)
+        || host.is_none_or(|h| !alone(&h.0))
+        || events.is_some_and(|e| !e.0.is_empty())
+}
+
+/// Whether nobody but the local player is online (a connection in its grace window counts).
+fn alone(host: &Host) -> bool {
+    let local = host.local_player();
+    host.sessions()
+        .sessions()
+        .all(|(player, state)| Some(player) == local || matches!(state, SessionState::Offline))
+}
+
+/// Whether the world stands still, paused by the local player with nobody else online.
+pub fn paused(world: &bevy_ecs::world::World) -> bool {
+    world.get_resource::<Pause>().is_some_and(|p| p.0)
+        && world.get_resource::<NetHost>().is_some_and(|h| alone(&h.0))
+}
 
 /// Hands out [`NetId`]s: to players' characters as they join and to NPCs as maps load.
 #[derive(Resource, Default)]
@@ -121,9 +152,16 @@ impl Plugin for HostPlugin {
                     .chain(),
             )
             .configure_sets(FixedUpdate, NightPass.in_set(WorldStep))
+            // Physics pauses inside its set (see `MapsPlugin`).
+            .configure_sets(
+                FixedUpdate,
+                (NetReceive, Control, Fight, WorldStep, NetSend).run_if(running),
+            )
             .add_systems(
                 FixedUpdate,
-                (receive, advance_clock).chain().in_set(HostReceive),
+                (receive, advance_clock.run_if(running))
+                    .chain()
+                    .in_set(HostReceive),
             )
             .add_systems(FixedUpdate, send.in_set(HostSend));
     }

@@ -356,7 +356,11 @@ impl Plugin for MapsPlugin {
     fn build(self, app: &mut App) {
         app.insert_resource(self.0).add_systems(
             FixedUpdate,
-            (remember_previous, step_bodies, take_exits)
+            // Paused, bodies still take their positions as the previous ones, so nothing jitters.
+            (
+                remember_previous,
+                (step_bodies, take_exits).chain().run_if(crate::running),
+            )
                 .chain()
                 .in_set(Physics),
         );
