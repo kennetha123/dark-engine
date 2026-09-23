@@ -36,6 +36,9 @@ pub enum AssetError {
 
 pub const TILE_SIZE_RANGE: std::ops::RangeInclusive<u32> = 4..=1024;
 
+/// The scene a game starts in when neither the project nor the command line says another.
+pub const DEFAULT_SCENE: &str = "scenes/meadow.ron";
+
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct ProjectSettings {
     pub name: String,
@@ -47,6 +50,9 @@ pub struct ProjectSettings {
     /// fallback for missing strings.
     #[serde(default = "default_languages")]
     pub languages: Vec<String>,
+    /// Scene the game starts in, unless `--scene` says otherwise; `scenes/meadow.ron` when unset.
+    #[serde(default)]
+    pub start_scene: Option<String>,
     /// Font for in-game text; one that covers every language's characters.
     #[serde(default)]
     pub font: Option<FontDef>,

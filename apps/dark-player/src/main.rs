@@ -5,7 +5,8 @@
 //!   dark-player [--project <dir>] --host <port>            co-op host, you play too
 //!   dark-player --project <dir> --join <ip:port>           join a host (same project and scene)
 //! Options:
-//!   --scene <file>          scene inside the project (default scenes/meadow.ron)
+//!   --scene <file>          scene inside the project (default: the project's `start_scene`,
+//!                           else scenes/meadow.ron)
 //!   --player <uuid>         stable identity (default random)
 //!   --day-secs <seconds>    day length
 //!   --clients <n>           when hosting: also launch n local clients that join this host
@@ -28,6 +29,10 @@
 //! the collision overlay, F2 to switch language, Esc for the menu (the world waits while nobody
 //! else is online).
 //! `--clients` passes `--project`, `--scene`, `--net-sim`, `--lang` and `--autopilot` on to the clients.
+
+// A built game opens no console window on Windows; a development build keeps one for the log.
+// Either way the log still reaches a pipe or a file when the output is redirected.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod demo;
 mod fx;
@@ -56,7 +61,6 @@ use glam::Vec2;
 
 /// Used when no project is given.
 const DEFAULT_RESOLUTION: (u32, u32) = (640, 360);
-const DEFAULT_SCENE: &str = "scenes/meadow.ron";
 
 enum Mode {
     Host(Box<App>),
@@ -578,7 +582,8 @@ struct Args {
     player_given: bool,
     clock: ClockConfig,
     project: Option<PathBuf>,
-    scene: String,
+    /// `--scene`; without it the project says where the game starts.
+    scene: Option<String>,
     clients: u32,
     net_sim: Option<(String, NetConditions)>,
     autopilot: bool,
@@ -604,7 +609,7 @@ fn parse_args() -> Result<Args, String> {
             ..ClockConfig::default()
         },
         project: None,
-        scene: DEFAULT_SCENE.into(),
+        scene: None,
         clients: 0,
         net_sim: None,
         autopilot: false,
@@ -665,7 +670,7 @@ fn parse_args() -> Result<Args, String> {
                     .ok_or_else(|| bad("a positive number"))?
             }
             "--project" => args.project = Some(value.into()),
-            "--scene" => args.scene = value,
+            "--scene" => args.scene = Some(value),
             "--lang" => args.lang = Some(value),
             "--save" => args.save = Some(value.into()),
             "--world-seed" => args.world_seed = Some(value.parse().map_err(|_| bad("a number"))?),
@@ -685,6 +690,7 @@ fn parse_args() -> Result<Args, String> {
             _ => return Err(format!("unknown option {arg}")),
         }
     }
+    args.project = args.project.or_else(packaged_project);
     if matches!(args.launch, Launch::Join(_)) && args.project.is_none() {
         return Err("--join needs --project (the same project and scene as the host)".into());
     }
@@ -692,6 +698,23 @@ fn parse_args() -> Result<Args, String> {
         return Err("--clients needs --host".into());
     }
     Ok(args)
+}
+
+/// The scene to start in: `--scene`, else the project's `start_scene`, else the default.
+fn start_scene(project: &Project, args: &Args) -> String {
+    args.scene
+        .clone()
+        .or_else(|| project.settings.start_scene.clone())
+        .unwrap_or_else(|| dark_assets::DEFAULT_SCENE.to_owned())
+}
+
+/// The project a packaged game carries: `game/` beside the exe, or the exe's own folder
+/// (`dark-cli package`). None when the game is run from a build, where `--project` says which.
+fn packaged_project() -> Option<PathBuf> {
+    let beside = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    [beside.join("game"), beside]
+        .into_iter()
+        .find(|dir| dir.join(Project::FILE).exists())
 }
 
 /// Starts `count` copies of this program that join `port` on this machine.
@@ -703,12 +726,10 @@ fn launch_clients(count: u32, port: u16, args: &Args) -> Vec<Child> {
     (0..count)
         .filter_map(|i| {
             let mut cmd = Command::new(&exe);
-            cmd.args([
-                "--join",
-                &format!("127.0.0.1:{port}"),
-                "--scene",
-                &args.scene,
-            ]);
+            cmd.args(["--join", &format!("127.0.0.1:{port}")]);
+            if let Some(scene) = &args.scene {
+                cmd.args(["--scene", scene]);
+            }
             if let Some(project) = &args.project {
                 cmd.arg("--project").arg(project);
             }
@@ -774,7 +795,8 @@ fn main() -> ExitCode {
         .as_ref()
         .map_or(DEFAULT_RESOLUTION, |p| p.settings.resolution);
     let mut scene = match &project {
-        Some(project) => match DemoScene::load(project, &args.scene) {
+        // Where the game starts: what was asked for, else the project's own scene.
+        Some(project) => match DemoScene::load(project, &start_scene(project, &args)) {
             Ok(scene) => Some(scene),
             Err(err) => {
                 tracing::error!("cannot load scene: {err}");

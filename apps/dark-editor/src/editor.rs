@@ -283,11 +283,18 @@ impl Editor {
             picking: None,
             project,
         };
+        // The map the game starts on, which is the one to open first.
         let start = start.or_else(|| {
             let scenes = &editor.catalog.scenes;
+            let first = editor
+                .project
+                .settings
+                .start_scene
+                .clone()
+                .unwrap_or_else(|| dark_assets::DEFAULT_SCENE.to_owned());
             scenes
                 .iter()
-                .find(|s| s.ends_with("meadow.ron"))
+                .find(|s| **s == first)
                 .or(scenes.first())
                 .cloned()
         });

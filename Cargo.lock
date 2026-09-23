@@ -789,6 +789,8 @@ name = "dark-cli"
 version = "0.1.0"
 dependencies = [
  "dark_assets",
+ "dark_combat",
+ "dark_life",
  "dark_sim",
  "dark_spine",
  "dark_story",

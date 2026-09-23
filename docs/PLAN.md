@@ -700,3 +700,34 @@ docs/            this plan
 - Known gaps: text edits are not undone (Ctrl+Z in a field undoes typing); ids cannot be
   renamed once made; the editor's own interface is in English only; a sheet saved again leaves
   its old picture on the GPU until the editor closes (the renderer frees no textures).
+
+## 19. Packaging a build (M9, first piece)
+
+`dark-cli package <project> <out> [--exe <dark-player>]` writes a folder to hand to someone
+without the engine: the game exe (named after the project), a `game` folder beside it, and a
+README. Started with no `--project`, the game plays the project it finds in `game/` beside the
+exe (or beside it), so the exe is double-clicked. A built game opens no console window; a
+development build still does, and the log reaches a pipe or file either way. A built game also
+does not hold the shell that started it, so a script that runs one directly and then reads what
+it wrote must wait for it (`cargo run --release`, or `Start-Process -Wait`); the screenshot
+commands in AGENTS.md go through `cargo run`, which waits.
+
+- The game starts in the project's `start_scene` (`scenes/meadow.ron` when unset), which
+  `--scene` overrides in play; a package holds that scene and everything reachable from it, so
+  it starts where the project says.
+- Only what the game loads is copied: the project file, the font with any licence beside it
+  (a font is handed on under its licence), the FMOD runtime the project has for each platform
+  (a platform without one is silent there, not an error) and its banks, each language's strings
+  **and the editor's own `locale/<code>.editor.ron`**, `world.ron`, `story.ron`, `life.ron`,
+  `combat.ron`, the starting scene and every scene its exits reach, the sheets those scenes'
+  ground, props, scatter, people and enemies name, the set-down structures' sheets, items'
+  icons, faces, and each sheet's picture — or, for a skeleton, its export, atlas, the atlas's
+  pages as Spine's own reader names them, and the bake.
+  A project folder holds whole art packs; Adventurer packages to about 24 MB of a 175 MB folder.
+- Anything named but missing stops the package: a build broken that way only shows itself in
+  play. So does a path that leads out of the project, which would be copied from, or over,
+  somewhere else. The out folder must be empty or hold a package already (its README marks it).
+- Known gaps: no zip (send the folder); the package is for the platform the exe was built for;
+  the world is kept only with `--save`, which is a command line, not a menu; playing together
+  is typed the same way (§5's Steam lobby is the M9 answer), over the internet it still needs
+  the host's UDP port open, and connections are not yet authenticated.

@@ -1,7 +1,9 @@
 //! Headless host: world simulation and UDP, no window, no GPU, no audio.
 //!
-//! Usage: `dark-host [--port 7777] [--day-secs 1440] [--project <dir> [--scene scenes/meadow.ron]
+//! Usage: `dark-host [--port 7777] [--day-secs 1440] [--project <dir> [--scene <file>]
 //!        [--save <file>] [--world-seed <n>]]`
+//! `--scene` overrides where the game starts; without it the project's `start_scene` is used, as
+//! the players' game does, so both sides load the same maps.
 //! With a project it hosts that world (maps, characters, NPCs, enemies, replication) for remote players;
 //! without one it runs sessions and the clock only. With a `world.ron` the world simulation runs
 //! too; `--save` carries a world on from that file and saves it at each new day.
@@ -29,7 +31,9 @@ fn main() -> ExitCode {
 
     let mut port = 7777u16;
     let mut project = None;
-    let mut scene = String::from("scenes/meadow.ron");
+    // Without `--scene` the project says where the game starts, as it does for the players:
+    // both sides must load the same scenes, in the same order, for map ids to mean the same.
+    let mut scene: Option<String> = None;
     let mut save: Option<std::path::PathBuf> = None;
     let mut world_seed = None;
     let mut clock = ClockConfig {
@@ -42,7 +46,7 @@ fn main() -> ExitCode {
         let parsed = match arg.as_str() {
             "--port" => value.and_then(|v| v.parse().ok()).map(|v| port = v),
             "--project" => value.map(|v| project = Some(v)),
-            "--scene" => value.map(|v| scene = v),
+            "--scene" => value.map(|v| scene = Some(v)),
             "--save" => value.map(|v| save = Some(v.into())),
             "--world-seed" => value
                 .and_then(|v| v.parse().ok())
@@ -79,6 +83,12 @@ fn main() -> ExitCode {
     app.add_plugin(HostPlugin { host, clock });
     if let Some(dir) = project {
         let world = Project::open(dir).and_then(|p| {
+            let scene = scene.clone().unwrap_or_else(|| {
+                p.settings
+                    .start_scene
+                    .clone()
+                    .unwrap_or_else(|| dark_assets::DEFAULT_SCENE.to_owned())
+            });
             let maps = Maps::load(&p, &scene)?;
             let combat = CombatDef::load_or_default(&p.path("combat.ron")).map_err(|e| {
                 dark_assets::AssetError::Invalid {
@@ -101,10 +111,10 @@ fn main() -> ExitCode {
                     message: e.to_string(),
                 }
             })?;
-            Ok((p, maps, sheets, names, combat, life, story))
+            Ok((p, maps, sheets, names, combat, life, story, scene))
         });
         match world {
-            Ok((project, maps, sheets, names, combat, life, story)) => {
+            Ok((project, maps, sheets, names, combat, life, story, scene)) => {
                 tracing::info!("hosting {} maps from {scene}", maps.maps.len());
                 app.add_plugin(MapsPlugin(maps))
                     .add_plugin(CharactersPlugin(sheets))

@@ -59,6 +59,13 @@ cargo run -p dark-editor -- --project ../adventurer --script "click 234,15; drag
 Scripted runs save what they save: point them at a copy of the project (with `Art/` a junction
 to the real one, not copied; remove the junction on its own before deleting the copy).
 
+A build to hand to someone without the engine (the exe, a `game` folder with only what the game
+loads, and a README; double-clicked, it plays the project beside it):
+```
+cargo build --release -p dark-player -p dark-cli
+cargo run --release -p dark-cli -- package ../adventurer ../builds/Adventurer
+```
+
 The world simulation, fast-forwarded:
 ```
 cargo run -p dark-cli -- simulate ../adventurer --seed 3          # one year's chronicle

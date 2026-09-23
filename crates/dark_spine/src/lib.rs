@@ -60,6 +60,15 @@ pub struct Rig {
     scale: f32,
 }
 
+/// The atlas pages `def`'s skeleton draws from, named as they are beside the atlas. Packaging
+/// a build ships these; loading names them the same way.
+pub fn atlas_pages(project: &Project, def: &SpineDef) -> Result<Vec<String>, SpineError> {
+    raw::name_pages();
+    let path = project.path(&def.atlas);
+    let atlas = Atlas::new_from_file(&path).map_err(|e| spine_error(&path, e))?;
+    Ok(atlas.pages().map(|page| page.name().to_owned()).collect())
+}
+
 impl Rig {
     /// Loads `def`'s skeleton and atlas from `project`, scaled to world pixels.
     pub fn load(project: &Project, def: &SpineDef) -> Result<Self, SpineError> {

@@ -6,11 +6,15 @@
 //! `dark-cli simulate <project-dir> [--seed n] [--runs n] [--lang code]` fast-forwards the world
 //! simulation (`world.ron`) through a year: the chronicle of one seed, or statistics over many.
 //!
+//! `dark-cli package <project-dir> <out-dir> [--exe <dark-player>]` collects the game and only
+//! the files it loads into a folder to hand over: the exe beside a `game` folder.
+//!
 //! `dark-cli bake-spine <project-dir> <sheet.spine.ron>` measures a Spine skeleton for the host
 //! (clip lengths, events, hitboxes) and writes the sheet's `baked` file. Run it after every
 //! export from Spine. `dark-cli preview-spine <project-dir> <sheet.spine.ron> <clip> <tick>
 //! <out.png>` draws the skeleton at that clip and tick, as the game would, four times enlarged.
 
+mod package;
 mod simulate;
 
 use std::path::PathBuf;
@@ -65,6 +69,19 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        [cmd, rest @ ..] if cmd == "package" => match package::parse(rest) {
+            Ok(options) => match package::run(&options) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    ExitCode::FAILURE
+                }
+            },
+            Err(err) => {
+                eprintln!("error: {err}");
+                ExitCode::FAILURE
+            }
+        },
         [cmd, rest @ ..] if cmd == "simulate" => match simulate::parse(rest) {
             Ok((project, options)) => match simulate::run(&project, &options) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -89,6 +106,7 @@ fn main() -> ExitCode {
             eprintln!(
                 "       dark-cli simulate <project-dir> [--seed <n>] [--runs <n>] [--lang <code>]"
             );
+            eprintln!("       dark-cli package <project-dir> <out-dir> [--exe <dark-player>]");
             ExitCode::FAILURE
         }
     }
