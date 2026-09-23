@@ -172,6 +172,34 @@ fn validate_spawns(maps: &[Map]) -> Result<(), (String, String)> {
                 ));
             }
         }
+        // Where a villager's day sends them must be somewhere they can stand and reach: level
+        // with where they were placed, since nobody walks up a ledge or into another map (§21).
+        for npc in &map.def.npcs {
+            let post = Vec2::from(npc.position);
+            let stands_at = map.collision.ground_under(post, SPAWN_CHECK_RADIUS);
+            for entry in &npc.day {
+                let at = Vec2::from(entry.at);
+                if !(0.0..24.0).contains(&entry.from) {
+                    return Err((
+                        map.name.clone(),
+                        format!("a villager's day has an hour of {}", entry.from),
+                    ));
+                }
+                let level = (map.collision.ground_under(at, SPAWN_CHECK_RADIUS) - stands_at).abs();
+                if !fits(map, at) || level > 0.5 {
+                    return Err((
+                        map.name.clone(),
+                        format!("a villager's day sends them to {at}, which is no place to stand"),
+                    ));
+                }
+                if map.exits.iter().any(|e| e.contains(at)) {
+                    return Err((
+                        map.name.clone(),
+                        format!("a villager's day sends them into an exit at {at}"),
+                    ));
+                }
+            }
+        }
         let posts = map.def.npcs.iter().map(|n| n.position);
         for at in posts.chain(map.def.enemies.iter().map(|e| e.position)) {
             let at = Vec2::from(at);
@@ -535,6 +563,44 @@ pub(crate) mod tests {
             .err()
             .expect("spawn in a wall");
         assert!(err.to_string().contains("inside a wall or prop"), "{err}");
+    }
+
+    /// A day that sends a villager somewhere they cannot stand is caught as the map loads,
+    /// not by a villager pressing into a cliff all afternoon.
+    #[test]
+    fn a_villagers_day_must_send_them_somewhere_they_can_stand() {
+        let bad_day = |day: &str| {
+            let project = project();
+            let scene = std::fs::read_to_string(project.path("scenes/a.ron")).unwrap();
+            let npcs = format!(
+                r#"npcs: [(sheet: "n", position: (40, 40), lines: ["hm"], day: [{day}])],"#
+            );
+            std::fs::write(
+                project.path("scenes/a.ron"),
+                scene.replace("props:", &format!("{npcs}\n props:")),
+            )
+            .unwrap();
+            Maps::load(&project, "scenes/a.ron")
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default()
+        };
+        // The map's level-1 block starts at tile 8, its exit runs down the east edge.
+        assert!(
+            bad_day("(from: 8.0, at: (140.0, 40.0))").contains("no place to stand"),
+            "a step up is no place to stand"
+        );
+        assert!(
+            bad_day("(from: 8.0, at: (310.0, 40.0))").contains("into an exit"),
+            "a doorway is no place to be sent"
+        );
+        assert!(
+            bad_day("(from: 30.0, at: (60.0, 40.0))").contains("hour of 30"),
+            "an hour outside the day"
+        );
+        // Clear of the map's prop (a 6 px circle at 60,40), its block and its exit.
+        let fine = bad_day("(from: 8.0, at: (80.0, 100.0))");
+        assert!(fine.is_empty(), "clear ground is fine, but: {fine}");
     }
 
     #[test]

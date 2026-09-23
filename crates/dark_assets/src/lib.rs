@@ -783,6 +783,32 @@ pub struct NpcDef {
     /// The world actor (`world.ron`) this NPC is: a person who can be asked to follow.
     #[serde(default)]
     pub actor: Option<String>,
+    /// Where this person is through the day. Empty: they stand where they were placed.
+    #[serde(default)]
+    pub day: Vec<DayEntry>,
+}
+
+/// A person's day: from `hour` they make their way to `at`, and lie down there if `sleep`.
+/// The entry in force is the latest one whose hour has come, so the last runs through midnight.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+pub struct DayEntry {
+    /// Hour of the day, 0 to 24.
+    pub from: f32,
+    /// Where in this scene they go.
+    pub at: (f32, f32),
+    #[serde(default)]
+    pub sleep: bool,
+}
+
+impl DayEntry {
+    /// The entry in force at `hour`: the latest that has come, else the last of the day (which
+    /// runs through midnight into the morning).
+    pub fn at_hour(day: &[DayEntry], hour: f32) -> Option<&DayEntry> {
+        day.iter()
+            .filter(|entry| entry.from <= hour)
+            .max_by(|a, b| a.from.total_cmp(&b.from))
+            .or_else(|| day.iter().max_by(|a, b| a.from.total_cmp(&b.from)))
+    }
 }
 
 impl NpcDef {

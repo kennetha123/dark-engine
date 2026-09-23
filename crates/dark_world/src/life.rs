@@ -227,13 +227,16 @@ type Actor = (
     &'static mut Life,
 );
 
+/// Up and about, and not an NPC: they carry no pack, and their state is read through `npcs`.
+type Awake = (Without<Asleep>, Without<Dormant>, Without<Npc>);
+
 fn act(
     mut commands: Commands,
     rules: Res<LifeRules>,
     mut next_id: ResMut<NextNetId>,
     maps: Res<Maps>,
-    mut actors: Query<Actor, (Without<Asleep>, Without<Dormant>)>,
-    npcs: Query<(&MapId, &BodyState), With<Npc>>,
+    mut actors: Query<Actor, Awake>,
+    npcs: Query<(&MapId, &BodyState, &CharacterState), With<Npc>>,
     placed: Query<(Entity, &MapId, &Placed)>,
 ) {
     for (avatar, map, body, control, mut state, mut life) in &mut actors {
@@ -296,11 +299,13 @@ fn act(
         }
         // Interact talks when an NPC is in reach; otherwise it packs up your tent.
         if input.interact {
+            // A sleeping villager (§21) is nobody to talk to, so they do not stand between a
+            // player and their own tent either.
             let npc_near = talk_target(
                 (feet, body.0.elevation),
                 npcs.iter()
-                    .filter(|(m, _)| *m == map)
-                    .map(|(_, b)| ((), b.0.position, b.0.elevation)),
+                    .filter(|(m, _, npc_state)| *m == map && !npc_state.sleeping)
+                    .map(|(_, b, _)| ((), b.0.position, b.0.elevation)),
             )
             .is_some();
             let tent = placed

@@ -44,6 +44,11 @@ fn project() -> Project {
 
 /// The test project, with `enemies` (a scene field, or nothing) in map `a`.
 fn project_with(enemies: &str) -> Project {
+    project_with_npc(enemies, "")
+}
+
+/// The test project, with `enemies` and one more NPC (both scene text, or nothing) in map `a`.
+fn project_with_npc(enemies: &str, npc: &str) -> Project {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("dark_world_net_{}_{n}", std::process::id()));
@@ -61,11 +66,13 @@ fn project_with(enemies: &str) -> Project {
                 (sheet: "n", position: (100, 180), lines: ["hello", (reply: "thanks"), "bye"],
                     actor: "squire", moveset: "hero"),
                 (sheet: "n", position: (300, 250), lines: ["hm"], actor: "hermit"),
+                NPC
             ],
             exits: [(area: (460, 0, 20, 320), to: "scenes/b.ron", spawn: (40, 40))],
             inns: [(area: (200, 200, 60, 40), bed: (230, 220))],
             ENEMIES)"#
-            .replace("ENEMIES", enemies),
+            .replace("ENEMIES", enemies)
+            .replace("NPC", npc),
     )
     .unwrap();
     std::fs::write(
@@ -694,6 +701,48 @@ fn one_character_cannot_walk_through_another_and_the_one_standing_still_stays() 
         "prediction is {} px off",
         net.me(0).ground.distance(a.position)
     );
+}
+
+#[test]
+fn a_villager_walks_their_day_and_lies_down_where_it_says_they_sleep() {
+    // A baker whose day is the far corner of the map, and bed where they started.
+    let project = project_with_npc(
+        "",
+        r#"(sheet: "n", position: (60, 60), lines: ["hm"],
+            day: [(from: 0.0, at: (380.0, 60.0)), (from: 23.0, at: (60.0, 60.0), sleep: true)]),"#,
+    );
+    let mut net = Net::with_project(1, None, project);
+    net.connect();
+    let baker = |net: &Net| {
+        net.clients[0]
+            .characters()
+            .into_iter()
+            .find(|c| c.ground.distance(Vec2::new(100.0, 180.0)) > 1.0 && c.npc && !c.you)
+            .filter(|c| c.ground.x > 40.0 && c.ground.y < 140.0)
+    };
+    let started = baker(&net).expect("the baker is in the map").ground;
+    net.run(200, &[Vec2::ZERO]);
+    let now = baker(&net).expect("still there").ground;
+    assert!(
+        now.x > started.x + 30.0,
+        "the baker stayed at {started}, now {now}"
+    );
+    assert!((now.y - 60.0).abs() < 8.0, "wandered off the line: {now}");
+
+    // Their bed is where they began; at bedtime they go back to it and lie down.
+    net.host
+        .world
+        .resource_mut::<crate::WorldClock>()
+        .0
+        .set_time(0, 23);
+    net.run(600, &[Vec2::ZERO]);
+    let abed = baker(&net).expect("still there");
+    assert!(
+        abed.ground.distance(started) < 8.0,
+        "went to bed at {}, not {started}",
+        abed.ground
+    );
+    assert!(abed.state.sleeping, "did not lie down");
 }
 
 #[test]

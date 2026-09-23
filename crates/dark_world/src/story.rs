@@ -55,6 +55,14 @@ struct Talk {
 #[derive(Component, Clone, Copy, Debug)]
 pub struct Conversing;
 
+impl StoryState {
+    /// Whether this person has a storylet under way — including the moment a player's answer
+    /// is showing, when neither side is saying anything. They keep still through all of it.
+    pub(crate) fn busy_with(&self, person: Entity) -> bool {
+        self.talks.iter().any(|talk| talk.person == person)
+    }
+}
+
 /// Fades to black the player's character has been through, counted: the view fades when it
 /// changes. Replicated to the player.
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -247,9 +255,13 @@ fn converse(
         let Some(player) = crate::party::player_actor(&mut world, avatar.0, *map) else {
             continue;
         };
+        // A sleeper is left to sleep, storylet or no storylet (§21). Their state is read
+        // through `facings`, the one query that holds it.
         let near = people
             .iter()
-            .filter(|(.., m, _, _)| *m == map)
+            .filter(|&(e, _, m, ..)| {
+                *m == *map && facings.get(e).is_ok_and(|person| !person.sleeping)
+            })
             .map(|(e, _, _, b, _)| (e, b.0.position, b.0.elevation));
         let Some(target) = talk_target((body.0.position, body.0.elevation), near) else {
             continue;

@@ -801,3 +801,60 @@ the window being played.
 - Known gaps: no rumble; the buttons cannot be changed; a pad the machine has no mapping for
   reports nothing the game understands, so it does not play (it says so in the log); menus are
   not walked with the d-pad (the menu only shows, it has nothing to choose).
+
+## 21. People's days and lives (in build)
+
+Two systems meet in every villager: a **day** (what they do on an ordinary day) and a **life**
+(what happens to them across the year, whether a player is there or not). Both are data, written
+in the editor; neither needs scripting.
+
+### 21.1 The day (built)
+
+- A scene's NPC carries `day`: hours and places (`DayEntry { from, at, sleep }`). The entry in
+  force is the latest whose hour has come, so the last of the day runs through midnight, as a
+  season does (§12). No entries: they stand where they were placed, as before.
+- `dark_world::routine` walks them there: straight while the line is clear, else A* round
+  (`dark_world::nav`, the same steering the enemies use), at 0.7 of walking pace, and lies them
+  down when the entry says `sleep` and they have arrived. The way is worked out when the hour
+  changes and at most every 20 ticks after that, not every tick; somewhere with no way to it is
+  given up on after three tries, with a warning, until the hour changes.
+- A routine never fights another controller for the character. Anyone in a conversation — saying
+  a line, or with a conversation open — stands still, or they would walk out of the very
+  conversation they are in; so do followers (`Companion`, who are led instead), the held, the
+  hurt and the out cold. Whoever keeps a day `StaysInMap`: a day is written in one scene's
+  coordinates, so its keeper never takes an exit out of it.
+- Nobody talks to, or asks along, a villager who is asleep.
+- Loading checks every day: its hours are hours, and its places are clear ground, level with
+  where that villager was placed, and not in a doorway. A bad day is a map that will not load,
+  not a villager pressing into a cliff all afternoon.
+- Adventurer: Borin is home until mid-morning, in the village by nine, out in the field after
+  noon, home for the evening, asleep by his door at night.
+- Known gaps: the day is written per person, not per role, so two bakers repeat themselves; the
+  places are points in one scene (nobody walks between maps); nothing is *done* at a place yet
+  (no baking, eating or working, only standing there); a villager walks the same day whether or
+  not anyone is in the map to see it; a blow wakes a sleeper only until they are free to act,
+  when they lie down again; a routine NPC's saved position (`SavedPerson`) is overwritten by
+  wherever the hour says they should be; the editor has no day editor yet (`scenes/*.ron` by
+  hand).
+
+### 21.2 The life (designed, not built)
+
+A person's life is a chain of **stages** on the year's timeline. A stage says when it begins
+(a day of the year, and/or conditions on the world as storylets use them), and what it changes
+about the person: their role, where they live, what they say, a lasting hurt, or their death.
+Stages advance in the world simulation, so they happen whether or not a player is in the region.
+
+The baker of Aldmoor, as an example: *baking* from day 1; *burned* on day 85 (week 13), which
+opens a storylet to help him to the hospital; *healed* if that is done; *amputated* if the week
+passes unhelped; *beggar* six weeks later, his shop closed; *dead* by week 30, a grave with his
+name in the town's graveyard. Arrive in week 13 and there is a quest; in week 14 the chance is
+gone and the man has one hand; in week 20 he begs; in week 30 you meet only the stone.
+
+- Quests are not a new system: a storylet's condition names a stage, and its effects move the
+  person to another stage. The branch not taken is the stage timing out.
+- Most villagers have no life written and simply keep their day. A light generated layer ages
+  and occasionally buries the rest, so a long game shows churn among the unwritten.
+- Authoring: the Calendar view (§18 stage 5) with one row per person, stages as blocks dragged
+  along the year, branches drawn as the Story tab draws them.
+- `dark-cli simulate` fast-forwards the year, so "what is Aldmoor like in week 30" is a second's
+  work to answer without playing.

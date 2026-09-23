@@ -240,11 +240,13 @@ pub(crate) fn think(
 }
 
 /// Walks to the path's next point, dropping points already reached.
-fn follow(
+/// Heads for the next point of `path`, dropping those already reached. Shared with the
+/// villagers' routines (`crate::routine`).
+pub(crate) fn follow(
     path: &mut Vec<Vec2>,
     me: Vec2,
     input: &mut TickInput,
-    walk: &mut impl FnMut(Vec2, &mut TickInput),
+    mut walk: impl FnMut(Vec2, &mut TickInput),
 ) {
     while path.first().is_some_and(|p| p.distance(me) <= ARRIVED) {
         path.remove(0);

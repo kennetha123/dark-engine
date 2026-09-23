@@ -838,9 +838,10 @@ impl DemoView {
         if let Some(me) = me
             && dialogue.is_none()
         {
+            // A sleeper is not talked to (§21), so no prompt offers it.
             let npcs = characters
                 .iter()
-                .filter(|c| c.npc)
+                .filter(|c| c.npc && !c.state.sleeping)
                 .map(|c| (c, c.ground, c.elevation));
             if let Some(npc) = talk_target((me.ground, me.elevation), npcs)
                 && npc.speech.is_none()

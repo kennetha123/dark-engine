@@ -136,6 +136,7 @@ type Asked = (
     &'static BodyState,
     &'static Person,
     Option<&'static Companion>,
+    &'static CharacterState,
 );
 
 /// A player asking someone to join, leaving, inviting another player.
@@ -206,11 +207,20 @@ fn socialize(
             feet,
             people
                 .iter()
-                .filter(|(.., m, _, _, _)| *m == map)
+                .filter(|(_, _, m, ..)| *m == map)
                 .map(|(e, _, _, b, ..)| (e, b.0.position, b.0.elevation)),
         );
+        // A sleeper (§21) is let be — and asking beside one is not "nobody in reach", which
+        // would have the player walk out of their own party.
+        if person.is_some_and(|target| {
+            people
+                .get(target)
+                .is_ok_and(|(.., person_state)| person_state.sleeping)
+        }) {
+            continue;
+        }
         if let Some(target) = person
-            && let Ok((npc, _, _, _, who, companion)) = people.get(target)
+            && let Ok((npc, _, _, _, who, companion, _)) = people.get(target)
         {
             let Some(npc_actor) = world.sim.world().actor(&who.0) else {
                 continue;

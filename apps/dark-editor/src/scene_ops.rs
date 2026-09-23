@@ -219,6 +219,8 @@ pub fn new_npc(sheet: &str, at: Vec2, line: String) -> NpcDef {
         facing: Facing::Down,
         lines: vec![LineDef::Says(line)],
         actor: None,
+        // A new villager stands where it was put until someone writes it a day (§21).
+        day: Vec::new(),
     }
 }
 

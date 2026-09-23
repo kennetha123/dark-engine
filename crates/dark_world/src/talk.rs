@@ -100,11 +100,13 @@ impl Plugin for TalkPlugin {
                         home: npc.facing,
                     },
                     npc.actor.clone().map(crate::Person),
+                    (!npc.day.is_empty())
+                        .then(|| crate::routine::Routine::new(npc.day.clone(), MapId(i as u16))),
                 )
             })
             .collect();
         app.world.init_resource::<NextNetId>();
-        for (body, state, npc, person) in spawns {
+        for (body, state, npc, person, routine) in spawns {
             let id = app.world.resource_mut::<NextNetId>().allocate();
             let mut spawned = app
                 .world
@@ -112,11 +114,24 @@ impl Plugin for TalkPlugin {
             if let Some(person) = person {
                 spawned.insert(person);
             }
+            if let Some(routine) = routine {
+                // A day is written in one scene's coordinates, so its keeper stays in that scene:
+                // walking into an exit would strand them in a map their day knows nothing about.
+                spawned.insert((routine, crate::maps::StaysInMap));
+            }
         }
         // Before the controllers, so an NPC turned to its speaker shows that way in the same tick.
         app.add_systems(
             FixedUpdate,
-            (age_speech, end_talks, face_home, talk)
+            // The day is walked after the talking, so being spoken to stops a villager where
+            // they are, and `face_home` does not turn one that is on its way somewhere.
+            (
+                age_speech,
+                end_talks,
+                face_home,
+                talk,
+                crate::routine::walk_the_day,
+            )
                 .chain()
                 .before(control_characters)
                 .in_set(Control),
@@ -279,9 +294,13 @@ pub(crate) fn talk(
             .find(|(.., npc, _)| npc.talking.is_some_and(|(with, _)| with == *talker_id))
             .map(|(entity, ..)| entity);
         let target = under_way.or_else(|| {
-            let in_map = npcs.iter().filter(|(_, _, m, ..)| *m == map).map(
-                |(entity, _, _, npc_body, ..)| (entity, npc_body.0.position, npc_body.0.elevation),
-            );
+            // Nobody talks to a sleeper: a villager abed (§21) is left to sleep.
+            let in_map = npcs
+                .iter()
+                .filter(|(_, _, m, _, _, npc_state)| *m == map && !npc_state.sleeping)
+                .map(|(entity, _, _, npc_body, ..)| {
+                    (entity, npc_body.0.position, npc_body.0.elevation)
+                });
             talk_target(feet, in_map)
         });
         let Some(target) = target else {

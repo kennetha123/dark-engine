@@ -21,6 +21,7 @@ mod maps;
 mod nav;
 mod party;
 mod replication;
+mod routine;
 mod save;
 mod story;
 mod talk;
