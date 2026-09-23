@@ -67,8 +67,25 @@ fn main() -> ExitCode {
         }
     }
 
+    // Which world this host accepts players into: the project's settings, its scenes and the
+    // scene the game starts in. Worked out before the host opens its port, because a player may
+    // knock the moment it does; a host with no project has no world to compare, and says 0
+    // (docs/PLAN.md §5).
+    let mut world_id = 0;
+    if let Some(dir) = project.as_deref() {
+        match Project::open(dir) {
+            Ok(p) => world_id = p.fingerprint(&p.start_scene(scene.as_deref())),
+            // Opening it again below would fail the same way, but a host that cannot read its
+            // project must not open a port in the meantime: a world of 0 accepts everybody.
+            Err(err) => {
+                tracing::error!("cannot open the project: {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     let host = match Host::new(HostConfig {
         bind: Some(SocketAddr::from(([0, 0, 0, 0], port))),
+        world: world_id,
     }) {
         Ok(host) => host,
         Err(err) => {
@@ -87,12 +104,8 @@ fn main() -> ExitCode {
     let mut game = "Dark Engine".to_owned();
     if let Some(dir) = project {
         let world = Project::open(dir).and_then(|p| {
-            let scene = scene.clone().unwrap_or_else(|| {
-                p.settings
-                    .start_scene
-                    .clone()
-                    .unwrap_or_else(|| dark_assets::DEFAULT_SCENE.to_owned())
-            });
+            // The same rule every app follows, so a host and a player agree which world it is.
+            let scene = p.start_scene(scene.as_deref());
             let maps = Maps::load(&p, &scene)?;
             let combat = CombatDef::load_or_default(&p.path("combat.ron")).map_err(|e| {
                 dark_assets::AssetError::Invalid {
@@ -155,7 +168,7 @@ fn main() -> ExitCode {
 
     // Told to whoever asks the network what is being played here. A game whose beacon cannot
     // open is still hosted; it only has to be joined by address.
-    let mut beacon = match Beacon::new(port, game) {
+    let mut beacon = match Beacon::new(port, game, world_id) {
         Ok(beacon) => Some(beacon),
         Err(err) => {
             tracing::warn!("this game will not show on the network: {err}");

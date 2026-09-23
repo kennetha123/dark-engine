@@ -28,6 +28,9 @@ pub struct RemoteClient {
     client: RenetClient,
     transport: NetcodeClientTransport,
     player: PlayerId,
+    /// The world this player holds; the host refuses a different one. See
+    /// [`crate::HostConfig::world`].
+    world: u64,
     hello_sent: bool,
     status: ClientStatus,
     leaving_for: Duration,
@@ -36,7 +39,7 @@ pub struct RemoteClient {
 }
 
 impl RemoteClient {
-    pub fn connect(server: SocketAddr, player: PlayerId) -> Result<Self, NetError> {
+    pub fn connect(server: SocketAddr, player: PlayerId, world: u64) -> Result<Self, NetError> {
         let bind: SocketAddr = if server.is_ipv4() {
             "0.0.0.0:0"
         } else {
@@ -58,6 +61,7 @@ impl RemoteClient {
             client: RenetClient::new(connection_config()),
             transport,
             player,
+            world,
             hello_sent: false,
             status: ClientStatus::Connecting,
             leaving_for: Duration::ZERO,
@@ -106,6 +110,7 @@ impl RemoteClient {
                 encode(&ClientMessage::Hello {
                     protocol_version: PROTOCOL_VERSION,
                     player: self.player,
+                    world: self.world,
                 }),
             );
             self.hello_sent = true;
@@ -237,12 +242,13 @@ mod tests {
     #[test]
     fn remote_player_joins_exchanges_and_quits_over_udp() {
         let mut host = Host::new(HostConfig {
+            world: 0,
             bind: Some("127.0.0.1:0".parse().unwrap()),
         })
         .unwrap();
         let addr = host.udp_addr().unwrap();
         let player = PlayerId::random();
-        let mut client = RemoteClient::connect(addr, player).unwrap();
+        let mut client = RemoteClient::connect(addr, player, 0).unwrap();
 
         let events = pump(&mut host, &mut client, |c, _| {
             c.status() == ClientStatus::InGame
@@ -296,13 +302,14 @@ mod tests {
     #[test]
     fn rejected_client_is_told_why_and_closed() {
         let mut host = Host::new(HostConfig {
+            world: 0,
             bind: Some("127.0.0.1:0".parse().unwrap()),
         })
         .unwrap();
         let player = PlayerId::random();
         host.connect_local(player);
         // Same identity as the host's own player.
-        let mut client = RemoteClient::connect(host.udp_addr().unwrap(), player).unwrap();
+        let mut client = RemoteClient::connect(host.udp_addr().unwrap(), player, 0).unwrap();
         let events = pump(&mut host, &mut client, |c, _| {
             matches!(c.status(), ClientStatus::Rejected(_))
         });
@@ -321,14 +328,38 @@ mod tests {
         assert_eq!(host.sessions().online_count(), 1);
     }
 
+    /// Over the wire, end to end: a player whose project holds another world is told so and
+    /// closed, rather than let in to walk on ground the host does not have.
+    #[test]
+    fn a_client_from_another_world_is_told_so_over_the_wire() {
+        let mut host = Host::new(HostConfig {
+            world: 0xDEAD_BEEF,
+            bind: Some("127.0.0.1:0".parse().unwrap()),
+        })
+        .unwrap();
+        let mut client =
+            RemoteClient::connect(host.udp_addr().unwrap(), PlayerId::random(), 0x0BAD_F00D)
+                .unwrap();
+        let events = pump(&mut host, &mut client, |c, _| {
+            matches!(c.status(), ClientStatus::Rejected(_))
+        });
+        assert_eq!(
+            client.status(),
+            ClientStatus::Rejected(RejectReason::DifferentWorld)
+        );
+        assert!(events.is_empty(), "nobody joined");
+        assert_eq!(host.sessions().online_count(), 0);
+    }
+
     #[test]
     fn dropped_client_enters_grace_on_host() {
         let mut host = Host::new(HostConfig {
+            world: 0,
             bind: Some("127.0.0.1:0".parse().unwrap()),
         })
         .unwrap();
         let player = PlayerId::random();
-        let mut client = RemoteClient::connect(host.udp_addr().unwrap(), player).unwrap();
+        let mut client = RemoteClient::connect(host.udp_addr().unwrap(), player, 0).unwrap();
         pump(&mut host, &mut client, |c, _| {
             c.status() == ClientStatus::InGame
         });

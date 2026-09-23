@@ -102,9 +102,25 @@ struct WorldStart {
     /// `--player` was given, so a save's own host does not take it over.
     player_given: bool,
     world_seed: Option<u64>,
+    /// Worked out the first time it is asked for; see [`WorldStart::world_id`].
+    world_id: std::cell::OnceCell<u64>,
 }
 
 impl WorldStart {
+    /// Which world this player holds: the scenes the game can walk into from where it starts, and
+    /// what the simulation is built from, in one number. A host accepts only players who hold the
+    /// same one, and the list of games on the network shows which of them that is (§5, §23).
+    ///
+    /// Worked out once, when the title screen is answered: it reads every one of those files, and
+    /// the host, the beacon and the list all ask for it. A scene changed after that — by the
+    /// editor, while a game is open — is not noticed until the next time a game is started, which
+    /// is the same moment the maps themselves were last read.
+    fn world_id(&self) -> u64 {
+        *self
+            .world_id
+            .get_or_init(|| self.project.fingerprint(&self.scene))
+    }
+
     /// Builds the host for a game: `fresh` starts a new world, else `save` is carried on. Either
     /// way the world is saved to `save` from then on. With `open`, other people can join on that
     /// port, and a beacon tells the network the game is there (docs/PLAN.md §23).
@@ -119,7 +135,11 @@ impl WorldStart {
         let bind = open.map(|port| SocketAddr::from(([0, 0, 0, 0], port)));
         // Why it would not start is worth keeping: the player is told the port is taken only
         // when it is, and not when a save is at fault.
-        let mut host = Host::new(HostConfig { bind }).map_err(|err| {
+        let mut host = Host::new(HostConfig {
+            bind,
+            world: self.world_id(),
+        })
+        .map_err(|err| {
             let taken = matches!(&err, dark_net::NetError::Io(io)
                 if io.kind() == std::io::ErrorKind::AddrInUse);
             let why = if taken {
@@ -173,7 +193,8 @@ impl WorldStart {
     fn join(&self, host: SocketAddr) -> Result<ClientSession, String> {
         tracing::info!("joining {host}");
         let mut scene = DemoScene::load(&self.project, &self.scene).map_err(|e| e.to_string())?;
-        let net = RemoteClient::connect(host, self.player).map_err(|e| e.to_string())?;
+        let net =
+            RemoteClient::connect(host, self.player, self.world_id()).map_err(|e| e.to_string())?;
         let sheets = scene.character_sheets();
         Ok(ClientSession::new(net, scene.take_maps(), sheets))
     }
@@ -376,7 +397,12 @@ impl Player {
         let Some(addr) = app.world.resource::<NetHost>().0.udp_addr() else {
             return;
         };
-        self.beacon = open_beacon(addr.port(), self.start.as_ref().map(|start| &start.project));
+        let start = self.start.as_ref();
+        self.beacon = open_beacon(
+            addr.port(),
+            start.map(|start| &start.project),
+            start.map_or(0, WorldStart::world_id),
+        );
     }
 
     /// Puts a line under the title screen's list: what went wrong. The string is named rather
@@ -863,6 +889,7 @@ impl Game for Player {
                 self.mode = Mode::Title(Box::new(title::Title::new(
                     start.project.clone(),
                     self.settings.clone(),
+                    start.world_id(),
                 )));
                 // The game is over, so it is no longer on anyone's list.
                 self.beacon = None;
@@ -960,6 +987,12 @@ impl Game for Player {
                 // line chose has no title to go back to, so it stays as it is.
                 else if self.start.is_some() {
                     self.title_note = match session.status() {
+                        // Which refusal it was, where the player can do something about it: a
+                        // stale copy of the project is theirs to fix, and "that game would not
+                        // let you in" would have them blaming the host.
+                        ClientStatus::Rejected(dark_net::RejectReason::DifferentWorld) => {
+                            Some("ui.other_world")
+                        }
                         ClientStatus::Rejected(_) => Some("ui.turned_away"),
                         ClientStatus::Disconnected => Some("ui.host_gone"),
                         ClientStatus::Connecting | ClientStatus::InGame => None,
@@ -1268,12 +1301,11 @@ fn parse_args() -> Result<Args, String> {
     Ok(args)
 }
 
-/// The scene to start in: `--scene`, else the project's `start_scene`, else the default.
+/// The scene to start in: `--scene`, else the project's `start_scene`, else the default. The
+/// project holds the rule, so every app follows the same one — a host and a player who disagreed
+/// about where the game starts would hold two worlds and refuse each other.
 fn start_scene(project: &Project, args: &Args) -> String {
-    args.scene
-        .clone()
-        .or_else(|| project.settings.start_scene.clone())
-        .unwrap_or_else(|| dark_assets::DEFAULT_SCENE.to_owned())
+    project.start_scene(args.scene.as_deref())
 }
 
 /// The project a packaged game carries: `game/` beside the exe, or the exe's own folder
@@ -1401,6 +1433,7 @@ fn main() -> ExitCode {
             player: args.player,
             player_given: args.player_given,
             world_seed: args.world_seed,
+            world_id: std::cell::OnceCell::new(),
         }),
         _ => None,
     };
@@ -1411,7 +1444,8 @@ fn main() -> ExitCode {
     let mut beacon = None;
     let mode = match (&start, &args.launch) {
         (Some(start), _) => {
-            let mut title = title::Title::new(start.project.clone(), settings.clone());
+            let mut title =
+                title::Title::new(start.project.clone(), settings.clone(), start.world_id());
             if args.together {
                 title.look_together();
             }
@@ -1422,7 +1456,7 @@ fn main() -> ExitCode {
                 let Some(scene) = &mut scene else {
                     unreachable!("--join requires --project, checked in parse_args");
                 };
-                match RemoteClient::connect(*addr, args.player) {
+                match RemoteClient::connect(*addr, args.player, world_id(&project, &args)) {
                     Ok(mut net) => {
                         if let Some((raw, conditions)) = &args.net_sim {
                             tracing::info!(
@@ -1444,7 +1478,10 @@ fn main() -> ExitCode {
                     Launch::Host(port) => Some(SocketAddr::from(([0, 0, 0, 0], port))),
                     _ => None,
                 };
-                let mut host = match Host::new(HostConfig { bind }) {
+                let mut host = match Host::new(HostConfig {
+                    bind,
+                    world: world_id(&project, &args),
+                }) {
                     Ok(host) => host,
                     Err(err) => {
                         tracing::error!("cannot start host: {err}");
@@ -1503,7 +1540,7 @@ fn main() -> ExitCode {
                     }
                 }
                 if let Launch::Host(port) = args.launch {
-                    beacon = open_beacon(port, project.as_ref());
+                    beacon = open_beacon(port, project.as_ref(), world_id(&project, &args));
                     children = launch_clients(args.clients, port, &args);
                 }
                 Mode::Host(Box::new(app))
@@ -1580,18 +1617,29 @@ fn main() -> ExitCode {
 /// Says on the network that a game is open on this port, under the project's name, so it shows
 /// in other players' lists (docs/PLAN.md §23). A game whose beacon cannot open is still played;
 /// it only has to be joined by address.
-fn open_beacon(port: u16, project: Option<&Project>) -> Option<dark_net::Beacon> {
+fn open_beacon(port: u16, project: Option<&Project>, world: u64) -> Option<dark_net::Beacon> {
     let name = project.map_or_else(
         || "Dark Engine".to_owned(),
         |project| project.settings.name.clone(),
     );
-    match dark_net::Beacon::new(port, name) {
+    match dark_net::Beacon::new(port, name, world) {
         Ok(beacon) => Some(beacon),
         Err(err) => {
             tracing::warn!("this game will not show on the network: {err}");
             None
         }
     }
+}
+
+/// Which world a command line holds, for the paths that have a project rather than a
+/// [`WorldStart`]. Without a project there is no world to compare, and `0` says so.
+///
+/// The scene is resolved the same way the game resolves it, so a host that let the project say
+/// where to start and a player who named that same scene are in one world, not two.
+fn world_id(project: &Option<Project>, args: &Args) -> u64 {
+    project.as_ref().map_or(0, |project| {
+        project.fingerprint(&start_scene(project, args))
+    })
 }
 
 /// A fresh world each session unless `--world-seed` pins one.

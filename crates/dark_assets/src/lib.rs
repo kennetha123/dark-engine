@@ -124,6 +124,88 @@ impl Project {
         self.root.join(relative)
     }
 
+    /// The scene a game starts in: what was asked for, else the project's own, else the default.
+    ///
+    /// Every app resolves it this way, and they must: a host that let the project say where to
+    /// start and a player who named that same scene have to land on one answer, or the two would
+    /// hold different worlds by [`Self::fingerprint`] and refuse each other.
+    pub fn start_scene(&self, asked: Option<&str>) -> String {
+        asked
+            .map(str::to_owned)
+            .or_else(|| self.settings.start_scene.clone())
+            .unwrap_or_else(|| DEFAULT_SCENE.to_owned())
+    }
+
+    /// One number for the world two machines are about to play in: the scene the game starts in,
+    /// every scene it can walk into from there, the tile size they are all built on, and the
+    /// definitions the simulation reads.
+    ///
+    /// A host and a client must hold the same ones or they are not in the same world at all. The
+    /// ground is the plainest case — a scene made from a seed (§24.4) is a country in one number,
+    /// so a client with an older copy would walk on land its host does not have — but the map
+    /// graph is worse: maps are numbered by walking the ways out from the starting scene, so a
+    /// different set of scenes, or a different scene to start from, can leave the same number
+    /// meaning two different maps. `combat.ron` is in for the same reason: the looks a snapshot
+    /// names are a list built from it, so an enemy added on one side renames everybody.
+    /// The handshake compares this number and says so (docs/PLAN.md §5).
+    ///
+    /// What is left out is left out on purpose. Art, sound, fonts, languages, the window's
+    /// resolution and the game's name change nothing the simulation stands on: a player with a
+    /// different tree sees a different tree, and refusing them a game over it would be absurd. A
+    /// scene nothing can walk into is left out too, so a packaged build — which carries only what
+    /// the game can reach — is the same world as the project it was made from.
+    ///
+    /// Line endings are ignored, because a checkout on Windows and one on Linux differ in them
+    /// and agree about everything that matters.
+    pub fn fingerprint(&self, start_scene: &str) -> u64 {
+        let mut all = FINGERPRINT_SEED;
+        // The tile size, because every map's collision grid is built on it. The rest of the
+        // settings file is presentation, and hashing the file itself would refuse a game over a
+        // reformatted comment or a language somebody added.
+        mix_bytes(&mut all, &self.settings.tile_size.to_le_bytes());
+        // Where the game starts, because the maps are numbered from it: two scenes that lead to
+        // each other hold the same set, and starting in one is not starting in the other.
+        mix_bytes(&mut all, scene_name(start_scene).as_bytes());
+        // The scenes the game can walk into, from where it starts: the same set `Maps::load`
+        // numbers the maps from, found the same way.
+        for scene in self.scenes_reachable(start_scene) {
+            mix_bytes(&mut all, scene.as_bytes());
+            mix_file(&mut all, &self.path(&scene));
+        }
+        // And what else the simulation is built from. A client reads `combat.ron` to build the
+        // same list of looks the host names in its snapshots; `life.ron` is what its needs and
+        // its things are.
+        for def in ["combat.ron", "life.ron"] {
+            mix_bytes(&mut all, def.as_bytes());
+            mix_file(&mut all, &self.path(def));
+        }
+        all
+    }
+
+    /// Every scene reachable from `start`, by its way out and the ways out of what it leads to,
+    /// as the maps name them — sorted, so the answer does not depend on the order they were
+    /// found in. A scene that will not load contributes its name and nothing else; the game will
+    /// refuse to start on it anyway, and two machines that cannot read it agree that they cannot.
+    fn scenes_reachable(&self, start: &str) -> Vec<String> {
+        let mut found = std::collections::BTreeSet::new();
+        let mut queue = vec![scene_name(start)];
+        while let Some(name) = queue.pop() {
+            if !found.insert(name.clone()) {
+                continue;
+            }
+            let Ok(def) = self.load_scene(&name) else {
+                continue;
+            };
+            for exit in &def.exits {
+                let to = scene_name(&exit.to);
+                if !found.contains(&to) {
+                    queue.push(to);
+                }
+            }
+        }
+        found.into_iter().collect()
+    }
+
     /// Loads a sheet definition and the image it slices; a `*.spine.ron` sheet loads its baked
     /// clips instead (see [`SpineDef`]).
     pub fn load_sheet(&self, definition: impl AsRef<Path>) -> Result<LoadedSheet, AssetError> {
@@ -153,6 +235,51 @@ impl Project {
             sheet,
             spine: None,
         })
+    }
+}
+
+/// Where a project's fingerprint starts from. Any number would do; this one is not zero, so an
+/// empty project still has a fingerprint of its own.
+const FINGERPRINT_SEED: u64 = 0xCBF2_9CE4_8422_2325;
+
+/// Folds bytes into a fingerprint (FNV-1a, 64 bits): no dependency, and the same answer on every
+/// machine, which is the whole point of it.
+fn mix_bytes(all: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *all ^= u64::from(*byte);
+        *all = all.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    // A separator, so that two files' contents cannot run together into a third's. It is `0xFF`
+    // because everything hashed here is text — names and RON — and `0xFF` cannot appear in UTF-8;
+    // anything binary put through this later would want a length instead.
+    *all ^= 0xFF;
+    *all = all.wrapping_mul(0x0000_0100_0000_01B3);
+}
+
+/// A scene's name as the maps name it: `./a\b.ron` and `a/b.ron` are one scene, so two machines
+/// that write the same path differently still hold one world.
+fn scene_name(path: &str) -> String {
+    path.replace('\\', "/").trim_start_matches("./").to_owned()
+}
+
+/// Folds a file's contents into a fingerprint, line endings aside.
+fn mix_file(all: &mut u64, path: &Path) {
+    match std::fs::read(path) {
+        Ok(bytes) => mix_bytes(
+            all,
+            &bytes
+                .into_iter()
+                .filter(|b| *b != b'\r')
+                .collect::<Vec<u8>>(),
+        ),
+        // A file that is not there, or will not open, still counts — losing one must not look
+        // like agreement. What it counts as is a fixed word and the raw error number, never the
+        // system's own message: that is translated on Windows, so two machines that both fail
+        // the same way would otherwise disagree about the world.
+        Err(err) => {
+            mix_bytes(all, b"unreadable");
+            mix_bytes(all, &err.raw_os_error().unwrap_or(-1).to_le_bytes());
+        }
     }
 }
 
@@ -1172,6 +1299,150 @@ mod tests {
             width: w,
             height: h,
             rgba: vec![255; (w * h * 4) as usize],
+        }
+    }
+
+    /// Builds a small project on disk for the fingerprint tests and returns its folder.
+    fn a_project(dir: &std::path::Path, tile: u32) -> std::path::PathBuf {
+        let _ = std::fs::remove_dir_all(dir);
+        std::fs::create_dir_all(dir.join("scenes")).unwrap();
+        std::fs::create_dir_all(dir.join("dungeons")).unwrap();
+        let write = |file: &str, text: &str| std::fs::write(dir.join(file), text).unwrap();
+        write(
+            "project.ron",
+            &format!(r#"(name: "t", tile_size: {tile}, resolution: (320, 180))"#),
+        );
+        // A starting scene, a scene it leads to in another folder, and one nothing leads to.
+        write(
+            "scenes/a.ron",
+            r#"(size: (800, 600), land: (seed: 1), ground: (sheet: "g", frame: 0),
+                exits: [(area: (0, 0, 8, 8), to: "dungeons/keep.ron", spawn: (40, 40))])"#,
+        );
+        write(
+            "dungeons/keep.ron",
+            r#"(size: (400, 400), land: (seed: 2), ground: (sheet: "g", frame: 0))"#,
+        );
+        write(
+            "scenes/orphan.ron",
+            r#"(size: (100, 100), ground: (sheet: "g", frame: 0))"#,
+        );
+        write("combat.ron", r#"(kinds: {})"#);
+        write("life.ron", r#"(items: {})"#);
+        dir.to_path_buf()
+    }
+
+    /// What a fingerprint must notice, and — just as much — what it must not.
+    ///
+    /// A host and a client compare these numbers and refuse each other when they differ, so a
+    /// change it misses is two players walking on different ground, and a change it invents is a
+    /// game nobody can join over a window size.
+    #[test]
+    fn a_fingerprint_is_the_world_and_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("dark_assets_fp_{}", std::process::id()));
+        a_project(&dir, 16);
+        let write = |file: &str, text: &str| std::fs::write(dir.join(file), text).unwrap();
+        let of = |start: &str| Project::open(dir.clone()).unwrap().fingerprint(start);
+
+        let world = of("scenes/a.ron");
+        assert_eq!(world, of("scenes/a.ron"), "the same files, twice");
+        assert_eq!(world, of("./scenes\\a.ron"), "one scene named two ways");
+
+        // --- what it must notice -------------------------------------------------------------
+        // A scene the game can walk into, in a folder of its own: this is what a directory walk
+        // of `scenes/` would have missed, and it is a whole country of made land.
+        write(
+            "dungeons/keep.ron",
+            r#"(size: (400, 400), land: (seed: 3), ground: (sheet: "g", frame: 0))"#,
+        );
+        assert_ne!(
+            world,
+            of("scenes/a.ron"),
+            "a scene beyond a way out changed"
+        );
+        write(
+            "dungeons/keep.ron",
+            r#"(size: (400, 400), land: (seed: 2), ground: (sheet: "g", frame: 0))"#,
+        );
+        assert_eq!(world, of("scenes/a.ron"), "and changed back");
+
+        // The looks a snapshot names are a list built from combat.ron, so it counts.
+        write("combat.ron", r#"(kinds: {"goblin": (health: 3)})"#);
+        assert_ne!(world, of("scenes/a.ron"), "combat.ron changed");
+        write("combat.ron", r#"(kinds: {})"#);
+        write("life.ron", r#"(items: {"bread": (fills: 3)})"#);
+        assert_ne!(world, of("scenes/a.ron"), "life.ron changed");
+        write("life.ron", r#"(items: {})"#);
+
+        // The tile size, which every collision grid is built on; and where the game starts,
+        // because the maps are numbered from there.
+        assert_eq!(world, of("scenes/a.ron"), "back to where it started");
+        assert_ne!(world, of("dungeons/keep.ron"), "another scene to start in");
+        let dir2 = std::env::temp_dir().join(format!("dark_assets_fp2_{}", std::process::id()));
+        a_project(&dir2, 32);
+        let other_tiles = Project::open(dir2.clone())
+            .unwrap()
+            .fingerprint("scenes/a.ron");
+        assert_ne!(world, other_tiles, "another tile size");
+
+        // A scene that goes missing is not the same world as one that is there.
+        std::fs::remove_file(dir.join("dungeons/keep.ron")).unwrap();
+        assert_ne!(world, of("scenes/a.ron"), "a scene went missing");
+        write(
+            "dungeons/keep.ron",
+            r#"(size: (400, 400), land: (seed: 2), ground: (sheet: "g", frame: 0))"#,
+        );
+
+        // --- what it must not notice ---------------------------------------------------------
+        // Presentation, all of it: the game's name, the window, the languages, and the files
+        // that hold the words and the pictures.
+        write(
+            "project.ron",
+            r#"(name: "another name", tile_size: 16, resolution: (1920, 1080), languages: ["en", "ja"])"#,
+        );
+        assert_eq!(
+            world,
+            of("scenes/a.ron"),
+            "the name, the window, the languages"
+        );
+        std::fs::create_dir_all(dir.join("locale")).unwrap();
+        write("locale/en.ron", r#"{"ui.quit": "Leave"}"#);
+        std::fs::create_dir_all(dir.join("sheets")).unwrap();
+        write("sheets/g.sheet.ron", r#"(image: "g.png", frame: (16, 16))"#);
+        assert_eq!(world, of("scenes/a.ron"), "words and pictures");
+
+        // A scene nothing can walk into, so that a packaged build — which carries only what the
+        // game can reach — is the same world as the project it came from.
+        write(
+            "scenes/orphan.ron",
+            r#"(size: (100, 100), land: (seed: 99), ground: (sheet: "g", frame: 0))"#,
+        );
+        assert_eq!(world, of("scenes/a.ron"), "a scene nothing leads to");
+        std::fs::remove_file(dir.join("scenes/orphan.ron")).unwrap();
+        assert_eq!(
+            world,
+            of("scenes/a.ron"),
+            "and one that is not there at all"
+        );
+
+        // A checkout with the other platform's line endings is the same world.
+        let unix = std::fs::read_to_string(dir.join("scenes/a.ron")).unwrap();
+        write("scenes/a.ron", &unix.replace('\n', "\r\n"));
+        assert_eq!(world, of("scenes/a.ron"), "CRLF against LF");
+        write("scenes/a.ron", &unix);
+
+        // And the same content in another folder is the same world: what is hashed is the
+        // project, not where it happens to live.
+        let dir3 = std::env::temp_dir().join(format!("dark_assets_fp3_{}", std::process::id()));
+        a_project(&dir3, 16);
+        assert_eq!(
+            world,
+            Project::open(dir3.clone())
+                .unwrap()
+                .fingerprint("scenes/a.ron"),
+            "the same project, somewhere else on disk"
+        );
+        for dir in [dir, dir2, dir3] {
+            std::fs::remove_dir_all(&dir).unwrap();
         }
     }
 

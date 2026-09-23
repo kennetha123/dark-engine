@@ -5,13 +5,17 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::{PlayerId, RejectReason};
 
 /// Bump on any incompatible wire change.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientMessage {
     Hello {
         protocol_version: u32,
         player: PlayerId,
+        /// The world this player holds: their project's settings, scenes and starting scene,
+        /// in one number (`dark_assets::Project::fingerprint`). The host refuses a different
+        /// one, because the two would not be in the same world (docs/PLAN.md §5).
+        world: u64,
     },
     /// Graceful quit. Sent before disconnecting so the host can tell a quit from a crash.
     Goodbye,
@@ -39,6 +43,7 @@ mod tests {
     #[test]
     fn round_trip() {
         let hello = ClientMessage::Hello {
+            world: 77,
             protocol_version: PROTOCOL_VERSION,
             player: PlayerId::random(),
         };

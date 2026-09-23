@@ -21,6 +21,13 @@ pub struct HostConfig {
     /// UDP address to accept remote players on. `None` hosts a single-player session.
     #[cfg(feature = "udp")]
     pub bind: Option<std::net::SocketAddr>,
+    /// The world this host is playing in, as `dark_assets::Project::fingerprint` gives it. A
+    /// player who holds another one is turned away with [`RejectReason::DifferentWorld`] rather
+    /// than left to walk on ground the host does not have (docs/PLAN.md §5).
+    ///
+    /// Zero means a host that does not care — the tests, and the world simulation, which has no
+    /// project to fingerprint. A player is never turned away for it.
+    pub world: u64,
 }
 
 /// The host's own player. It gets a server of its own: renet keeps acknowledgements queued for
@@ -39,15 +46,19 @@ pub struct Host {
     udp: Option<renet_netcode::NetcodeServerTransport>,
     local: Option<LocalPlayer>,
     sessions: SessionRegistry,
+    /// The world this host plays in; see [`HostConfig::world`].
+    world: u64,
     /// Connections to close when their timer runs out: unidentified (hello timeout), rejected
     /// (linger), or leaving (closed next tick, after gameplay has read their final messages).
     closing: HashMap<ClientId, Duration>,
+    /// Why players were turned away, in order, for the tests that ask whether it was the right
+    /// reason. A rejection otherwise leaves nothing behind but a line in the log.
+    #[cfg(test)]
+    refused: Vec<RejectReason>,
 }
 
 impl Host {
     pub fn new(config: HostConfig) -> Result<Self, NetError> {
-        #[cfg(not(feature = "udp"))]
-        let _ = config;
         Ok(Self {
             server: RenetServer::new(connection_config()),
             #[cfg(feature = "udp")]
@@ -55,6 +66,9 @@ impl Host {
             local: None,
             sessions: SessionRegistry::default(),
             closing: HashMap::new(),
+            #[cfg(test)]
+            refused: Vec::new(),
+            world: config.world,
         })
     }
 
@@ -84,6 +98,8 @@ impl Host {
             encode(&ClientMessage::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 player,
+                // The host's own player is in the host's own world, by definition.
+                world: self.world,
             }),
         );
         self.local = Some(LocalPlayer {
@@ -187,10 +203,13 @@ impl Host {
             ClientMessage::Hello {
                 protocol_version,
                 player,
+                world,
             } => {
                 let local_player = self.local_player();
                 let result = if protocol_version != PROTOCOL_VERSION {
                     Err(RejectReason::ProtocolMismatch)
+                } else if self.world != 0 && world != self.world {
+                    Err(RejectReason::DifferentWorld)
                 } else if client != LOCAL_CLIENT_ID && local_player == Some(player) {
                     Err(RejectReason::IdentityInUse)
                 } else {
@@ -219,6 +238,8 @@ impl Host {
                     }
                     Err(reason) => {
                         tracing::info!("rejected client {client}: {reason}");
+                        #[cfg(test)]
+                        self.refused.push(reason);
                         if let Some(server) = self.server_of(client) {
                             server.send_message(
                                 client,
@@ -357,6 +378,77 @@ fn bind_udp(addr: std::net::SocketAddr) -> Result<renet_netcode::NetcodeServerTr
 mod tests {
     use super::*;
 
+    /// A player holding a different world is turned away, and told why; one holding the same
+    /// world is let in.
+    ///
+    /// Two machines with different scene files are not in the same game at all: the maps are
+    /// numbered by walking the ways out from the starting scene, so the same number can mean two
+    /// different maps, and a scene made from a seed is a whole country in one number. Before this
+    /// the handshake had nothing to say about any of it (docs/PLAN.md §5, §24.4).
+    #[test]
+    fn a_player_from_another_world_is_turned_away() {
+        let mut host = Host::new(HostConfig {
+            world: 0xDEAD_BEEF,
+            ..HostConfig::default()
+        })
+        .unwrap();
+        // The host's own player is in the host's own world, whatever that is.
+        host.connect_local(PlayerId::random());
+        let dt = Duration::from_millis(16);
+        let events: Vec<_> = (0..3).flat_map(|_| host.update(dt)).collect();
+        assert!(matches!(events[..], [SessionEvent::Joined { .. }]));
+
+        // A stranger who holds another world, and one who holds this one. A client that sends
+        // no world at all is turned away too: only the host may be the one that does not care.
+        for (world, welcome) in [(0xDEAD_BEEF, true), (0x0BAD_F00D, false), (0, false)] {
+            let stranger = PlayerId::random();
+            let reply = host.handle_control(
+                7,
+                ClientMessage::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    player: stranger,
+                    world,
+                },
+            );
+            assert_eq!(
+                reply.is_some(),
+                welcome,
+                "a player holding world {world:#x} should{} have been let in",
+                if welcome { "" } else { " not" }
+            );
+            if welcome {
+                host.sessions.disconnected(7);
+            } else {
+                // And turned away for the right reason: told to fix their copy of the project,
+                // not that the game is full or that they are somebody else.
+                assert_eq!(
+                    host.refused.last(),
+                    Some(&RejectReason::DifferentWorld),
+                    "a player holding world {world:#x} was refused for the wrong reason"
+                );
+            }
+        }
+    }
+
+    /// A host that does not care which world it is in — the tests, and a host with no project —
+    /// lets anybody in, whatever they hold.
+    #[test]
+    fn a_host_without_a_world_of_its_own_asks_nobody_about_theirs() {
+        let mut host = Host::new(HostConfig::default()).unwrap();
+        let reply = host.handle_control(
+            7,
+            ClientMessage::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                player: PlayerId::random(),
+                world: 0x0BAD_F00D,
+            },
+        );
+        assert!(
+            reply.is_some(),
+            "nobody is turned away by a host with no world"
+        );
+    }
+
     #[test]
     fn local_player_goes_through_handshake() {
         let mut host = Host::new(HostConfig::default()).unwrap();
@@ -390,6 +482,7 @@ mod tests {
     #[test]
     fn local_player_still_receives_when_udp_is_active() {
         let mut host = Host::new(HostConfig {
+            world: 0,
             bind: Some("127.0.0.1:0".parse().unwrap()),
         })
         .unwrap();

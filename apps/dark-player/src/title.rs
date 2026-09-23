@@ -83,6 +83,10 @@ pub struct Title {
     settings: crate::settings::Settings,
     /// Games found on the network, as the game last heard them.
     games: Vec<(SocketAddr, Status)>,
+    /// The world this player holds (`dark_assets::Project::fingerprint`). A game being played in
+    /// another one cannot be joined: the host would turn this player away, so the list says so
+    /// rather than letting them pick it (docs/PLAN.md §5, §23).
+    world: u64,
     /// A line under the list: what went wrong, when something did, by the string it reads.
     note: Option<&'static str>,
 }
@@ -100,7 +104,11 @@ enum On {
 }
 
 impl Title {
-    pub fn new(project: dark_assets::Project, settings: crate::settings::Settings) -> Self {
+    pub fn new(
+        project: dark_assets::Project,
+        settings: crate::settings::Settings,
+        world: u64,
+    ) -> Self {
         Self {
             page: Page::Root,
             picked: 0,
@@ -108,8 +116,15 @@ impl Title {
             project,
             settings,
             games: Vec::new(),
+            world,
             note: None,
         }
+    }
+
+    /// Whether a game on the network can be joined by this player: it speaks the same wire
+    /// version, it is the same world, and it has room.
+    fn can_join(&self, status: &Status) -> bool {
+        status.joinable() && status.same_world(self.world)
     }
 
     /// Says what went wrong, under the list, until the player goes somewhere else. The string
@@ -244,14 +259,27 @@ impl Title {
             // in it out of how many it holds, `1/4` until it is `4/4` and closed.
             Page::Together => std::iter::once(text("ui.host_game"))
                 .chain(self.games.iter().map(|(_, status)| {
-                    // Why a game cannot be joined, when it cannot: it is full, or it is a
-                    // different build of the game and the two could not play together.
-                    let why = match (status.understood(), status.joinable()) {
-                        (_, true) => String::new(),
-                        (true, false) => format!("  {}", text("ui.full")),
-                        (false, _) => format!("  {}", text("ui.other_version")),
+                    // Why a game cannot be joined, when it cannot: it is full, it is played in
+                    // another world (another copy of the project), or it is a different build of
+                    // the game, which cannot be read past its name.
+                    let why = match (
+                        status.understood(),
+                        status.same_world(self.world),
+                        status.players < status.most,
+                    ) {
+                        (true, true, true) => String::new(),
+                        (true, true, false) => format!("  {}", text("ui.full")),
+                        (true, false, _) => format!("  {}", text("ui.other_world")),
+                        (false, _, _) => format!("  {}", text("ui.other_version")),
                     };
-                    format!("{}  {}/{}{why}", status.name, status.players, status.most)
+                    // How full it is, when that can be known: an answer from another version of
+                    // the game is readable only as far as its name.
+                    let full = if status.understood() {
+                        format!("  {}/{}", status.players, status.most)
+                    } else {
+                        String::new()
+                    };
+                    format!("{}{full}{why}", status.name)
                 }))
                 .chain(std::iter::once(text(if self.games.is_empty() {
                     "ui.looking"
@@ -329,7 +357,7 @@ impl Title {
                 Some(nth) => match self.games.get(nth) {
                     // A game nobody can join (it is full, or of another version) is shown, so
                     // the player can see it is there, but picking it does nothing.
-                    Some((at, status)) if status.joinable() => Chosen::Join(*at),
+                    Some((at, status)) if self.can_join(status) => Chosen::Join(*at),
                     Some(_) => Chosen::Waiting,
                     None if nth == self.games.len() => Chosen::Look,
                     None => {
@@ -427,7 +455,7 @@ mod tests {
     #[test]
     fn with_no_games_going_the_list_is_new_game_settings_and_quit() {
         let project = project("empty");
-        let mut title = Title::new(project, crate::settings::Settings::default());
+        let mut title = Title::new(project, crate::settings::Settings::default(), 0);
         let items = title.items(&strings());
         assert_eq!(
             items.len(),
@@ -468,7 +496,7 @@ mod tests {
         .unwrap();
         let world = dark_world::WorldSave::new(dark_sim::WorldSim::new(&def, 1).unwrap());
         std::fs::write(project.path("saves/game.sav"), world.to_ron().unwrap()).unwrap();
-        let mut title = Title::new(project, crate::settings::Settings::default());
+        let mut title = Title::new(project, crate::settings::Settings::default(), 0);
         let items = title.items(&strings());
         assert_eq!(
             items.len(),
@@ -495,6 +523,7 @@ mod tests {
             SocketAddr::from(([10, 0, 0, players], 7777)),
             Status {
                 version,
+                world: 0,
                 name: name.into(),
                 players,
                 most: 4,
@@ -506,7 +535,7 @@ mod tests {
     #[test]
     fn games_on_the_network_show_how_full_they_are_and_only_open_ones_are_joined() {
         let project = project("together");
-        let mut title = Title::new(project, crate::settings::Settings::default());
+        let mut title = Title::new(project, crate::settings::Settings::default(), 0);
         // Down to "Play together" (new game, together) and into it.
         title.move_by(1);
         assert_eq!(title.choose(), Chosen::Waiting);
@@ -552,12 +581,74 @@ mod tests {
         std::fs::remove_dir_all(title.project.path("")).unwrap();
     }
 
+    /// A game being played in another world — another copy of the project — is shown, says so,
+    /// and cannot be picked; one of another build says which, and does not pretend to know how
+    /// full it is.
+    ///
+    /// The host would turn this player away at the door either way (docs/PLAN.md §5). Letting
+    /// them pick it and be refused is a worse way to learn it, and this is the half of that the
+    /// player sees.
+    #[test]
+    fn a_game_in_another_world_is_shown_and_not_joined() {
+        let project = project("worlds");
+        let mine = 0x5EED_5EED;
+        let mut title = Title::new(project, crate::settings::Settings::default(), mine);
+        title.look_together();
+        let here = (
+            game("Ann", 1, dark_net::PROTOCOL_VERSION).0,
+            Status {
+                world: mine,
+                ..game("Ann", 1, dark_net::PROTOCOL_VERSION).1
+            },
+        );
+        let elsewhere = (
+            game("Bo", 2, dark_net::PROTOCOL_VERSION).0,
+            Status {
+                world: 0x0BAD_0BAD,
+                ..game("Bo", 2, dark_net::PROTOCOL_VERSION).1
+            },
+        );
+        // An older build: its answer cannot be read past its name, so it has no count.
+        let older = (
+            game("Cass", 3, dark_net::PROTOCOL_VERSION - 1).0,
+            Status {
+                world: 0,
+                players: 0,
+                most: 0,
+                ..game("Cass", 3, dark_net::PROTOCOL_VERSION - 1).1
+            },
+        );
+        title.sees(vec![here.clone(), elsewhere.clone(), older.clone()]);
+
+        let items = title.items(&strings());
+        assert!(items[1].contains("Ann  1/4"), "{items:?}");
+        assert!(
+            items[1].trim_end().ends_with("1/4"),
+            "nothing is wrong with it"
+        );
+        assert!(items[2].contains("ui.other_world"), "{items:?}");
+        assert!(items[3].contains("ui.other_version"), "{items:?}");
+        assert!(
+            !items[3].contains('/'),
+            "an unread answer has no count: {items:?}"
+        );
+
+        // The one in this player's world is joined; the other two are not.
+        title.move_by(1);
+        assert_eq!(title.choose(), Chosen::Join(here.0));
+        title.move_by(1);
+        assert_eq!(title.choose(), Chosen::Waiting, "another world");
+        title.move_by(1);
+        assert_eq!(title.choose(), Chosen::Waiting, "another version");
+        std::fs::remove_dir_all(title.project.path("")).unwrap();
+    }
+
     /// Games come and go while the player reads the list. What is picked follows the game it
     /// was on, so nobody joins one they were not pointing at.
     #[test]
     fn the_choosing_follows_its_game_as_the_list_changes() {
         let project = project("moving");
-        let mut title = Title::new(project, crate::settings::Settings::default());
+        let mut title = Title::new(project, crate::settings::Settings::default(), 0);
         title.look_together();
         let ann = game("Ann", 1, dark_net::PROTOCOL_VERSION);
         let bo = game("Bo", 2, dark_net::PROTOCOL_VERSION);

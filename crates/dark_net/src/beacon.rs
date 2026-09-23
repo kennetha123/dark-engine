@@ -90,8 +90,14 @@ fn nearby(who: IpAddr) -> bool {
 /// What a host says about itself when asked.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
-    /// The wire version both sides must share to play together.
+    /// The wire version both sides must share to play together. Written outside the rest of the
+    /// answer, so a game of another version can still be seen and named (see [`head`]).
     pub version: u32,
+    /// The world it is being played in (`dark_assets::Project::fingerprint`): the same project,
+    /// the same scenes, the same scene to start in. A game in another world cannot be joined,
+    /// so the list says so rather than letting the host turn the player away. Zero when the
+    /// answer came from another version of the game, which cannot be read past its name.
+    pub world: u64,
     /// What to call it in the list: the game's name.
     pub name: String,
     /// How many are in it now, the host included.
@@ -108,10 +114,64 @@ impl Status {
         self.version == PROTOCOL_VERSION
     }
 
+    /// Whether it is the world this player holds. A host that says `0` does not care which world
+    /// its players hold and lets anybody in; that is the only forgiving case, and it is the
+    /// host's to give — a player who cannot fingerprint their own project is turned away, so the
+    /// list must not pretend otherwise (see `HostConfig::world`).
+    pub fn same_world(&self, world: u64) -> bool {
+        self.world == 0 || self.world == world
+    }
+
     /// Whether this game can be joined: the same version, and room for one more.
     pub fn joinable(&self) -> bool {
         self.understood() && self.players < self.most
     }
+}
+
+/// What only a game of the same wire version can read. Everything here may change shape with the
+/// version; what cannot is [`head`], which is why a game of another version is still seen.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Rest {
+    world: u64,
+    players: u8,
+    most: u8,
+    port: u16,
+}
+
+impl Rest {
+    fn of(status: &Status) -> Self {
+        Self {
+            world: status.world,
+            players: status.players,
+            most: status.most,
+            port: status.port,
+        }
+    }
+}
+
+/// The part of an answer every version of the game writes the same way: the wire version, then
+/// the game's name as a length and its bytes.
+///
+/// This is fixed for ever. The version cannot live in the part that changes with the version —
+/// an answer written by another version would then be unreadable, and a game the player should
+/// have been told about would simply vanish from the list instead.
+fn head(version: u32, name: &str) -> Vec<u8> {
+    let name = name.as_bytes();
+    let letters = name.len().min(u8::MAX as usize);
+    let mut bytes = version.to_le_bytes().to_vec();
+    bytes.push(letters as u8);
+    bytes.extend(&name[..letters]);
+    bytes
+}
+
+/// Reads that head: the version, the name, and whatever follows it.
+fn head_of(bytes: &[u8]) -> Option<(u32, String, &[u8])> {
+    let (version, bytes) = bytes.split_at_checked(4)?;
+    let version = u32::from_le_bytes(version.try_into().ok()?);
+    let (letters, bytes) = bytes.split_first()?;
+    let (name, rest) = bytes.split_at_checked(usize::from(*letters))?;
+    // A name is what somebody called their game; anything that is not text is not one.
+    Some((version, String::from_utf8_lossy(name).into_owned(), rest))
 }
 
 /// A host answering questions about itself.
@@ -121,12 +181,13 @@ pub struct Beacon {
 }
 
 impl Beacon {
-    /// Answers on `port + BESIDE` for a game hosted on `port`.
-    pub fn new(port: u16, name: String) -> io::Result<Self> {
+    /// Answers on `port + BESIDE` for a game hosted on `port`, in the world `world`.
+    pub fn new(port: u16, name: String, world: u64) -> io::Result<Self> {
         let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, beside(port)?))?;
         socket.set_nonblocking(true)?;
         let status = Status {
             version: PROTOCOL_VERSION,
+            world,
             name: tidy(&name),
             players: 0,
             most: MAX_PLAYERS as u8,
@@ -134,7 +195,9 @@ impl Beacon {
         };
         // An answer that will not fit is one nobody can read: say so here rather than going
         // quietly missing from every list on the network.
-        let size = encode(&status).len() + ANSWERED.len();
+        let size = ANSWERED.len()
+            + head(PROTOCOL_VERSION, &status.name).len()
+            + encode(&Rest::of(&status)).len();
         if size > MOST {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
@@ -167,7 +230,8 @@ impl Beacon {
                 continue;
             }
             let mut packet = ANSWERED.to_vec();
-            packet.extend(encode(&self.status));
+            packet.extend(head(PROTOCOL_VERSION, &self.status.name));
+            packet.extend(encode(&Rest::of(&self.status)));
             if let Err(err) = self.socket.send_to(&packet, from) {
                 tracing::debug!("cannot answer {from}: {err}");
             }
@@ -235,11 +299,27 @@ impl Search {
                     continue;
                 }
             };
-            let Some(mut status) = buffer[..read]
-                .strip_prefix(ANSWERED)
-                .and_then(decode::<Status>)
+            let Some((version, name, rest)) =
+                buffer[..read].strip_prefix(ANSWERED).and_then(head_of)
             else {
                 continue;
+            };
+            // Only a game of this version can be read past its name; an older or a newer one is
+            // still shown, and still says which it is, rather than going quietly missing.
+            let rest = (version == PROTOCOL_VERSION)
+                .then(|| decode::<Rest>(rest))
+                .flatten();
+            let mut status = Status {
+                version,
+                name: tidy(&name),
+                world: rest.as_ref().map_or(0, |rest| rest.world),
+                players: rest.as_ref().map_or(0, |rest| rest.players),
+                most: rest.as_ref().map_or(0, |rest| rest.most),
+                // A beacon answers from the port beside the game's own, so where the game is can
+                // be worked out even when the rest of the answer cannot be read.
+                port: rest
+                    .as_ref()
+                    .map_or_else(|| from.port().saturating_sub(BESIDE), |rest| rest.port),
             };
             status.name = tidy(&status.name);
             // The game is on its own port, wherever the answer came from.
@@ -278,7 +358,7 @@ mod tests {
     fn beacon(name: &str) -> (Beacon, u16) {
         // Ports are taken and given back all the time, so a free one is found by taking it.
         for port in 41000..41100 {
-            if let Ok(beacon) = Beacon::new(port, name.to_owned()) {
+            if let Ok(beacon) = Beacon::new(port, name.to_owned(), 0) {
                 return (beacon, port);
             }
         }
@@ -328,6 +408,38 @@ mod tests {
         assert!(search.found().is_empty(), "no game said any of that");
     }
 
+    /// A game of another wire version is still found, still named, and still not joinable.
+    ///
+    /// The version cannot live inside the part of the answer that changes with the version: the
+    /// first time the answer changed shape, an older game stopped decoding at all and vanished
+    /// from the list instead of saying which version it was. This builds an answer the way
+    /// another version would — a head everyone can read, then bytes this one cannot — and asks
+    /// that the searcher still make something of it.
+    #[test]
+    fn a_game_of_another_version_is_seen_and_named() {
+        let mut search = Search::new().unwrap();
+        let answering = search.socket.local_addr().unwrap().port();
+        let to = SocketAddr::from((Ipv4Addr::LOCALHOST, answering));
+
+        let from = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut packet = ANSWERED.to_vec();
+        packet.extend(head(PROTOCOL_VERSION + 9, "A Later Game"));
+        // Whatever that version puts after its head, this one cannot read.
+        packet.extend([0xFE; 40]);
+        from.send_to(&packet, to).unwrap();
+        search.listen();
+
+        let found = search.found();
+        assert_eq!(found.len(), 1, "the game is on the list");
+        let (at, status) = &found[0];
+        assert_eq!(status.name, "A Later Game", "and says what it is called");
+        assert_eq!(status.version, PROTOCOL_VERSION + 9);
+        assert!(!status.understood(), "but it is not this game");
+        assert!(!status.joinable(), "so it cannot be joined");
+        // Its game is on the port beside the one that answered, even unread.
+        assert_eq!(at.port(), from.local_addr().unwrap().port() - BESIDE);
+    }
+
     /// A name from the network is cut to what a menu can show, on one line.
     #[test]
     fn a_shouted_name_is_cut_down() {
@@ -342,6 +454,7 @@ mod tests {
     #[test]
     fn a_full_game_and_one_of_another_version_are_not_joined() {
         let full = Status {
+            world: 0,
             version: PROTOCOL_VERSION,
             name: "Full".into(),
             players: 4,
@@ -362,6 +475,6 @@ mod tests {
     /// The last port has nothing beside it to be asked on, and says so.
     #[test]
     fn a_game_on_the_last_port_cannot_be_asked_about() {
-        assert!(Beacon::new(u16::MAX, "Edge".into()).is_err());
+        assert!(Beacon::new(u16::MAX, "Edge".into(), 0).is_err());
     }
 }

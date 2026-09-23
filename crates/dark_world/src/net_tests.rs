@@ -211,6 +211,7 @@ impl Net {
         saved: Option<crate::WorldSave>,
     ) -> Self {
         let host = Host::new(HostConfig {
+            world: 0,
             bind: Some("127.0.0.1:0".parse().unwrap()),
         })
         .unwrap();
@@ -245,7 +246,7 @@ impl Net {
         let clients = players
             .into_iter()
             .map(|player| {
-                let mut net = RemoteClient::connect(addr, player).unwrap();
+                let mut net = RemoteClient::connect(addr, player, 0).unwrap();
                 net.set_conditions(conditions);
                 ClientSession::new(net, maps(&project), looks(&project))
             })
@@ -300,7 +301,7 @@ impl Net {
 
     /// Replaces client `i` with a fresh connection for `player`.
     fn reconnect(&mut self, i: usize, player: PlayerId) {
-        let net = RemoteClient::connect(self.addr, player).unwrap();
+        let net = RemoteClient::connect(self.addr, player, 0).unwrap();
         self.clients[i] = ClientSession::new(net, maps(&self.project), looks(&self.project));
     }
 
@@ -1377,7 +1378,7 @@ fn a_pause_holds_the_world_until_someone_else_is_online() {
     assert_eq!(hour(&net), start, "the clock stands still");
     // Someone joining is let in, and the world goes on while they are there.
     net.clients.push(ClientSession::new(
-        RemoteClient::connect(net.addr, PlayerId::random()).unwrap(),
+        RemoteClient::connect(net.addr, PlayerId::random(), 0).unwrap(),
         maps(&net.project),
         looks(&net.project),
     ));

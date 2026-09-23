@@ -44,7 +44,10 @@ takes the keyboard or a pad (`--title` forces it for a screenshot, `--save <file
 scripted flag goes straight into the world; a screenshot or autopilot run ignores the settings).
 Its "Play together" opens this player's year to others on port 7777, and lists the games on the
 network with how full they are (`1/4` … `4/4`); every host says so on the port beside its own
-(`--together` opens the screen on that list for a screenshot).
+(`--together` opens the screen on that list for a screenshot). Both sides must hold the same
+project — the same settings, the same scenes, the same scene to start in — and the handshake now
+checks it: a game in another world is marked as such in the list, and a player who joins one by
+address is turned away instead of walking on ground the host does not have.
 `--day-secs <n>` shortens the day for testing; `--player <uuid>` keeps a stable identity.
 In the game: WASD/arrows walk, Shift runs, Space jumps, J attacks (again to combo), K dodges,
 E talks to an NPC in reach (number keys answer when a conversation offers choices; on its last

@@ -135,6 +135,25 @@ Built (M0):
 - Session lifecycle: `InGame → Grace(60 s) → Offline`; reconnect in grace resumes; stale-connection
   takeover; hello timeout and rejection linger so no connection can squat a slot.
 - Stable `PlayerId`. Sleep consensus rule in `dark_time` (not yet wired to characters).
+- **The handshake checks that both sides hold the same world**, not only the same wire version.
+  `Project::fingerprint` folds the scene the game starts in, every scene it can walk into from
+  there, the tile size they are built on and the definitions the simulation reads (`combat.ron`,
+  `life.ron`) into one number; the client sends it in `Hello` and a host with a world of its own
+  refuses any other with `DifferentWorld`. `combat.ron` is in it because the looks a snapshot
+  names are a list built from it, so an enemy added on one side renames everybody. A scene nothing
+  can walk into is left out, so a packaged build — which carries only what the game can reach — is
+  the same world as the project it was made from. Two things make this worth refusing over: maps are
+  numbered by walking the ways out from the starting scene, so a different set of scenes can make
+  the same number mean two different maps, and a scene made from a seed (§24.4) is a whole country
+  in one number — a client with an older copy would predict against ground its host does not have.
+  Art is deliberately not in it, nor sound, fonts, languages, the window's resolution or the
+  game's name: a player with a different tree sees a different tree, which is no reason to refuse
+  a game. A host with no project (`dark-host` without `--project`, the world simulation, the
+  tests) says `0` and asks nobody — worth knowing, because such a host will accept a player whose
+  maps it does not have at all; it is a development mode, not a way to play. Only the host may be
+  the one that does not care: a *client* that sends `0` is turned away. The beacon (§23) carries the same number, so
+  the title screen marks a game in another world rather than letting a player pick it and be
+  turned away.
 
 Built (M2.5):
 - Characters (`dark_world::characters`): one model for players and NPCs. `control(state, grounded,
@@ -929,8 +948,14 @@ how many are in it out of how many it holds, `1/4` until it is `4/4` and closed.
   the host bound to port 7777, and everything else as in §22: the same world, the same save, and
   the same Q in the menu to save it and come back.
 - **Finding games.** A host answers a small question on the port beside its own (7778 for 7777):
-  the wire version, the game's name, how many are playing and how many it holds
-  (`dark_net::beacon`). A player looking broadcasts the question every two seconds while the list
+  the wire version, the game's name, the world it is being played in (§5), how many are playing
+  and how many it holds (`dark_net::beacon`). The **version and the name are written outside** the
+  rest of the answer, in a shape that is fixed for ever, and everything after them belongs to that
+  version. This is not tidiness: put the version inside the part that changes with the version and
+  the first change of shape makes an older game unreadable, so it would vanish from the list
+  instead of being shown as one this build cannot play with. A game of another version is
+  therefore seen and named, its port worked out from the one it answered on, and nothing more is
+  claimed about it — not even how full it is. A player looking broadcasts the question every two seconds while the list
   is up, keeps what answers, and forgets a game that has been quiet for six seconds, so one that
   closes falls off the list while they are still reading it; what is picked stays on the game it
   was on as the list moves, and a game that closes under the choosing drops it to the line below
@@ -950,8 +975,14 @@ how many are in it out of how many it holds, `1/4` until it is `4/4` and closed.
   answers their provider's other customers. A packet that will not
   read, or is not ours, is dropped; an error on the socket is about that one packet — Windows
   reports an oversized packet and a vanished host that way — and never ends the reading.
-- A game of another wire version, or a full one, is **shown but not joinable**, and says which it
-  is: `(full)`, or `(another version)`. The host's own limit still decides: the list is only what
+- A game of another wire version, one being played in another world, or a full one, is **shown
+  but not joinable**, and says which it is: `(full)`, `(another world)`, or `(another version)`.
+  `(another world)` means the two hold different copies of the project — different scenes, or a
+  different scene to start in — and the host would turn this player away at the door (§5); saying
+  so in the list is kinder than letting them pick it and find out. None of this is a guard: the
+  world a host plays in goes out in the clear, so anyone on the network could echo it back. It is
+  there to stop honest mistakes, as the rest of this section is. The host's own limit still
+  decides: the list is only what
   the host last said, and a game shown as `3/4` may be full by the time the player picks it.
   Occupancy counts a player who has dropped out until their slot is given up, so a game someone
   left can read one higher than it plays for up to a minute (§5's reconnect grace).
@@ -1232,10 +1263,9 @@ everything the world holds:
   made map as the flat ground it is before anyone walks it, and shows a start where the scene puts
   it rather than where the game will move it. A walk around
   a large lake can also cost more than the 12 000 tiles a path is allowed (§24.3), and nothing in
-  the first game walks a made world yet. And **nothing checks that a host and its clients hold the
-  same scene files**: two machines given different seeds would each stand on their own country,
-  and the handshake (§23) would not notice. That check belongs with the protocol, not with the
-  land.
+  the first game walks a made world yet. That two machines hold the same scenes, and so the same
+  seeds, is now checked where it belongs — in the handshake (§5) — and a player holding another
+  world is turned away rather than left to walk on ground their host does not have.
 - An authored chunk is a patch laid over what was made; a chunk a player has changed is a smaller
   patch again, in the save.
 - When a patch does become too dear for a tick, it is made on **worker threads**, in a ring ahead

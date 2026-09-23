@@ -55,6 +55,13 @@ pub enum RejectReason {
     DuplicateHello,
     #[error("this player id belongs to the host's own player")]
     IdentityInUse,
+    // A new reason goes on the end: these travel by their place in this list, so one put in the
+    // middle would rename every reason after it for anybody running an older build. That
+    // `ProtocolMismatch` stays first is what lets two versions still tell each other apart.
+    #[error(
+        "client holds a different world from the host: different scenes, or a different scene to start in"
+    )]
+    DifferentWorld,
 }
 
 /// An accepted hello.
