@@ -14,6 +14,7 @@ mod ai;
 mod characters;
 mod client;
 mod combat;
+mod crowd;
 mod life;
 mod maps;
 mod nav;

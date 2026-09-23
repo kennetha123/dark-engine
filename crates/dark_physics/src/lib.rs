@@ -128,6 +128,21 @@ impl World {
         self.ground_under(center, radius) <= feet + params.step_up
     }
 
+    /// Slides `body` sideways by `delta` pixels, along obstacles as walking does, and touches
+    /// nothing else: no gravity, no jump, no ground. Bodies pushed out of one another
+    /// (docs/PLAN.md §10) move this way, so a push can never shove anyone through a wall.
+    pub fn slide(&self, body: &mut Body, delta: Vec2, params: &MoveParams) {
+        if !delta.is_finite() || delta == Vec2::ZERO {
+            return;
+        }
+        let max_step = (body.radius * 0.5).max(0.5);
+        let steps = ((delta.length() / max_step).ceil() as u32).clamp(1, 32);
+        let step = delta / steps as f32;
+        for _ in 0..steps {
+            self.substep(body, step, params);
+        }
+    }
+
     /// Moves `body` for one tick at `velocity` (pixels per second), sliding along obstacles.
     pub fn step(
         &self,

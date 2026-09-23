@@ -76,6 +76,9 @@ pub struct ClientSession {
     last_correction: f32,
     /// Tick rate multiplier from the host's input queue depth; see [`PACE_ADJUST`].
     pace: f64,
+    /// Everyone else as the newest snapshot showed them, in [`NetId`] order, to make room for
+    /// while predicting (see [`crate::crowd`]).
+    crowd: Vec<crate::crowd::Standing>,
     /// The player's standing and people's feelings, as last sent.
     ties: crate::story::Ties,
 }
@@ -96,6 +99,7 @@ impl ClientSession {
             presses: TickInput::default(),
             last_correction: 0.0,
             pace: 1.0,
+            crowd: Vec::new(),
             ties: Default::default(),
         }
     }
@@ -225,6 +229,19 @@ impl ClientSession {
             dt,
             &self.maps.params,
         );
+        // Made room for exactly as the host makes it: pushed back at most as far as this tick
+        // moved, against the others where the host last showed them. Nobody in a doorway takes
+        // part, on either side, as on the host.
+        let travelled = me.body.position.distance(me.previous.0);
+        let (maps, map) = (&self.maps, me.map);
+        if !crate::crowd::in_a_doorway(maps, map, me.body.position) {
+            let others = self
+                .crowd
+                .iter()
+                .filter(|standing| !crate::crowd::in_a_doorway(maps, map, standing.position))
+                .copied();
+            crate::crowd::make_room(me.id, &mut me.body, travelled, world, &maps.params, others);
+        }
     }
 
     fn on_snapshot(&mut self, mut snapshot: Snapshot) {
@@ -243,6 +260,16 @@ impl ClientSession {
             1..=3 => 1.0,
             _ => 1.0 - PACE_ADJUST,
         };
+
+        // Everyone else as of this snapshot, before the replay below predicts against them, in
+        // `NetId` order so the sums are added up as the host adds them.
+        self.crowd = snapshot
+            .characters
+            .iter()
+            .filter(|c| Some(c.id) != snapshot.you && !c.state.fighter.is_dead())
+            .map(|c| crate::crowd::Standing::of(c.id, &c.body))
+            .collect();
+        self.crowd.sort_by_key(|standing| standing.who.0);
 
         let own = snapshot
             .you

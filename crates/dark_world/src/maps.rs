@@ -359,7 +359,15 @@ impl Plugin for MapsPlugin {
             // Paused, bodies still take their positions as the previous ones, so nothing jitters.
             (
                 remember_previous,
-                (step_bodies, take_exits).chain().run_if(crate::running),
+                // Room is made after exits are taken: a body standing by a door must not push
+                // anyone out of it before they have gone through.
+                (
+                    step_bodies,
+                    take_exits,
+                    crate::crowd::make_room_for_each_other,
+                )
+                    .chain()
+                    .run_if(crate::running),
             )
                 .chain()
                 .in_set(Physics),
@@ -442,11 +450,11 @@ fn take_exits(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A throwaway project: `a.ron` with a level-1 block and an exit east into `b.ron`.
-    fn project() -> Project {
+    pub(crate) fn project() -> Project {
         // One folder per call: tests run in parallel and must not read each other's half-written files.
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

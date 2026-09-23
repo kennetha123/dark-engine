@@ -259,6 +259,23 @@ docs/            this plan
   with or above it, so jumping onto a rock lands on it instead of shoving the body sideways.
 - Corner slip: walking straight into a corner the footprint clips by up to `corner_slip` (4 px)
   slides around it instead of stopping dead.
+- Bodies make room for each other (`dark_world::crowd`, after bodies move and take their exits):
+  **a body is pushed back at most as far as it just moved**. Walk into someone and you are put
+  back where you leaned on them, so you slide around them; stand still and nobody can shove you,
+  so a villager left somewhere stays there and a crowd cannot push a player around; two walkers
+  meeting are each put back as far as they closed, so they come to rest touching instead of
+  bouncing. The push slides through the map (`World::slide`), so it can never shove anyone
+  through a wall; feet more than 0.9 of a level apart in height pass each other (a ledge, a jump);
+  the dead, the dormant and anyone standing in an exit take no part — a guard posted in a doorway
+  must not cork it. The whole push is capped at 6 px a tick, above the fastest a body travels
+  (a dodge, the heaviest knockback), so a roll cannot carry anyone through a body and a body
+  thrown into a crowd is still put back rather than flung. Two bodies in the same spot part along
+  x, the earlier `NetId` west, as soon as one of them walks.
+- A client predicts the same push from its own body and the others as the newest snapshot showed
+  them (kept in `NetId` order, updated before the replay, doorways skipped as on the host), so it
+  is exact against anyone standing still that the host replicates. Against a body that is itself
+  moving, the client's picture is a round trip old, so the push differs a little and the host's
+  correction is smoothed as any other.
 - Drawing order with height: raised tops are floors in `layer::TERRAIN + level`, below everything
   standing on them; a north cap (the strip of top someone behind the plateau can overlap) and the
   cliff faces are drawn in the world layer, sorted by the north and south edges.
@@ -269,8 +286,14 @@ docs/            this plan
   R16Float occlusion mask (max blend, soft shadows excluded); covered character bodies then draw a
   shaded blue silhouette where the mask holds a later rank. Works for any number of characters.
 - Known gaps: plateau sides are only a rim line; no slopes/stairs; collider lookup is a linear scan
-  per map (fine at hundreds, needs a grid at thousands); a height difference above one tile shows
-  only one tile of north cap.
+  per map (fine at hundreds, needs a grid at thousands), and so is the crowd (every character
+  against every character the host has loaded, plus a scan of the map's exits); a height
+  difference above one tile shows only one tile of north cap. Bodies that overlap while neither
+  moves stay overlapped until one walks: players spawning on one spot, two arriving through the
+  same door (an arrival counts as no travel), someone landing on a sleeper, and a body pressed
+  into another against a wall, whose travel is what it managed, which is nothing. A character
+  standing still is an obstacle nothing can move, so until NPCs walk (§11) a villager authored in
+  a narrow gap blocks it; doorways are exempt, narrow gaps are not.
 
 ## 11. Characters, talk and text (as built in M2.6)
 
@@ -313,7 +336,7 @@ docs/            this plan
   characters for Japanese), rasterises each glyph once into a 1024² atlas and draws glyph sprites.
   Coverage is thresholded so a pixel font at its design size stays crisp; adventurer uses
   DotGothic16 (OFL) at 16 px. Interface sprites use `layer::UI`, which never occludes characters.
-- Known gaps: characters pass through each other (no body-body collision); NPCs do not walk yet;
+- Known gaps: NPCs do not walk yet;
   talking is not predicted, so a bubble appears one round trip after the press; the atlas never
   evicts (about 4000 glyphs); no kinsoku (Japanese line-start rules) yet; lines are one-shot, not
   conversations or choices (M7 storylets).

@@ -667,6 +667,35 @@ fn each_player_hears_an_npc_conversation_from_the_start() {
 }
 
 #[test]
+fn one_character_cannot_walk_through_another_and_the_one_standing_still_stays() {
+    let mut net = Net::new(2, None);
+    net.connect();
+    // They spawn on the same spot and part as they walk; then 0 walks back into 1, who stands.
+    net.run(30, &[Vec2::X, Vec2::ZERO]);
+    let (walker, stander) = (net.me(0).id, net.me(1).id);
+    let stood_at = net.host_body(stander).position;
+    net.run(90, &[Vec2::NEG_X, Vec2::ZERO]);
+
+    let (a, b) = (net.host_body(walker), net.host_body(stander));
+    let apart = a.position.distance(b.position);
+    assert!(
+        apart >= a.radius + b.radius - 0.5,
+        "walked into each other: {apart} px apart"
+    );
+    assert!(
+        b.position.distance(stood_at) < 1.0,
+        "the one standing still was shoved {} px",
+        b.position.distance(stood_at)
+    );
+    // The walker's own screen shows it too: its prediction makes the same room.
+    assert!(
+        net.me(0).ground.distance(a.position) < 2.0,
+        "prediction is {} px off",
+        net.me(0).ground.distance(a.position)
+    );
+}
+
+#[test]
 fn the_night_passes_when_every_player_online_sleeps_and_the_world_catches_up() {
     let mut net = Net::new(2, None);
     net.connect();
