@@ -1,6 +1,6 @@
 //! Maps the host simulates at once, and bodies moving within and between them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::{IntoScheduleConfigs, SystemSet};
@@ -101,12 +101,18 @@ impl Maps {
         let mut ids: HashMap<String, MapId> = HashMap::from([(start.clone(), MapId(0))]);
         let mut queue = vec![start];
         let mut loaded: Vec<(String, SceneDef)> = Vec::new();
+        // Every scene stamped somewhere as a place. A scene is a place or a map, never both: one
+        // that is stamped into a town *and* walked into through a door would be built twice, and
+        // the second one would hold a second copy of everyone who lives there.
+        let mut stamped: HashSet<String> = HashSet::new();
         while let Some(name) = queue.pop() {
             let mut def = project.load_scene(&name)?;
             // The places stamped on this one are laid into it before anything else looks at it —
             // before its ways out are followed, so a town's own doors are this map's doors, and
             // before its ground is built, so what a town drew is drawn here (§24.5).
-            def.stamp_places(project, tile, 0)?;
+            for scene in def.stamp_places(project, tile, 0)? {
+                stamped.insert(normalise(&scene));
+            }
             for exit in &mut def.exits {
                 exit.to = normalise(&exit.to);
                 if !ids.contains_key(&exit.to) {
@@ -117,6 +123,19 @@ impl Maps {
                 }
             }
             loaded.push((name, def));
+        }
+        if let Some(both) = loaded
+            .iter()
+            .map(|(name, _)| name)
+            .find(|name| stamped.contains(*name))
+        {
+            return Err(invalid(
+                project,
+                both,
+                "this scene is stamped on a map as a place and also walked into as a map of its \
+                 own; it must be one or the other"
+                    .into(),
+            ));
         }
         loaded.sort_by_key(|(name, _)| ids[name].0);
 
@@ -284,7 +303,16 @@ fn level_place(
                 .max(first_row - row)
                 .max(row - last_row)
                 .max(0);
-            let level = match land.cell(col, row).level() {
+            // What the ground beyond this place already is: another place's platform or a
+            // hillside somebody drew, if anything has been drawn here, and otherwise what the
+            // land makes of it. A place stamped inside or beside another must walk out to *that*
+            // ground, not to the raw land underneath it, or the two leave a wall between them.
+            let around = if terrain.drawn_by_hand(col, row) {
+                terrain.cell(col, row).and_then(Cell::level)
+            } else {
+                land.cell(col, row).level()
+            };
+            let level = match around {
                 // Water beside a place is left as water; only the ground is stepped.
                 None if out > 0 => continue,
                 None => sits,
@@ -425,9 +453,11 @@ fn build_map(
             level_place(&mut terrain, &land, *min, *max);
         }
         // And what the places themselves drew goes back on top of the ground levelled for them:
-        // the levelling is about the land, and a hut's floor is not.
+        // the levelling is about the land, and a hut's floor is not. `Floor` is left out of that
+        // second drawing — it says nothing (§24.4), and what says nothing must not unsay the
+        // levelling by erasing it back to level ground.
         if !def.stamped.is_empty() {
-            def.draw_terrain(&mut terrain);
+            def.draw_terrain_over(&mut terrain);
         }
     }
     let mut collision = World::new(terrain);
@@ -509,11 +539,16 @@ impl Map {
     /// needs. `landings` are where other scenes' exits arrive in this one: scattered props keep
     /// clear of them, as in the game.
     pub fn preview(
+        project: &Project,
         path: &str,
-        def: SceneDef,
+        mut def: SceneDef,
         tile: u32,
         landings: &[(f32, f32)],
     ) -> Result<Map, String> {
+        // The places stamped on it, as the game lays them in: an editor that showed a world
+        // without its towns would be an editor of a different world (§24.5).
+        def.stamp_places(project, tile, 0)
+            .map_err(|err| err.to_string())?;
         let ids: HashMap<String, MapId> =
             def.exits.iter().map(|e| (e.to.clone(), MapId(0))).collect();
         let own = normalise(path);
@@ -719,9 +754,9 @@ pub(crate) mod tests {
             [("scenes/a.ron", &a), ("./scenes/b.ron", &b)],
         );
         assert_eq!(landings, vec![(40.0, 40.0)], "a's exit, not b's own");
-        let preview = Map::preview("scenes/b.ron", b.clone(), 16, &landings).unwrap();
+        let preview = Map::preview(&project, "scenes/b.ron", b.clone(), 16, &landings).unwrap();
         assert_eq!(&preview.props, game);
-        let careless = Map::preview("scenes/b.ron", b, 16, &[]).unwrap();
+        let careless = Map::preview(&project, "scenes/b.ron", b, 16, &[]).unwrap();
         assert_ne!(&careless.props, game, "the landing does clear props");
     }
 

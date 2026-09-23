@@ -200,7 +200,7 @@ fn collect(project: &Project, start: &str) -> Result<BTreeSet<String>, String> {
     // Tents and campfires, which are set down rather than placed in a scene.
     sheets.extend(life.art.tent.iter().chain(&life.art.campfire).cloned());
 
-    // The starting scene and every scene its exits lead to, and so on.
+    // The starting scene, every scene its exits lead to, every place stamped on it, and so on.
     let mut queue = VecDeque::from([normalise(start)]);
     let mut scenes = BTreeSet::new();
     while let Some(scene) = queue.pop_front() {
@@ -210,8 +210,13 @@ fn collect(project: &Project, start: &str) -> Result<BTreeSet<String>, String> {
         stays_in(&scene)?;
         let def: SceneDef = project.load_scene(&scene).map_err(|e| e.to_string())?;
         needed.insert(scene.clone());
+        // The scenes it leads to, and the places stamped on it: a town stamped on the world is
+        // part of that map, and a build that left it behind would not start at all (§24.5).
         for exit in &def.exits {
             queue.push_back(normalise(&exit.to));
+        }
+        for place in &def.places {
+            queue.push_back(normalise(&place.scene));
         }
         sheets.insert(def.ground.sheet.clone());
         sheets.extend(def.props.iter().map(|p| p.sheet.clone()));

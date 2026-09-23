@@ -196,8 +196,16 @@ impl Project {
             let Ok(def) = self.load_scene(&name) else {
                 continue;
             };
-            for exit in &def.exits {
-                let to = scene_name(&exit.to);
+            // Both the ways out of it and the places stamped on it: a town stamped on the
+            // world is part of that map, so a machine holding a different copy of the town is in
+            // a different world, whatever its world scene says.
+            let leads_to = def
+                .exits
+                .iter()
+                .map(|exit| &exit.to)
+                .chain(def.places.iter().map(|place| &place.scene));
+            for to in leads_to {
+                let to = scene_name(to);
                 if !found.contains(&to) {
                     queue.push(to);
                 }
@@ -829,25 +837,27 @@ impl SceneDef {
         project: &Project,
         tile: u32,
         deep: u32,
-    ) -> Result<(), AssetError> {
+    ) -> Result<Vec<String>, AssetError> {
+        let mut scenes = Vec::new();
         if self.places.is_empty() {
-            return Ok(());
+            return Ok(scenes);
         }
         if deep >= Self::PLACES_DEEP {
             return Err(AssetError::Invalid {
                 path: project.path(&self.places[0].scene),
                 message: format!(
-                    "places are stamped on places more than {} deep; a scene may be stamping itself",
+                    "places are stamped {} deep here; either a scene is stamping itself, or a                      town is being built of quarters of quarters of quarters",
                     Self::PLACES_DEEP
                 ),
             });
         }
         for place in self.places.clone() {
             let mut stamped = project.load_scene(&place.scene)?;
-            stamped.stamp_places(project, tile, deep + 1)?;
+            scenes.extend(stamped.stamp_places(project, tile, deep + 1)?);
             self.lay(&stamped, place.at, tile, &project.path(&place.scene))?;
+            scenes.push(place.scene.clone());
         }
-        Ok(())
+        Ok(scenes)
     }
 
     /// Lays one already-flattened place into this scene, moved by `at`.
@@ -874,19 +884,69 @@ impl SceneDef {
                 place.size.0, place.size.1, at.0, at.1, self.size.0, self.size.1
             )));
         }
+        if !(place.size.0 > 0.0
+            && place.size.1 > 0.0
+            && place.size.0.is_finite()
+            && place.size.1.is_finite())
+        {
+            return Err(refuse(format!(
+                "a place is {}x{}, which is no size at all",
+                place.size.0, place.size.1
+            )));
+        }
+        // A place is put down on a whole tile. What it drew is drawn in tiles, and everything
+        // else in pixels, so anywhere else would shear its ground away from its buildings.
+        let tile = tile as f32;
+        if (at.0 / tile).fract() != 0.0 || (at.1 / tile).fract() != 0.0 {
+            return Err(refuse(format!(
+                "a place is stamped at ({}, {}), which is not a whole tile of {tile} px",
+                at.0, at.1
+            )));
+        }
+        // Two of the same person is one person too many: a villager is somebody in the world
+        // (`world.ron`), and two bodies carrying one name confuse everything that knows them —
+        // who is in whose party, who a save puts back where.
+        for npc in &place.npcs {
+            let Some(actor) = &npc.actor else {
+                continue;
+            };
+            if self
+                .npcs
+                .iter()
+                .any(|here| here.actor.as_ref() == Some(actor))
+            {
+                return Err(refuse(format!(
+                    "this place puts {actor} in a map that already has them; a person of the \
+                     world can only be stamped once"
+                )));
+            }
+        }
+        // What a place cannot bring is refused rather than dropped in silence: a designer who
+        // drew a camp with land and a start of its own, to walk about in while drawing it, is
+        // owed the word that stamping it uses none of that.
+        for (carries, what) in [
+            (place.player.is_some(), "a player start"),
+            (place.land.is_some(), "land of its own"),
+            (!place.scatter.is_empty(), "scatter groups"),
+        ] {
+            if carries {
+                return Err(refuse(format!(
+                    "a stamped place brings {what}, which belongs to the world it is stamped on"
+                )));
+            }
+        }
         let moved = |(x, y): (f32, f32)| (x + at.0, y + at.1);
         // The ground it drew, in the tiles of the map it is stamped on. A place is put down on a
         // whole tile, so what it drew lands on whole tiles too.
-        let (across, down) = (
-            (at.0 / tile as f32).round() as u32,
-            (at.1 / tile as f32).round() as u32,
-        );
+        let (across, down) = ((at.0 / tile) as u32, (at.1 / tile) as u32);
         self.terrain
             .fill
             .extend(place.terrain.fill.iter().map(|fill| FillDef {
+                // Saturating, because these came out of a file: a fill drawn past the end of the
+                // world is clipped by the terrain, as it always was, rather than overflowing.
                 tiles: (
-                    fill.tiles.0 + across,
-                    fill.tiles.1 + down,
+                    fill.tiles.0.saturating_add(across),
+                    fill.tiles.1.saturating_add(down),
                     fill.tiles.2,
                     fill.tiles.3,
                 ),
@@ -950,6 +1010,25 @@ impl SceneDef {
     /// land does, and this knows what somebody drew, and the drawing wins.
     pub fn draw_terrain(&self, terrain: &mut Terrain) {
         for fill in &self.terrain.fill {
+            let (c, r, w, h) = fill.tiles;
+            terrain.fill(c, r, w, h, fill.cell);
+        }
+    }
+
+    /// Draws this scene's ground onto a terrain again, over ground that has been levelled under
+    /// a stamped place — everything except `Floor`.
+    ///
+    /// `Floor` says nothing (§24.4): it is what every map is filled with by the acre, and it
+    /// erases whatever was there. Laid over a levelled place it would flatten the platform back
+    /// to level ground *and* forget that anybody drew it, so the land would take the tile back
+    /// and things would grow on it.
+    pub fn draw_terrain_over(&self, terrain: &mut Terrain) {
+        for fill in self
+            .terrain
+            .fill
+            .iter()
+            .filter(|fill| fill.cell != Cell::Floor)
+        {
             let (c, r, w, h) = fill.tiles;
             terrain.fill(c, r, w, h, fill.cell);
         }
@@ -1480,6 +1559,7 @@ mod tests {
         write(
             "scenes/a.ron",
             r#"(size: (800, 600), land: (seed: 1), ground: (sheet: "g", frame: 0),
+                places: [(scene: "scenes/camp.ron", at: (160, 160))],
                 exits: [(area: (0, 0, 8, 8), to: "dungeons/keep.ron", spawn: (40, 40))])"#,
         );
         write(
@@ -1489,6 +1569,11 @@ mod tests {
         write(
             "scenes/orphan.ron",
             r#"(size: (100, 100), ground: (sheet: "g", frame: 0))"#,
+        );
+        // A place stamped on the starting scene: part of that map, though no way out leads to it.
+        write(
+            "scenes/camp.ron",
+            r#"(size: (80, 80), ground: (sheet: "g", frame: 0))"#,
         );
         write("combat.ron", r#"(kinds: {})"#);
         write("life.ron", r#"(items: {})"#);
@@ -1526,6 +1611,24 @@ mod tests {
         write(
             "dungeons/keep.ron",
             r#"(size: (400, 400), land: (seed: 2), ground: (sheet: "g", frame: 0))"#,
+        );
+        assert_eq!(world, of("scenes/a.ron"), "and changed back");
+
+        // A place stamped on a map is part of that map, so a town somebody has edited is another
+        // world even though the world's own scene is untouched.
+        write(
+            "scenes/camp.ron",
+            r#"(size: (80, 80), ground: (sheet: "g", frame: 0),
+                props: [(sheet: "s", frame: 1, position: (40, 40))])"#,
+        );
+        assert_ne!(
+            world,
+            of("scenes/a.ron"),
+            "a place stamped on the map changed"
+        );
+        write(
+            "scenes/camp.ron",
+            r#"(size: (80, 80), ground: (sheet: "g", frame: 0))"#,
         );
         assert_eq!(world, of("scenes/a.ron"), "and changed back");
 

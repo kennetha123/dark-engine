@@ -1344,15 +1344,22 @@ everything the world holds:
   where it was put down. Afterwards **nothing downstream can tell a stamped town from one drawn
   where it stands**: spawning, talking, sleeping, pathfinding, saving and the map graph go on
   exactly as they were written. A place may stamp places of its own, four deep, so a town can be
-  built of quarters; deeper than that is a scene stamping itself and is refused.
+  built of quarters; deeper than that is refused. A scene is a place or a map, never both: one
+  stamped into a town *and* walked into through a door would be built twice, and the second one
+  would hold a second copy of everyone who lives there. A place is put down on a whole tile, may
+  not bring a player start, land or scatter groups of its own, and may not stamp a person of the
+  world who is already on the map — two bodies with one name confuse every part of the game that
+  knows them. Each of those is refused with a word about what is wrong, not dropped in silence.
 - What a place does not bring is a player start, a seed, scatter groups or a ground sheet: those
   belong to the world it is stamped on. A world is the seed plus a list of places, as promised.
 - **Its edges are blended into the land.** The ground under a place is levelled to whatever the
   land makes of its middle — water included, so a camp is never half in a lake — and for four
   tiles beyond it each ring may differ by one more step than the ring before, so the ground walks
-  out to what the seed did without leaving a wall a walker cannot climb or a pit they cannot get
-  out of. Four tiles is always enough: made land rises a step at a time and there are only three
-  steps. All of it counts as drawn by hand, so the land does not take it back when its patch is
+  out without leaving a wall a walker cannot climb or a pit they cannot get out of. It walks out
+  to **what is already there** — another place's ground, or a hillside somebody drew — and only
+  to the raw land where nothing has been drawn: a quarter stamped inside a town steps out onto
+  the town, or the two leave a wall between them. Four tiles is always enough: made land rises a
+  step at a time and there are only three steps. All of it counts as drawn by hand, so the land does not take it back when its patch is
   made, and **nothing grows on drawn ground** — a town square with saplings coming up through it
   is not a town square.
 - What a place drew is laid over the levelling afterwards, not under it: the levelling is about
@@ -1363,7 +1370,11 @@ everything the world holds:
 - The editor gains a **world view**: the whole world as the seed makes it, zoomed out to biomes
   and roads, with the authored places marked, and stamps placed and moved in it. §24.1's minimap
   is the small version of the same thing. Until it exists a place is stamped by writing its `at`
-  into the scene file by hand.
+  into the scene file by hand; the editor does show the places a scene stamps, as the game builds
+  them.
+- A place's own ways out cannot lead back into the map it is stamped on: an arrival is written in
+  the scene it leaves from, and a place does not know where it was put down. A door from a town
+  into a hut and back again works; a door into the open world beside the town does not.
 - Roads and rivers, which are what make a country's places feel joined rather than scattered.
 - Going from a stamp to the world view and back is how a designer moves about 100 km.
 

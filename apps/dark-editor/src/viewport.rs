@@ -220,7 +220,20 @@ impl Viewport {
         for sheet in sheets.collect::<Vec<_>>() {
             self.load_sheet(project, sheet)?;
         }
-        let map = Map::preview(path, def.clone(), tile, landings)?;
+        // And the pictures the places stamped on it are drawn with, which are named in their own
+        // scenes rather than in this one.
+        let mut stamped = def.clone();
+        if stamped.stamp_places(project, tile, 0).is_ok() {
+            for sheet in stamped
+                .props
+                .iter()
+                .map(|p| p.sheet.clone())
+                .collect::<Vec<_>>()
+            {
+                self.load_sheet(project, &sheet)?;
+            }
+        }
+        let map = Map::preview(project, path, def.clone(), tile, landings)?;
         // Props naming frames their sheet does not have are skipped by the view (and warned).
         self.view = Some(MapView::build(
             &map,

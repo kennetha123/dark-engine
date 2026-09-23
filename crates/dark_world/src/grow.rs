@@ -425,33 +425,7 @@ mod tests {
         let (col, row) = map.collision.terrain.tile_of(at + Vec2::splat(3.0 * tile));
         assert_eq!(map.collision.terrain.cell(col, row), Some(Cell::Level(2)));
 
-        // The ground under it is level, and walks back out to the land without a wall or a pit:
-        // no two tiles from the middle of the camp to well outside it differ by more than a step.
         let (from_col, from_row) = map.collision.terrain.tile_of(at);
-        let level_at = |map: &crate::maps::Map, col: i64, row: i64| {
-            map.collision
-                .terrain
-                .cell(col, row)
-                .and_then(dark_physics::Cell::level)
-        };
-        let inside = level_at(map, from_col + 12, from_row + 12).expect("the camp is dry ground");
-        for step in 0..30 {
-            let (col, row) = (from_col + 12 + step, from_row + 12);
-            let (Some(here), Some(next)) = (level_at(map, col, row), level_at(map, col + 1, row))
-            else {
-                continue;
-            };
-            assert!(
-                here.abs_diff(next) <= 1,
-                "the ground rises {} steps at once, {step} tiles out from the camp",
-                here.abs_diff(next)
-            );
-        }
-        assert_eq!(
-            level_at(map, from_col + 6, from_row + 18),
-            Some(inside),
-            "the ground under the camp is not level"
-        );
 
         // And nothing grew on the camp: it is drawn ground, and a town square is not a meadow.
         let grown = map.grown_in_patch(from_col, from_row);
@@ -461,6 +435,189 @@ mod tests {
                 && one.at.y >= at.y
                 && one.at.y < at.y + 400.0;
             assert!(!in_camp, "{:?} grew inside the camp", one.at);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The ground under a stamped place is levelled, and walks back out to the land without
+    /// leaving a wall a walker cannot climb or a pit they cannot get out of — including where a
+    /// place is stamped inside another, which is the case that leaves a wall if a place is
+    /// levelled without looking at what the place around it already did.
+    ///
+    /// It is run twice, on ground found by looking rather than hoped for: once on a shore, where
+    /// the land put water under the place, and once on a hillside, where it put two levels. On
+    /// the level plain this land mostly is, the levelling has nothing to do and a test of it
+    /// would pass with the levelling deleted.
+    #[test]
+    fn a_place_is_levelled_into_the_land_and_leaves_no_wall() {
+        let land = dark_land::Land::new(20_260_923);
+        let side = 30i64;
+        let kinds_in = |at: (i64, i64)| {
+            let mut kinds = std::collections::BTreeSet::new();
+            for row in (0..side).step_by(3) {
+                for col in (0..side).step_by(3) {
+                    kinds.insert(land.cell(at.0 + col, at.1 + row).level());
+                }
+            }
+            kinds
+        };
+        let look_for = |wanted: fn(&std::collections::BTreeSet<Option<u8>>) -> bool| {
+            (0..90)
+                .flat_map(|down| {
+                    (0..90).map(move |across| (1_000 + across * 61, 1_000 + down * 67))
+                })
+                .find(|at| wanted(&kinds_in(*at)))
+        };
+        // A shore: water under part of the place. And a hillside: two levels of dry ground.
+        let shore = look_for(|kinds| kinds.len() >= 2 && kinds.contains(&None))
+            .expect("this land has a shore somewhere");
+        let hillside = look_for(|kinds| {
+            kinds.len() >= 2 && kinds.iter().filter(|kind| kind.is_some()).count() >= 2
+        })
+        .expect("this land has a hillside somewhere");
+        assert_ne!(shore, hillside, "one spot cannot stand for both");
+        // A shore proves the water under a place is made ground; a hillside proves the ground
+        // steps out to the land. Neither proves the other, so both are asked for.
+        levelled_at("a shore", shore, side, &land, Wanted::WaterMadeGround);
+        levelled_at("a hillside", hillside, side, &land, Wanted::GroundThatSteps);
+    }
+
+    /// What a levelling is expected to have done where it was asked for.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Wanted {
+        /// Water under the place became ground somebody can stand on.
+        WaterMadeGround,
+        /// The ground walked out from the place to the land, a step at a time.
+        GroundThatSteps,
+    }
+
+    /// Stamps a hall with a quarter inside it at `spot`, and asks what the ground did.
+    fn levelled_at(
+        what: &str,
+        spot: (i64, i64),
+        side: i64,
+        land: &dark_land::Land,
+        wanted: Wanted,
+    ) {
+        use dark_assets::Project;
+
+        let tile = 16i64;
+        let at = (spot.0 * tile, spot.1 * tile);
+        let dir = std::env::temp_dir().join(format!(
+            "dark_level_{}_{}",
+            std::process::id(),
+            what.replace(' ', "_")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scenes")).unwrap();
+        std::fs::write(
+            dir.join("project.ron"),
+            r#"(name: "t", tile_size: 16, resolution: (320, 180))"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("scenes/quarter.ron"),
+            format!(
+                r#"(size: ({}, {}), ground: (sheet: "g", frame: 0))"#,
+                8 * tile,
+                8 * tile
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("scenes/hall.ron"),
+            format!(
+                r#"(size: ({}, {}), ground: (sheet: "g", frame: 0),
+                    places: [(scene: "scenes/quarter.ron", at: ({}, {}))])"#,
+                side * tile,
+                side * tile,
+                4 * tile,
+                4 * tile
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("scenes/world.ron"),
+            format!(
+                r#"(
+                    size: (128000, 128000),
+                    land: (seed: 20260923),
+                    ground: (sheet: "g", frame: 0),
+                    player: (sheet: "p", spawn: (200, 200)),
+                    places: [(scene: "scenes/hall.ron", at: ({}, {}))],
+                )"#,
+                at.0, at.1
+            ),
+        )
+        .unwrap();
+        let project = Project::open(dir.clone()).unwrap();
+        let maps = Maps::load(&project, "scenes/world.ron").unwrap();
+        let map = &maps.maps[0];
+        let level_at = |col: i64, row: i64| {
+            map.collision
+                .terrain
+                .cell(col, row)
+                .and_then(dark_physics::Cell::level)
+        };
+
+        // Under the hall the ground is one level, whatever the land put there — water included,
+        // or a camp would be half in a lake.
+        let sits = level_at(spot.0 + side / 2, spot.1 + side / 2)
+            .unwrap_or_else(|| panic!("{what}: the hall is not dry ground"));
+        let (mut changed, mut was_water) = (0, 0);
+        for row in 0..side {
+            for col in 0..side {
+                let (col, row) = (spot.0 + col, spot.1 + row);
+                assert_eq!(
+                    level_at(col, row),
+                    Some(sits),
+                    "{what}: the hall is not level"
+                );
+                let under = land.cell(col, row).level();
+                changed += usize::from(under != Some(sits));
+                was_water += usize::from(under.is_none());
+            }
+        }
+        assert!(
+            changed > 0,
+            "{what}: the land was already level here, so the levelling is untested"
+        );
+        if wanted == Wanted::WaterMadeGround {
+            assert!(
+                was_water > 0,
+                "{what}: no water was under the hall, so that half is untested"
+            );
+        }
+
+        // And nowhere from well inside it to well outside does the ground go more than one step
+        // between neighbouring tiles.
+        let apron = 6;
+        let mut stepped = 0;
+        for row in (spot.1 - apron)..(spot.1 + side + apron) {
+            for col in (spot.0 - apron)..(spot.0 + side + apron) {
+                let Some(here) = level_at(col, row) else {
+                    continue;
+                };
+                for (across, down) in [(1, 0), (0, 1)] {
+                    let Some(next) = level_at(col + across, row + down) else {
+                        continue;
+                    };
+                    assert!(
+                        here.abs_diff(next) <= 1,
+                        "{what}: the ground goes {} steps at once between ({col}, {row}) and ({}, {})",
+                        here.abs_diff(next),
+                        col + across,
+                        row + down
+                    );
+                    stepped += usize::from(here != next);
+                }
+            }
+        }
+        if wanted == Wanted::GroundThatSteps {
+            assert!(
+                stepped > 0,
+                "{what}: the ground never changed level at all, so the stepping is untested"
+            );
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
