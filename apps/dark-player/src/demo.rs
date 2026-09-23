@@ -77,9 +77,11 @@ pub struct Frame<'a> {
     pub story: &'a dark_world::StoryView,
     /// The Esc menu, while it is open.
     pub menu: Option<Menu>,
-    /// Whether this game can be saved and left for the title screen (§22): only one the player
-    /// started there, not a joined game or a co-op host.
-    pub can_leave: bool,
+    /// The menu's line about leaving for the title screen (§22): the string it reads — saving
+    /// the year in a game of one's own, simply going in someone else's, or that the goodbye is
+    /// already on its way — and whether Q still does anything. None in a game the command line
+    /// chose, which the player did not come to the title from.
+    pub leaving: Option<(&'static str, bool)>,
 }
 
 /// The Esc menu: whether the world waits, where the player stands and who feels for them.
@@ -775,12 +777,14 @@ impl DemoView {
 
     /// A screen of choosing — the title screen (docs/PLAN.md §22) — over an empty background:
     /// a heading, a list, and a mark against the one picked.
+    /// `note` is a line under the list: what went wrong when something did.
     pub fn draw_menu(
         &mut self,
         renderer: &mut Renderer,
         heading: &str,
         items: &[String],
         picked: usize,
+        note: Option<&str>,
     ) {
         self.frame_sprites.clear();
         self.frame_meshes.clear();
@@ -794,7 +798,11 @@ impl DemoView {
         let heading = layout(heading);
         // A long list (many saved games) scrolls: the ones around the one picked are shown, so
         // the cursor is always on the screen.
-        let room = (((size.y - heading.size.y) / heading.size.y.max(1.0)).floor() as usize)
+        // A note is laid out first and its room taken off the top, so a long list scrolls
+        // instead of pushing the note off the bottom, however many lines the note itself runs to.
+        let note = note.map(&mut layout);
+        let spare = note.as_ref().map_or(0.0, |note| note.size.y + MENU_GAP);
+        let room = (((size.y - heading.size.y - spare) / heading.size.y.max(1.0)).floor() as usize)
             .saturating_sub(2)
             .max(1);
         let first = picked
@@ -814,7 +822,10 @@ impl DemoView {
             }
         };
         let line_height = lines.first().map_or(0.0, |l| l.size.y);
-        let block = heading.size.y + MENU_GAP + line_height * lines.len() as f32;
+        let block = heading.size.y
+            + MENU_GAP
+            + line_height * lines.len() as f32
+            + note.as_ref().map_or(0.0, |n| MENU_GAP + n.size.y);
         let mut pen = Vec2::new(0.0, ((size.y - block) / 2.0).max(MENU_GAP)).round();
         let centre =
             |line: &TextLayout, pen: Vec2| Vec2::new(((size.x - line.size.x) / 2.0).round(), pen.y);
@@ -841,6 +852,17 @@ impl DemoView {
                 2.0,
             ));
             pen.y += line.size.y;
+        }
+        if let Some(note) = &note {
+            pen.y += MENU_GAP;
+            self.frame_sprites.extend(TextSystem::sprites(
+                note,
+                texture,
+                centre(note, pen),
+                NAME,
+                layer::UI,
+                2.0,
+            ));
         }
         renderer.render_with(size / 2.0, TITLE_SKY, &mut self.frame_sprites, &[]);
     }
@@ -1069,8 +1091,14 @@ impl DemoView {
                 section("ui.feelings", &feelings);
                 let resume = format!("Esc  {}", self.strings.text("ui.resume"));
                 lines.push((layout(&resume, MENU_WIDTH), NAME));
-                if frame.can_leave {
-                    let leave = format!("Q  {}", self.strings.text("ui.to_title"));
+                if let Some((key, takes)) = frame.leaving {
+                    let said = self.strings.text(key);
+                    // No key is offered for what is already happening.
+                    let leave = if takes {
+                        format!("Q  {said}")
+                    } else {
+                        said.to_owned()
+                    };
                     lines.push((layout(&leave, MENU_WIDTH), NAME));
                 }
                 lines

@@ -898,10 +898,9 @@ goes straight in, and `--title` forces the screen for a picture of it.
   folder is made when a game is first saved. A file that will not read is left out of the list
   and left alone on disk.
 - In the Esc menu, **Q** saves the year and goes back to the title, where it is the game to
-  carry on.
-- Only a game started from the title can be left with Q: a joined game and a co-op host have
-  other players in them, and a scripted run was told what to play. The menu's line is shown only
-  when it can be taken.
+  carry on. In someone else's game (§23) Q says goodbye to the host and goes back to the title
+  without saving anything: the year is theirs, not this player's. A run the command line chose
+  has no title to go back to, and the menu's line is shown only when it can be taken.
 - Known gaps: no key or pad rebinding; loudness is one bus, not music and sound apart (there is
   no music yet), and an older FMOD runtime without the bus calls simply plays as mixed; a game
   installed somewhere the player cannot write keeps no settings (it says so in the log only);
@@ -910,3 +909,58 @@ goes straight in, and `--title` forces the screen for a picture of it.
   (older files stay in the folder and still play); no picture behind the title, and nothing plays
   (§1's music and ambience are not built); starting a game reloads the scene from disk, which is
   a moment's pause.
+
+## 23. Playing together, from the screen (M9)
+
+Co-op starts where the game does, not on a command line. **Play together** on the title screen
+opens this player's own year to others, and lists the games on the network to join — each with
+how many are in it out of how many it holds, `1/4` until it is `4/4` and closed.
+
+- **Opening a year** carries the newest game on (or starts a new one when there is none) with
+  the host bound to port 7777, and everything else as in §22: the same world, the same save, and
+  the same Q in the menu to save it and come back.
+- **Finding games.** A host answers a small question on the port beside its own (7778 for 7777):
+  the wire version, the game's name, how many are playing and how many it holds
+  (`dark_net::beacon`). A player looking broadcasts the question every two seconds while the list
+  is up, keeps what answers, and forgets a game that has been quiet for six seconds, so one that
+  closes falls off the list while they are still reading it; what is picked stays on the game it
+  was on as the list moves, and a game that closes under the choosing drops it to the line below
+  the games rather than onto a stranger's. Away from the list nothing is asked and the socket is
+  given back. `--together` opens the screen on that list for a picture of it.
+- Every host answers — one opened from the title, one from `--host`, and `dark-host` — but only
+  games on port 7777 are ever asked, so a host on another port has to be joined by address. A
+  host with no local player of its own reads `0/4`.
+- **Nothing that arrives is trusted.** Anyone on the network can send anything to these ports, so
+  each call reads at most a frame's worth of packets, a name is cut to one line of forty letters,
+  the list holds at most thirty-two games (the one that answered longest ago gives way, so a burst
+  of made-up ones cannot keep a real game off it — a steady stream of them still can, since
+  nothing proves who a game belongs to), and a host answers only nearby machines: a home network,
+  a link-local address, itself, or the shared range a mesh network hands out. Further off is
+  somebody else's business, and would make this game a way to shout at strangers. That shared
+  range is also what an internet provider hands out behind its own network, so a player there
+  answers their provider's other customers. A packet that will not
+  read, or is not ours, is dropped; an error on the socket is about that one packet — Windows
+  reports an oversized packet and a vanished host that way — and never ends the reading.
+- A game of another wire version, or a full one, is **shown but not joinable**, and says which it
+  is: `(full)`, or `(another version)`. The host's own limit still decides: the list is only what
+  the host last said, and a game shown as `3/4` may be full by the time the player picks it.
+  Occupancy counts a player who has dropped out until their slot is given up, so a game someone
+  left can read one higher than it plays for up to a minute (§5's reconnect grace).
+- Joining loads this project's maps and sheets again and connects as `--join` does; both sides
+  play the same project. The joined player's menu offers to leave, not to save; the goodbye is
+  said once and then carried by the frames that follow — up to a second and a half, longer than
+  the client's own leaving timeout — so the host hears a quit rather than reading a crash and
+  holding the slot, and the window keeps drawing while the word travels — the menu says so, and
+  Q does nothing more until it has gone.
+- **When it does not work, the screen says so**, under the list it happened on, in the language
+  the screen is in, until the player goes to another list: the game would not open (another is
+  already on the port — and only then; a save that will not read says so instead), it cannot be
+  reached, the network cannot be looked at, the host turned this player away, or the game they
+  were in has ended. The last two come back to the title on
+  their own — a host that leaves, or a game found full, no longer strands a player on a dark
+  screen.
+- Known gaps: the list is this network only (a friend elsewhere still needs `--join <ip:port>`,
+  a forwarded port or Tailscale; Steam's relay is the answer when we ship on Steam); no address
+  can be typed on the screen, because the player app reads keys, not text; the port is fixed at
+  7777, so two games cannot be opened on one machine; the name in the list is the project's, not
+  the host's own, and no password or invitation guards a game — anyone on the network can join.

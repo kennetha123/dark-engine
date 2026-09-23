@@ -7,6 +7,8 @@
 //! With a project it hosts that world (maps, characters, NPCs, enemies, replication) for remote players;
 //! without one it runs sessions and the clock only. With a `world.ron` the world simulation runs
 //! too; `--save` carries a world on from that file and saves it at each new day.
+//! A beacon tells the network this game is here, so it shows in other players' lists with how
+//! many are in it (docs/PLAN.md §23).
 
 use std::net::SocketAddr;
 use std::process::ExitCode;
@@ -15,7 +17,7 @@ use std::time::{Duration, Instant};
 use dark_assets::{Localization, Project};
 use dark_combat::CombatDef;
 use dark_core::{App, DEFAULT_TICK_RATE};
-use dark_net::{Host, HostConfig};
+use dark_net::{Beacon, Host, HostConfig};
 use dark_time::ClockConfig;
 use dark_world::{
     CharacterSheets, CharactersPlugin, CombatPlugin, HostPlugin, LifePlugin, Maps, MapsPlugin,
@@ -81,6 +83,8 @@ fn main() -> ExitCode {
 
     let mut app = App::new(DEFAULT_TICK_RATE);
     app.add_plugin(HostPlugin { host, clock });
+    // What the game is called in other players' lists; the project says, when there is one.
+    let mut game = "Dark Engine".to_owned();
     if let Some(dir) = project {
         let world = Project::open(dir).and_then(|p| {
             let scene = scene.clone().unwrap_or_else(|| {
@@ -116,6 +120,7 @@ fn main() -> ExitCode {
         match world {
             Ok((project, maps, sheets, names, combat, life, story, scene)) => {
                 tracing::info!("hosting {} maps from {scene}", maps.maps.len());
+                game = project.settings.name.clone();
                 app.add_plugin(MapsPlugin(maps))
                     .add_plugin(CharactersPlugin(sheets))
                     .add_plugin(ReplicationPlugin)
@@ -148,6 +153,16 @@ fn main() -> ExitCode {
         }
     }
 
+    // Told to whoever asks the network what is being played here. A game whose beacon cannot
+    // open is still hosted; it only has to be joined by address.
+    let mut beacon = match Beacon::new(port, game) {
+        Ok(beacon) => Some(beacon),
+        Err(err) => {
+            tracing::warn!("this game will not show on the network: {err}");
+            None
+        }
+    };
+
     // Ctrl+C: save the world and close every connection before going.
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stopping = stop.clone();
@@ -161,6 +176,11 @@ fn main() -> ExitCode {
         let now = Instant::now();
         app.update(now - last);
         last = now;
+        if let Some(beacon) = &mut beacon {
+            let host = &app.world.resource::<dark_world::NetHost>().0;
+            beacon.playing(host.sessions().online_count());
+            beacon.answer();
+        }
         std::thread::sleep(Duration::from_millis(1));
     }
     tracing::info!("stopping");

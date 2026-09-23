@@ -18,6 +18,7 @@
 //!   --overlay               start with the collision overlay (F1) on
 //!   --menu                  start with the Esc menu open
 //!   --title                 open the title screen even for a run that would go straight in
+//!   --together              open the title screen on the games other people are playing
 //!   --lang <code>           text language, one of the project's (default: its first)
 //!   --save <file>           when hosting: carry the world on from this file, saving at each new day
 //!                           and on quitting (without `--player`, you play the save's host again)
@@ -67,6 +68,23 @@ use glam::Vec2;
 /// Used when no project is given.
 const DEFAULT_RESOLUTION: (u32, u32) = (640, 360);
 
+/// How often the network is asked who is playing, while that list is up (docs/PLAN.md §23).
+const LOOK_EVERY: Duration = Duration::from_secs(2);
+
+/// How long leaving someone else's game waits for the goodbye to reach them before the title
+/// screen comes back. Longer than the client's own leaving timeout, so the host hears a quit
+/// rather than reading a crash and holding the slot for a minute.
+const LINGER: Duration = Duration::from_millis(1500);
+
+/// Why a game would not start, in as much as the player can be told.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Trouble {
+    /// Another game already has the port; only one can be open on a machine.
+    PortTaken,
+    /// Anything else: a save that will not read, a scene that will not load.
+    Other,
+}
+
 enum Mode {
     /// Before a world: the title screen (docs/PLAN.md §22).
     Title(Box<title::Title>),
@@ -88,13 +106,35 @@ struct WorldStart {
 
 impl WorldStart {
     /// Builds the host for a game: `fresh` starts a new world, else `save` is carried on. Either
-    /// way the world is saved to `save` from then on.
-    fn start(&self, save: PathBuf, fresh: bool) -> Result<App, String> {
+    /// way the world is saved to `save` from then on. With `open`, other people can join on that
+    /// port, and a beacon tells the network the game is there (docs/PLAN.md §23).
+    fn start(
+        &self,
+        save: PathBuf,
+        fresh: bool,
+        open: Option<u16>,
+    ) -> Result<App, (Trouble, String)> {
         tracing::info!("playing {} (a new year: {fresh})", save.display());
         let carry_on = (!fresh).then(|| save.clone());
-        let mut host = Host::new(HostConfig { bind: None }).map_err(|e| e.to_string())?;
+        let bind = open.map(|port| SocketAddr::from(([0, 0, 0, 0], port)));
+        // Why it would not start is worth keeping: the player is told the port is taken only
+        // when it is, and not when a save is at fault.
+        let mut host = Host::new(HostConfig { bind }).map_err(|err| {
+            let taken = matches!(&err, dark_net::NetError::Io(io)
+                if io.kind() == std::io::ErrorKind::AddrInUse);
+            let why = if taken {
+                Trouble::PortTaken
+            } else {
+                Trouble::Other
+            };
+            (why, err.to_string())
+        })?;
+        if let Some(addr) = host.udp_addr() {
+            tracing::info!("hosting co-op on {addr}");
+        }
         let seed = self.world_seed.unwrap_or_else(time_seed);
-        let world = load_world(&self.project, carry_on.as_deref(), seed)?;
+        let world = load_world(&self.project, carry_on.as_deref(), seed)
+            .map_err(|err| (Trouble::Other, err))?;
         let player = match (&world, self.player_given) {
             (Some(saved), false) => saved.host.unwrap_or(self.player),
             _ => self.player,
@@ -105,7 +145,8 @@ impl WorldStart {
             host,
             clock: self.clock,
         });
-        let mut scene = DemoScene::load(&self.project, &self.scene).map_err(|e| e.to_string())?;
+        let mut scene = DemoScene::load(&self.project, &self.scene)
+            .map_err(|err| (Trouble::Other, err.to_string()))?;
         scene.install_host(&mut app);
         if world.is_none() {
             tracing::warn!(
@@ -125,6 +166,16 @@ impl WorldStart {
             .add_plugin(dark_world::StoryPlugin(scene.story_def()));
         }
         Ok(app)
+    }
+
+    /// Joins someone else's game. The maps and the character sheets are this project's own:
+    /// both sides play the same project, and the host says what happens in it.
+    fn join(&self, host: SocketAddr) -> Result<ClientSession, String> {
+        tracing::info!("joining {host}");
+        let mut scene = DemoScene::load(&self.project, &self.scene).map_err(|e| e.to_string())?;
+        let net = RemoteClient::connect(host, self.player).map_err(|e| e.to_string())?;
+        let sheets = scene.character_sheets();
+        Ok(ClientSession::new(net, scene.take_maps(), sheets))
     }
 }
 
@@ -167,13 +218,22 @@ struct Player {
     start: Option<WorldStart>,
     /// What the title screen was last asked for.
     chosen: title::Chosen,
+    /// Telling the network this game is open, and how many are in it (docs/PLAN.md §23).
+    beacon: Option<dark_net::Beacon>,
+    /// Asking the network who else is playing, while the player is looking.
+    search: Option<dark_net::Search>,
+    /// When the network was last asked, so it is asked on the clock and not on frames.
+    looked: Option<std::time::Instant>,
+    /// What the title screen should say once the game being left has been put away.
+    title_note: Option<&'static str>,
+    /// Saying goodbye to a host: how long since it was said. The frames go on meanwhile, so the
+    /// window keeps drawing while the word travels.
+    going: Option<Duration>,
     /// The pad's stick was pushed up or down last frame, so a held stick moves the choosing
     /// once, not every frame.
     pad_tilted: bool,
     /// The same, sideways, for nudging a setting.
     pad_pushed: bool,
-    /// Strings for the title screen before the view exists.
-    fallback: Localization,
     /// What this player has set: language, loudness, the whole screen or a window.
     settings: settings::Settings,
     /// The project the settings belong to; none for a run with no project at all.
@@ -248,10 +308,18 @@ impl Player {
         self.settings_changed();
     }
 
-    /// Whether this game can be saved and left: one started from the title screen. A joined
-    /// game or a co-op host has other players in it, and a scripted run was told what to play.
-    fn can_leave(&self) -> bool {
-        self.start.is_some() && matches!(self.mode, Mode::Host(_))
+    /// What the menu's leaving line reads, for a game the player came to from the title screen,
+    /// and whether Q still does anything: their own year is saved on the way out, someone else's
+    /// is only left, and a goodbye already said is only waited on — pressing Q again would cut
+    /// it short and leave the host reading a crash. A run the command line chose has no title to
+    /// go back to.
+    fn leaving(&self) -> Option<(&'static str, bool)> {
+        match (&self.mode, self.start.is_some()) {
+            _ if self.going.is_some() => Some(("ui.going", false)),
+            (Mode::Host(_), true) => Some(("ui.to_title", true)),
+            (Mode::Join(_), true) => Some(("ui.leave_game", true)),
+            _ => None,
+        }
     }
 
     /// The pad on the title screen: the stick or the d-pad moves through the list, A takes what
@@ -288,22 +356,59 @@ impl Player {
             };
         }
         self.pad_pushed = sideways.abs() > 0.5;
-        let strings = match &self.view {
-            Some(view) => view.strings(),
-            None => &self.fallback,
-        };
         let Mode::Title(title) = &mut self.mode else {
             return;
         };
         if stick + dpad != 0 {
-            title.move_by(stick + dpad, strings);
+            title.move_by(stick + dpad);
         }
         if presses.jump {
-            self.chosen = title.choose(strings);
+            self.chosen = title.choose();
         }
         if presses.dodge || pad.menu {
             title.back();
             self.chosen = title::Chosen::Waiting;
+        }
+    }
+
+    /// Opens the network beacon for a game other people can join, so it shows in their list.
+    fn open_to_others(&mut self, app: &App) {
+        let Some(addr) = app.world.resource::<NetHost>().0.udp_addr() else {
+            return;
+        };
+        self.beacon = open_beacon(addr.port(), self.start.as_ref().map(|start| &start.project));
+    }
+
+    /// Puts a line under the title screen's list: what went wrong. The string is named rather
+    /// than taken, so it is read in whatever language the screen is showing when it is drawn.
+    fn title_says(&mut self, key: &'static str) {
+        if let Mode::Title(title) = &mut self.mode {
+            title.says(key);
+        }
+    }
+
+    /// Asks the network who is playing, and takes in whoever has answered since the last frame.
+    fn look_around(&mut self, again: bool) {
+        if self.search.is_none() {
+            match dark_net::Search::new() {
+                Ok(search) => self.search = Some(search),
+                Err(err) => {
+                    tracing::warn!("cannot look for games: {err}");
+                    self.title_says("ui.cannot_look");
+                    return;
+                }
+            }
+        }
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        if again {
+            search.ask_around(&[title::TOGETHER_PORT]);
+        }
+        search.listen();
+        let found = search.found();
+        if let Mode::Title(title) = &mut self.mode {
+            title.sees(found);
         }
     }
 
@@ -324,28 +429,77 @@ impl Player {
                 self.settings_changed();
             }
             title::Chosen::Fullscreen => self.toggle_fullscreen(),
-            title::Chosen::Play { save, fresh } => {
-                match self.start.as_ref().map(|start| start.start(save, fresh)) {
+            title::Chosen::Play { save, fresh, open } => {
+                match self
+                    .start
+                    .as_ref()
+                    .map(|start| start.start(save, fresh, open))
+                {
                     Some(Ok(app)) => {
+                        if open.is_some() {
+                            self.open_to_others(&app);
+                        }
                         self.mode = Mode::Host(Box::new(app));
                         return Flow::Continue;
                     }
-                    Some(Err(err)) => tracing::error!("cannot start the game: {err}"),
+                    Some(Err((why, err))) => {
+                        tracing::error!("cannot start the game: {err}");
+                        self.title_says(match why {
+                            Trouble::PortTaken => "ui.cannot_open",
+                            Trouble::Other => "ui.cannot_play",
+                        });
+                    }
                     None => tracing::error!("no project to play"),
                 }
             }
+            title::Chosen::Join(host) => match self.start.as_ref().map(|start| start.join(host)) {
+                Some(Ok(session)) => {
+                    // Whoever is looked for is being played with now.
+                    self.search = None;
+                    self.looked = None;
+                    self.mode = Mode::Join(Box::new(session));
+                    return Flow::Continue;
+                }
+                Some(Err(err)) => {
+                    tracing::error!("cannot join {host}: {err}");
+                    self.title_says("ui.cannot_join");
+                }
+                None => tracing::error!("no project to play"),
+            },
+            title::Chosen::Look => self.look_around(true),
             title::Chosen::Waiting => {}
+        }
+        // While the list of games is up it is asked for again every so often, so a game that
+        // opens or fills while the player reads shows as it is. Away from that list nothing is
+        // asked and the socket is given back, and coming to it asks again at once.
+        let looking = matches!(&self.mode, Mode::Title(title) if title.looking());
+        if looking {
+            // A new socket asks at once, however lately the last one asked.
+            let due = self.search.is_none()
+                || self.looked.is_none_or(|last| last.elapsed() >= LOOK_EVERY);
+            self.look_around(due);
+            if due {
+                self.looked = Some(std::time::Instant::now());
+            }
+        } else if self.search.is_some() {
+            self.search = None;
+            self.looked = None;
         }
         self.audio.update();
         self.frames += 1;
         if let (Some(renderer), Some(view), Mode::Title(title)) =
             (&mut self.renderer, &mut self.view, &self.mode)
         {
-            let (heading, items, picked) = {
+            let (heading, items, picked, note) = {
                 let strings = view.strings();
-                (title.heading(strings), title.items(strings), title.picked())
+                (
+                    title.heading(strings),
+                    title.items(strings),
+                    title.picked(),
+                    title.note().map(|key| strings.text(key).to_owned()),
+                )
             };
-            view.draw_menu(renderer, &heading, &items, picked);
+            view.draw_menu(renderer, &heading, &items, picked, note.as_deref());
         } else if self.screenshot.is_some() {
             // Nothing can be drawn, so nothing can be saved: say so instead of waiting for ever.
             tracing::error!("no screen to take a picture of");
@@ -604,17 +758,13 @@ impl Game for Player {
             self.keys.remove(&key);
         }
         if pressed && let Mode::Title(title) = &mut self.mode {
-            let strings = match &self.view {
-                Some(view) => view.strings(),
-                None => &self.fallback,
-            };
             match key {
-                KeyCode::ArrowUp | KeyCode::KeyW => title.move_by(-1, strings),
-                KeyCode::ArrowDown | KeyCode::KeyS => title.move_by(1, strings),
+                KeyCode::ArrowUp | KeyCode::KeyW => title.move_by(-1),
+                KeyCode::ArrowDown | KeyCode::KeyS => title.move_by(1),
                 KeyCode::ArrowLeft | KeyCode::KeyA => self.chosen = title.nudge(-1),
                 KeyCode::ArrowRight | KeyCode::KeyD => self.chosen = title.nudge(1),
                 KeyCode::Enter | KeyCode::Space | KeyCode::KeyE => {
-                    self.chosen = title.choose(strings);
+                    self.chosen = title.choose();
                 }
                 KeyCode::Escape => {
                     // Taking it back: the page behind, and nothing chosen.
@@ -633,8 +783,11 @@ impl Game for Player {
                 KeyCode::KeyE => self.presses.interact = true,
                 KeyCode::KeyZ => self.presses.sleep = true,
                 KeyCode::KeyR => self.presses.relieve = true,
-                // In the menu, leaving a game of one's own: it is saved, and the title opens.
-                KeyCode::KeyQ if self.menu && self.can_leave() => self.to_title = true,
+                // In the menu, leaving a game come to from the title: a game of one's own is
+                // saved on the way, and the title opens again.
+                KeyCode::KeyQ if self.menu && matches!(self.leaving(), Some((_, true))) => {
+                    self.to_title = true;
+                }
                 KeyCode::KeyQ if self.menu => {}
                 KeyCode::KeyQ => self.presses.recruit = true,
                 KeyCode::Escape => self.menu = !self.menu,
@@ -674,21 +827,51 @@ impl Game for Player {
 
     fn frame(&mut self, dt: Duration) -> Flow {
         // Leaving a game: put the world away and go back to the title, where its save is now
-        // one of the games to carry on.
+        // one of the games to carry on. Someone else's game is only said goodbye to.
         if std::mem::take(&mut self.to_title)
-            && let (Mode::Host(app), Some(start)) = (&mut self.mode, &self.start)
+            && let Some(start) = &self.start
         {
-            match dark_world::save_now(&mut app.world) {
-                Some(Ok(_)) => {}
-                Some(Err(err)) => tracing::error!("the year was not saved: {err}"),
-                None => tracing::warn!("nothing to save: this game has no world"),
+            let ready = match &mut self.mode {
+                Mode::Host(app) => {
+                    match dark_world::save_now(&mut app.world) {
+                        Some(Ok(_)) => {}
+                        Some(Err(err)) => tracing::error!("the year was not saved: {err}"),
+                        None => tracing::warn!("nothing to save: this game has no world"),
+                    }
+                    app.world.resource_mut::<NetHost>().0.shutdown();
+                    true
+                }
+                // The goodbye is said once and then carried by the frames that follow, so the
+                // window keeps drawing while it reaches the host.
+                Mode::Join(session) if self.going.is_none() => {
+                    let net = session.net_mut();
+                    let gone = matches!(
+                        net.status(),
+                        ClientStatus::Rejected(_) | ClientStatus::Disconnected
+                    );
+                    if !gone {
+                        net.quit();
+                        self.going = Some(Duration::ZERO);
+                    }
+                    gone
+                }
+                // Said already, and now heard or waited out.
+                Mode::Join(_) => true,
+                Mode::Title(_) => false,
+            };
+            if ready {
+                self.mode = Mode::Title(Box::new(title::Title::new(
+                    start.project.clone(),
+                    self.settings.clone(),
+                )));
+                // The game is over, so it is no longer on anyone's list.
+                self.beacon = None;
+                self.menu = false;
+                self.going = None;
+                if let Some(key) = self.title_note.take() {
+                    self.title_says(key);
+                }
             }
-            app.world.resource_mut::<NetHost>().0.shutdown();
-            self.mode = Mode::Title(Box::new(title::Title::new(
-                start.project.clone(),
-                self.settings.clone(),
-            )));
-            self.menu = false;
         }
         if matches!(self.mode, Mode::Title(_)) {
             return self.title_frame();
@@ -719,6 +902,13 @@ impl Game for Player {
         };
         self.frames += 1;
         let log_now = self.autopilot && self.frames.is_multiple_of(30);
+
+        // A game open to others keeps telling the network it is there, and how full it is.
+        if let (Mode::Host(app), Some(beacon)) = (&self.mode, &mut self.beacon) {
+            let host = &app.world.resource::<NetHost>().0;
+            beacon.playing(host.sessions().online_count());
+            beacon.answer();
+        }
 
         // Simulation and networking advance whether or not anything can be drawn: the host owns
         // the world for every connected player.
@@ -757,6 +947,29 @@ impl Game for Player {
                 if session.status() != before {
                     tracing::info!("connection: {:?}", session.status());
                 }
+                // Leaving by this player's own word: back to the title once the host has heard
+                // it, or once it has been given long enough.
+                if let Some(waited) = &mut self.going {
+                    *waited += dt;
+                    if *waited >= LINGER || session.status() == ClientStatus::Disconnected {
+                        self.to_title = true;
+                    }
+                }
+                // Turned away at the door, or the host has gone: back to the title with a word
+                // about why, rather than a dark screen nothing comes of. A game the command
+                // line chose has no title to go back to, so it stays as it is.
+                else if self.start.is_some() {
+                    self.title_note = match session.status() {
+                        ClientStatus::Rejected(_) => Some("ui.turned_away"),
+                        ClientStatus::Disconnected => Some("ui.host_gone"),
+                        ClientStatus::Connecting | ClientStatus::InGame => None,
+                        // Already on the way out, by this player's own word.
+                        ClientStatus::Leaving => None,
+                    };
+                    if self.title_note.is_some() {
+                        self.to_title = true;
+                    }
+                }
                 if log_now && let Some(me) = session.characters().iter().find(|c| c.you) {
                     tracing::info!(
                         "frame {}: map {} at ({:.1}, {:.1}) elevation {:.1}, last correction {:.2} px, seeing {}",
@@ -777,7 +990,7 @@ impl Game for Player {
             }
         };
 
-        let can_leave = self.can_leave();
+        let leaving = self.leaving();
         let Some(renderer) = &mut self.renderer else {
             if self.screenshot.is_some() {
                 tracing::error!("no renderer; cannot take a screenshot");
@@ -808,7 +1021,7 @@ impl Game for Player {
                                 Menu::OthersPlaying
                             }
                         }),
-                        can_leave,
+                        leaving,
                     };
                     view.draw(renderer, &frame, secs);
                     characters
@@ -834,7 +1047,7 @@ impl Game for Player {
                         story: &story,
                         // The host's world goes on.
                         menu: self.menu.then_some(Menu::OthersPlaying),
-                        can_leave,
+                        leaving,
                     };
                     view.draw(renderer, &frame, secs);
                     characters
@@ -872,20 +1085,32 @@ impl Game for Player {
                 let _ = dark_world::save_now(&mut app.world);
                 app.world.resource_mut::<NetHost>().0.shutdown();
             }
-            Mode::Join(session) => {
-                let net = session.net_mut();
-                net.quit();
-                let dt = Duration::from_millis(16);
-                while net.status() != ClientStatus::Disconnected {
-                    net.update(dt);
-                    net.send_packets();
-                    std::thread::sleep(dt);
-                }
-            }
+            Mode::Join(session) => say_goodbye(session),
         }
         for child in &mut self.children {
             let _ = child.kill();
         }
+    }
+}
+
+/// On the way out of the program: tells the host this player is going and waits for the
+/// connection to close, so it can tell a quit from a crash. Leaving for the title screen says
+/// the same thing, but carries it on ordinary frames instead of holding the window still.
+fn say_goodbye(session: &mut ClientSession) {
+    let net = session.net_mut();
+    // Nobody to say it to: turned away at the door, or the host is already gone.
+    if matches!(
+        net.status(),
+        ClientStatus::Rejected(_) | ClientStatus::Disconnected
+    ) {
+        return;
+    }
+    net.quit();
+    let dt = Duration::from_millis(16);
+    while net.status() != ClientStatus::Disconnected {
+        net.update(dt);
+        net.send_packets();
+        std::thread::sleep(dt);
     }
 }
 
@@ -922,6 +1147,8 @@ struct Args {
     menu: bool,
     /// Show the title screen even for a run that would otherwise go straight in.
     title: bool,
+    /// Open it on the games to play together in (docs/PLAN.md §23).
+    together: bool,
     lang: Option<String>,
     save: Option<PathBuf>,
     world_seed: Option<u64>,
@@ -949,6 +1176,7 @@ fn parse_args() -> Result<Args, String> {
         overlay: false,
         menu: false,
         title: false,
+        together: false,
         lang: None,
         save: None,
         world_seed: None,
@@ -984,6 +1212,11 @@ fn parse_args() -> Result<Args, String> {
             }
             "--title" => {
                 args.title = true;
+                continue;
+            }
+            "--together" => {
+                args.title = true;
+                args.together = true;
                 continue;
             }
             _ => {}
@@ -1173,11 +1406,17 @@ fn main() -> ExitCode {
     };
 
     let mut children = Vec::new();
+    // A game hosted from the command line says so on the network too, as one opened from the
+    // title screen does.
+    let mut beacon = None;
     let mode = match (&start, &args.launch) {
-        (Some(start), _) => Mode::Title(Box::new(title::Title::new(
-            start.project.clone(),
-            settings.clone(),
-        ))),
+        (Some(start), _) => {
+            let mut title = title::Title::new(start.project.clone(), settings.clone());
+            if args.together {
+                title.look_together();
+            }
+            Mode::Title(Box::new(title))
+        }
         (None, launch) => match launch {
             Launch::Join(addr) => {
                 let Some(scene) = &mut scene else {
@@ -1264,6 +1503,7 @@ fn main() -> ExitCode {
                     }
                 }
                 if let Launch::Host(port) = args.launch {
+                    beacon = open_beacon(port, project.as_ref());
                     children = launch_clients(args.clients, port, &args);
                 }
                 Mode::Host(Box::new(app))
@@ -1304,13 +1544,17 @@ fn main() -> ExitCode {
         to_title: false,
         start,
         chosen: title::Chosen::Waiting,
+        beacon,
+        search: None,
+        looked: None,
+        title_note: None,
+        going: None,
         pad_tilted: false,
         pad_pushed: false,
         settings,
         // A scripted run keeps its settings to itself: it was given them, not asked.
         project: project.filter(|_| !by_hand),
         window: None,
-        fallback: Localization::default(),
         screenshot: args.screenshot.map(|path| Screenshot {
             path,
             after_frames: args.frames,
@@ -1329,6 +1573,23 @@ fn main() -> ExitCode {
         Err(err) => {
             tracing::error!("event loop failed: {err}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Says on the network that a game is open on this port, under the project's name, so it shows
+/// in other players' lists (docs/PLAN.md §23). A game whose beacon cannot open is still played;
+/// it only has to be joined by address.
+fn open_beacon(port: u16, project: Option<&Project>) -> Option<dark_net::Beacon> {
+    let name = project.map_or_else(
+        || "Dark Engine".to_owned(),
+        |project| project.settings.name.clone(),
+    );
+    match dark_net::Beacon::new(port, name) {
+        Ok(beacon) => Some(beacon),
+        Err(err) => {
+            tracing::warn!("this game will not show on the network: {err}");
+            None
         }
     }
 }

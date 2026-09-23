@@ -8,6 +8,8 @@ mod protocol;
 mod session;
 
 #[cfg(feature = "udp")]
+mod beacon;
+#[cfg(feature = "udp")]
 mod client;
 #[cfg(feature = "udp")]
 mod conditions;
@@ -26,6 +28,8 @@ pub use session::{
     SessionState,
 };
 
+#[cfg(feature = "udp")]
+pub use beacon::{Beacon, Search, Status};
 #[cfg(feature = "udp")]
 pub use client::{ClientStatus, RemoteClient};
 #[cfg(feature = "udp")]

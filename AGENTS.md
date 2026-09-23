@@ -42,6 +42,9 @@ Games are saved in `<project>/saves/*.sav` and the player's own settings (langua
 fullscreen) in `saves/settings.ron`; the title screen lists the games and holds the settings, and
 takes the keyboard or a pad (`--title` forces it for a screenshot, `--save <file>` or any
 scripted flag goes straight into the world; a screenshot or autopilot run ignores the settings).
+Its "Play together" opens this player's year to others on port 7777, and lists the games on the
+network with how full they are (`1/4` … `4/4`); every host says so on the port beside its own
+(`--together` opens the screen on that list for a screenshot).
 `--day-secs <n>` shortens the day for testing; `--player <uuid>` keeps a stable identity.
 In the game: WASD/arrows walk, Shift runs, Space jumps, J attacks (again to combo), K dodges,
 E talks to an NPC in reach (number keys answer when a conversation offers choices; on its last
