@@ -262,14 +262,17 @@ impl Viewport {
                 self.image,
             );
         }
+        // Only the pieces of the map this view can see (docs/PLAN.md §24.2), so what a frame
+        // costs here is the size of the panel and not the size of the map.
+        let seen = origin + Vec2::new(size.0 as f32, size.1 as f32);
         let mut sprites: Vec<Sprite> = Vec::new();
         if let Some(view) = &self.view {
-            sprites.extend(view.statics.iter().cloned());
+            view.seen(origin, seen, &mut sprites);
             if overlay {
-                sprites.extend(view.overlay.iter().cloned().map(|mut s| {
+                view.seen_overlay(origin, seen, &mut sprites, |mut s| {
                     s.layer = layer::DEBUG;
                     s
-                }));
+                });
             }
         }
         let mut meshes = Vec::new();

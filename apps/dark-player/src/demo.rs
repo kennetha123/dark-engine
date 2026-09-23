@@ -626,6 +626,22 @@ impl DemoView {
     }
 
     /// Draws `frame`, following the local player's character.
+    /// What a character stands on: a prop underfoot, a ledge, or the ground. The camera rides
+    /// it and the blob shadow lies on it.
+    fn surface_under(
+        &self,
+        c: &DrawCharacter,
+        collision: &dark_physics::World,
+        maps: &dark_world::Maps,
+    ) -> f32 {
+        let surface = collision.support(c.ground, c.body.radius, c.elevation, &maps.params);
+        if surface.is_finite() {
+            surface.min(c.elevation)
+        } else {
+            0.0
+        }
+    }
+
     pub fn draw(&mut self, renderer: &mut Renderer, frame: &Frame, dt: f32) {
         let (maps, map, characters) = (frame.maps, frame.map, frame.characters);
         self.seconds += dt;
@@ -638,19 +654,38 @@ impl DemoView {
         self.draw_structures(frame.structures, collision);
         self.draw_drops(frame.drops);
         let map_view = map.0 as usize;
-        self.frame_sprites
-            .extend_from_slice(&self.maps[map_view].statics);
-        let mut focus = None;
+
+        // The camera is worked out first, because what it can see decides which pieces of the
+        // map are worth copying at all (docs/PLAN.md §24.2). It follows what the local character
+        // stands on, eased, so a jump reads as rising and landing on a ledge does not snap the
+        // view. A new map snaps it.
+        let (w, h) = renderer.internal_size();
+        let half = Vec2::new(w as f32, h as f32) / 2.0;
+        let you = characters.iter().find(|c| c.you);
+        let focus_point = match you {
+            Some(c) => {
+                let surface = self.surface_under(c, collision, maps);
+                if self.camera_map != Some(map) {
+                    self.camera_map = Some(map);
+                    self.camera_floor = surface;
+                } else if c.body.grounded {
+                    self.camera_floor +=
+                        (c.body.elevation - self.camera_floor) * (1.0 - (-12.0 * dt).exp());
+                }
+                c.ground - Vec2::new(0.0, self.camera_floor)
+            }
+            None => self.maps[map_view].size / 2.0,
+        };
+        let size = self.maps[map_view].size;
+        let camera = focus_point.clamp(half, (size - half).max(half)) + self.fx.shake();
+        self.camera = camera;
+        let (seen_min, seen_max) = (camera - half, camera + half);
+        self.maps[map_view].seen(seen_min, seen_max, &mut self.frame_sprites);
 
         for c in characters {
             // What the character stands on places its blob shadow, and a prop underfoot must draw
             // before it even where the feet are north of the prop's own pivot.
-            let surface = collision.support(c.ground, c.body.radius, c.elevation, &maps.params);
-            let surface = if surface.is_finite() {
-                surface.min(c.elevation)
-            } else {
-                0.0
-            };
+            let surface = self.surface_under(c, collision, maps);
             let sort_y = collision
                 .supporting_prop(c.ground, c.body.radius, c.elevation, &maps.params)
                 .map_or(c.ground.y, |prop| c.ground.y.max(south_edge(prop) + 0.1));
@@ -722,38 +757,18 @@ impl DemoView {
                 feet.layer = layer::DEBUG;
                 self.frame_sprites.push(feet);
             }
-            if c.you {
-                focus = Some((c.ground, c.body.grounded, c.body.elevation, surface));
-            }
         }
         if self.debug {
-            for s in &self.maps[map_view].overlay {
-                let mut s = *s;
-                s.layer = layer::DEBUG;
-                self.frame_sprites.push(s);
-            }
+            self.maps[map_view].seen_overlay(
+                seen_min,
+                seen_max,
+                &mut self.frame_sprites,
+                |mut s| {
+                    s.layer = layer::DEBUG;
+                    s
+                },
+            );
         }
-
-        // The camera follows what the local character stands on, eased, so a jump reads as
-        // rising and landing on a ledge does not snap the view. A new map snaps it.
-        let (w, h) = renderer.internal_size();
-        let half = Vec2::new(w as f32, h as f32) / 2.0;
-        let focus_point = match focus {
-            Some((ground, grounded, elevation, surface)) => {
-                if self.camera_map != Some(map) {
-                    self.camera_map = Some(map);
-                    self.camera_floor = surface;
-                } else if grounded {
-                    self.camera_floor +=
-                        (elevation - self.camera_floor) * (1.0 - (-12.0 * dt).exp());
-                }
-                ground - Vec2::new(0.0, self.camera_floor)
-            }
-            None => self.maps[map_view].size / 2.0,
-        };
-        let size = self.maps[map_view].size;
-        let camera = focus_point.clamp(half, (size - half).max(half)) + self.fx.shake();
-        self.camera = camera;
         self.draw_sparks();
         self.draw_health(characters, dt);
         let screen = (camera - half, half * 2.0);

@@ -7,6 +7,12 @@ use glam::Vec2;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TextureId(pub(crate) u32);
 
+impl TextureId {
+    /// The first texture a renderer makes. Laying sprites out and sorting them does not care
+    /// which texture it is; anything actually drawn wants an id the renderer gave out.
+    pub const FIRST: Self = Self(0);
+}
+
 /// How a sprite is drawn.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SpriteKind {
@@ -67,6 +73,15 @@ impl Sprite {
             lift: 0.0,
             kind: SpriteKind::Plain,
         }
+    }
+
+    /// The rectangle this sprite covers once drawn, in world pixels: where it is *drawn*, not
+    /// where it stands, so a tall tree covers the ground above its feet and a jumping character
+    /// covers where it is in the air. What decides whether it is worth drawing at all.
+    pub fn covers(&self) -> (Vec2, Vec2) {
+        let size = Vec2::new(self.src.w as f32, self.src.h as f32) * self.repeat;
+        let min = self.position - self.pivot - Vec2::new(0.0, self.lift);
+        (min, min + size)
     }
 
     /// A flat rectangle of `color`, from a 1×1 white texture.

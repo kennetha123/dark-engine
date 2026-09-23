@@ -974,7 +974,7 @@ how many are in it out of how many it holds, `1/4` until it is `4/4` and closed.
   7777, so two games cannot be opened on one machine; the name in the list is the project's, not
   the host's own, and no password or invitation guards a game — anyone on the network can join.
 
-## 24. The open world: chunks and streaming (designed; §24.1 built)
+## 24. The open world: chunks and streaming (designed; §24.1 and §24.2 built)
 
 The world is one continuous outdoors the player walks across without a loading screen. **How big
 is the game's choice, not the engine's** — the first game may want ten or sixteen kilometres, and
@@ -1038,21 +1038,49 @@ a screenful and never zooms out past 1:1, so on a map of any size one is lost im
   click in the box leaves the view looking at the place that was clicked — the click, the clamp,
   the rounding and the view's own mapping are each harmless alone and meet there. Hand-placed
   props are marked; scattered undergrowth is not, or the map would be nothing but dots.
-- Zooming out below 1:1 waits for §24.2: the map view renders at `viewport ÷ zoom` world pixels
-  and draws every sprite in the map, so zooming out today would make the slowest thing slower.
+- Zooming out below 1:1 is now affordable — §24.2 made the map view cost the size of its panel
+  rather than the size of the map — and wants only the camera itself changed, since `View::zoom`
+  is a whole number today.
 
-### 24.2 Drawing only what is on the screen
+### 24.2 Drawing only what is on the screen (built)
 
-The renderer is handed every sprite of the whole map, every frame, and sorts them all
-(`apps/dark-player/src/demo.rs`, `crates/dark_render/src/sprite.rs`); `dark_view::MapView` builds
-one flat list per map at load. Nothing is culled anywhere. At meadow's 7 500 tiles this is
-invisible; at a thousand times that it is the whole frame.
+Until this was built, the renderer was handed every sprite of the whole map every frame and
+sorted them all, and `dark_view::MapView` built one flat list per map at load. Nothing was culled
+anywhere. At meadow's 7 500 tiles that was invisible; at a thousand times that it is the whole
+frame.
 
-- `MapView` becomes a **grid of chunk-sized pieces**, each with its own sprite list and bounds.
-- The view copies the pieces that meet the camera rectangle — which the renderer already works
-  out, as `origin` and `size`, and then uses to reject nothing.
-- The same for the collision overlay, and for the editor's map view, which copies the whole map
-  every frame too.
+- `MapView` is now a **grid of pieces** 256 px square. A piece holds the sprites standing in it
+  and the bounds they cover once drawn — which reaches past the piece, since a tree hangs above
+  its own feet. A frame asks the pieces the camera reaches and then takes, sprite by sprite, what
+  is really drawn inside it, with a pixel of grace for the whole pixels the renderer rounds to.
+- The pieces to ask are **worked out from the camera**, never searched for: the rows and columns
+  the view falls in, widened by how far sprites hang beyond the piece holding them — down and
+  right at the near edge, up and left at the far one. Both ways, or a tree whose feet are just
+  below the screen loses its canopy. So the looking costs the size of the view, and a map of any
+  size is never walked.
+- A sprite **larger than a piece** — the ground, a great tree — is held once by the map and
+  pointed at by every piece it crosses, so it is drawn once however many of those pieces show.
+  Holding such a sprite in one piece would make every view ask far beyond itself to be sure of
+  finding it; drawing it always would make its cost grow with the world.
+- **The order is kept, exactly.** The renderer's sort is stable, so sprites that tie keep the
+  order they were given in — and the ground, the land, what stands on it and a sprite too wide
+  for one piece all tie by design. Each sprite carries the place it had when a map was one list,
+  and a frame hands them over in that order, so what is drawn can never depend on which piece a
+  thing happened to fall in.
+- The player's camera is worked out **before** the map is copied rather than after, since what it
+  can see is what decides. The editor's map view does the same.
+- Measured, in `dark_view`'s tests: the same screenful copies **the same sprites** from a map four
+  screens across and from one 128 000 px across holding four million of them. A screenful walked
+  over a field of trees, a quarter of a piece at a time, misses none of them — and that sweep is
+  itself tested, by blinding the view to each side of its widening in turn and checking the sweep
+  notices. A test that passes by where its steps happen to land is worth nothing. On the first
+  game's meadow, which is two and a half screens wide, a frame copies about a fifth fewer — the
+  saving is small exactly where the map is small, and that is the point.
+- Proved unchanged: the autopilot, camp and fight screenshots are **byte for byte** what the old
+  renderer drew.
+- Not done here: the editor still poses every skeleton in the scene each frame, and the draw path
+  still asks the colliders what each character stands on (a linear scan, §24.3). A map's pieces
+  are also all allocated at load, which is fine for a map and is what §24.4's chunks replace.
 - The **silhouette pass** is sized the same way and is worse than the sort: it tests every plain
   sprite in the frame against every character, both ways round, and it ranks them through a
   16-bit float mask that is only exact to 2048. That is a correctness cliff, not a slow frame —
@@ -1161,7 +1189,7 @@ everything the world holds:
 M10 is this section, and it splits by what needs chunks and what does not.
 
 - **First, on the maps that exist today**, changing no file format: §24.2 (drawing only what is
-  seen), then §24.3's collider grid, then its path budget. Each of these is a fault the engine
+  seen — **built**), then §24.3's collider grid, then its path budget. Each of these is a fault the engine
   already has; meadow is simply small enough to hide them.
 - **Then the world itself**: §24.4 (chunks, made land, `Spot`), and with it the rest of §24.3 —
   crowds, blows, snapshots and distant people, all of which are keyed on chunks that do not exist
