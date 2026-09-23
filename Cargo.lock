@@ -790,7 +790,9 @@ version = "0.1.0"
 dependencies = [
  "dark_assets",
  "dark_combat",
+ "dark_land",
  "dark_life",
+ "dark_physics",
  "dark_sim",
  "dark_spine",
  "dark_story",
@@ -921,6 +923,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dark_land"
+version = "0.1.0"
+dependencies = [
+ "dark_physics",
+ "serde",
+]
+
+[[package]]
 name = "dark_life"
 version = "0.1.0"
 dependencies = [
@@ -1043,6 +1053,7 @@ dependencies = [
  "dark_assets",
  "dark_combat",
  "dark_core",
+ "dark_land",
  "dark_life",
  "dark_net",
  "dark_physics",

@@ -16,6 +16,7 @@ mod client;
 mod combat;
 mod crowd;
 mod drops;
+pub mod land;
 mod life;
 mod maps;
 mod nav;

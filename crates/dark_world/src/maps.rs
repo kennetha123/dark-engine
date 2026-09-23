@@ -126,6 +126,20 @@ impl Maps {
                 .map_err(|(name, message)| invalid(project, &name, message))?;
             maps.push(map);
         }
+        // Land made from a seed is shaped around the spawns before they are looked at, or a
+        // player could be found a place to stand on ground that does not exist yet (§24.4).
+        for map in &mut maps {
+            let Some(land) = map.def.land else {
+                continue;
+            };
+            let land = dark_land::Land::new(land.seed);
+            let spawn = map
+                .def
+                .player
+                .as_ref()
+                .map_or(Vec2::ZERO, |player| Vec2::from(player.spawn));
+            crate::land::shape_around(&mut map.collision.terrain, &land, spawn);
+        }
         validate_spawns(&maps).map_err(|(name, message)| invalid(project, &name, message))?;
         Ok(Self {
             maps,
@@ -371,7 +385,17 @@ pub struct MapsPlugin(pub Maps);
 
 impl Plugin for MapsPlugin {
     fn build(self, app: &mut App) {
-        app.insert_resource(self.0).add_systems(
+        let maps = self.0;
+        // A map made from a seed brings its land into the world, so the patches ahead of every
+        // player keep being shaped as they walk (docs/PLAN.md §24.4).
+        let made = maps
+            .maps
+            .iter()
+            .find_map(|map| map.def.land.map(|land| dark_land::Land::new(land.seed)));
+        if let Some(land) = made {
+            app.insert_resource(crate::land::MadeLand(land));
+        }
+        app.insert_resource(maps).add_systems(
             FixedUpdate,
             // Paused, bodies still take their positions as the previous ones, so nothing jitters.
             (
@@ -379,6 +403,9 @@ impl Plugin for MapsPlugin {
                 // Room is made after exits are taken: a body standing by a door must not push
                 // anyone out of it before they have gone through.
                 (
+                    // The land ahead is made before anyone walks onto it.
+                    crate::land::shape_around_players
+                        .run_if(bevy_ecs::prelude::resource_exists::<crate::land::MadeLand>),
                     step_bodies,
                     take_exits,
                     crate::crowd::make_room_for_each_other,

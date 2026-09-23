@@ -73,9 +73,9 @@ impl Terrain {
         (patch, within)
     }
 
-    /// How many patches have been shaped, which is what a terrain costs. For the tests.
-    #[cfg(test)]
-    pub(crate) fn shaped(&self) -> usize {
+    /// How many patches have been shaped, which is what a terrain costs: a map nobody has been
+    /// to holds none of them.
+    pub fn shaped(&self) -> usize {
         self.patches.iter().filter(|p| p.is_some()).count()
     }
 
@@ -98,6 +98,42 @@ impl Terrain {
     /// Pixel size of the terrain.
     pub fn size(&self) -> Vec2 {
         Vec2::new(self.cols as f32, self.rows as f32) * self.tile
+    }
+
+    /// How many tiles a patch holds each way, so whoever shapes the land can work a patch at a
+    /// time.
+    pub const PATCH: u32 = PATCH;
+
+    /// Whether the patch holding a tile has been shaped yet.
+    pub fn is_shaped(&self, col: u32, row: u32) -> bool {
+        col < self.cols && row < self.rows && self.patches[self.place(col, row).0].is_some()
+    }
+
+    /// Shapes the patch holding a tile, asking `what` for each tile in it. A patch already
+    /// shaped is left alone, so land made once is never made differently later.
+    ///
+    /// This is how a world too large to write down is made: the patches near the players are
+    /// shaped as they are reached, from the world's own seed (docs/PLAN.md §24.4).
+    pub fn shape(&mut self, col: u32, row: u32, what: impl Fn(i64, i64) -> Cell) {
+        if col >= self.cols || row >= self.rows {
+            return;
+        }
+        let (patch, _) = self.place(col, row);
+        if self.patches[patch].is_some() {
+            return;
+        }
+        let (first_col, first_row) = (col - col % PATCH, row - row % PATCH);
+        let mut tiles = vec![Cell::Floor; (PATCH * PATCH) as usize].into_boxed_slice();
+        for within_row in 0..PATCH {
+            for within_col in 0..PATCH {
+                let (c, r) = (first_col + within_col, first_row + within_row);
+                if c < self.cols && r < self.rows {
+                    tiles[(within_row * PATCH + within_col) as usize] =
+                        what(i64::from(c), i64::from(r));
+                }
+            }
+        }
+        self.patches[patch] = Some(tiles);
     }
 
     /// `None` outside the grid; level ground where nothing has been shaped.

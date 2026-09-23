@@ -11,6 +11,7 @@ publish = false
 
 [workspace.dependencies]
 dark_core = { path = "crates/dark_core" }
+dark_land = { path = "crates/dark_land" }
 dark_net = { path = "crates/dark_net" }
 dark_platform = { path = "crates/dark_platform" }
 dark_render = { path = "crates/dark_render" }

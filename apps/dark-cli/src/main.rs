@@ -3,6 +3,9 @@
 //! `dark-cli preview-sheet <project-dir> <sheet.ron> <out.png>` draws every sliced frame's box
 //! and pivot over the sheet image, to check slicing without opening the game.
 //!
+//! `dark-cli preview-land <seed> <tiles> <tiles-per-pixel> <out.png>` draws the country a world
+//! seed makes, from far above: water, plain, and the steps up out of it.
+//!
 //! `dark-cli simulate <project-dir> [--seed n] [--runs n] [--lang code]` fast-forwards the world
 //! simulation (`world.ron`) through a year: the chronicle of one seed, or statistics over many.
 //!
@@ -14,6 +17,7 @@
 //! export from Spine. `dark-cli preview-spine <project-dir> <sheet.spine.ron> <clip> <tick>
 //! <out.png>` draws the skeleton at that clip and tick, as the game would, four times enlarged.
 
+mod land;
 mod package;
 mod simulate;
 
@@ -25,6 +29,26 @@ use dark_assets::Project;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
+        [cmd, seed, tiles, every, out] if cmd == "preview-land" => {
+            let numbers = seed
+                .parse()
+                .ok()
+                .zip(tiles.parse().ok())
+                .zip(every.parse().ok());
+            match numbers {
+                Some(((seed, tiles), every)) => match land::preview(seed, tiles, every, out) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(err) => {
+                        eprintln!("error: {err}");
+                        ExitCode::FAILURE
+                    }
+                },
+                None => {
+                    eprintln!("error: preview-land takes a seed, a size in tiles and a step");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         [cmd, project, sheet, out] if cmd == "preview-sheet" => {
             match preview_sheet(project, sheet, out) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -97,6 +121,7 @@ fn main() -> ExitCode {
         },
         _ => {
             eprintln!("usage: dark-cli preview-sheet <project-dir> <sheet.ron> <out.png>");
+            eprintln!("       dark-cli preview-land <seed> <tiles> <tiles-per-pixel> <out.png>");
             eprintln!("       dark-cli bake-spine <project-dir> <sheet.spine.ron>");
             eprintln!(
                 "       dark-cli preview-spine <project-dir> <sheet.spine.ron> <clip> <tick> <out.png>"

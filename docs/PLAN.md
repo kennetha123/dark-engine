@@ -974,7 +974,7 @@ how many are in it out of how many it holds, `1/4` until it is `4/4` and closed.
   7777, so two games cannot be opened on one machine; the name in the list is the project's, not
   the host's own, and no password or invitation guards a game — anyone on the network can join.
 
-## 24. The open world: chunks and streaming (§24.1–§24.3 built, §24.4 begun)
+## 24. The open world: chunks and streaming (§24.1–§24.3 built, §24.4 well begun)
 
 The world is one continuous outdoors the player walks across without a loading screen. **How big
 is the game's choice, not the engine's** — the first game may want ten or sixteen kilometres, and
@@ -1174,9 +1174,29 @@ everything the world holds:
 - A **chunk** is 64×64 tiles — 1024 px at 16 px to the tile. Sixteen kilometres is 250 chunks a
   side, a hundred is 1563. A chunk holds its tiles' heights, the props standing on them, and what
   lives there. The size of a chunk is a budget, not a world limit.
-- A chunk is **made, not read**: `(world seed, chunk)` gives the same chunk on every machine,
-  worked out in whole numbers so a host and a client cannot disagree. An authored chunk is a patch
-  laid over what was made; a chunk a player has changed is a smaller patch again, in the save.
+- **The land is made, not read** (`dark_land`, built): the world's seed and a tile give the same
+  answer on every machine, worked out in whole numbers so a host and a client cannot disagree —
+  one that did would have players falling through different rocks. Six lattices are laid over one
+  another, the broadest two kilometres across and each next half the width and half the weight, so
+  a country has highlands, lowlands and the water between, down to copses of rough ground. What
+  comes out is water, level plain, or one of three steps up; measured over twenty-five kilometres
+  that is about a twelfth water and three fifths plain, and a hillside never rises more than one
+  step at a time, so there are no cliffs a walker can never get up.
+- **It is shaped around the players as they walk** (`dark_world::land`, built): the patches within
+  two of each player — 128 tiles, three screenfuls — are made if they have not been made already,
+  and never made twice, so a player walking back finds the hill they walked over. The same patches
+  are made the same way on every machine, so a client predicts against the ground the host has.
+  A map says `land: (seed: n)` to be made this way; one without it is drawn by hand as before, and
+  what *is* drawn by hand is left alone where the two meet.
+- `dark-cli preview-land <seed> <tiles> <tiles-per-pixel> <out.png>` draws the country a seed
+  makes from far above, and says where in it the ground changes most — somewhere worth standing to
+  see what a seed made.
+- Known gaps here: only the land's shape is made. What grows on it (trees, rocks, grass), where
+  the roads and rivers run, and where anyone lives are still §24.5's work, so a made world is at
+  present a country with nothing in it. Nothing yet stops a spawn landing in a lake — the map
+  refuses to load, which is honest but unhelpful; a made world should find its own dry ground.
+- An authored chunk is a patch laid over what was made; a chunk a player has changed is a smaller
+  patch again, in the save.
 - Chunks are made on **worker threads**, in a ring ahead of each player (five by five resident,
   the middle nine simulated), and let go behind. Count it honestly: crossing one chunk of the ring
   makes **five** new ones, a chunk is 1024 px, and a player walks at 80 px a second and runs at

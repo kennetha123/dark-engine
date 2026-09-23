@@ -562,6 +562,10 @@ pub struct SceneDef {
     pub player: Option<PlayerDef>,
     #[serde(default)]
     pub terrain: TerrainDef,
+    /// Land made from a seed, for a map too large to draw by hand (docs/PLAN.md §24.4). What is
+    /// drawn by hand in `terrain` is laid over it.
+    #[serde(default)]
+    pub land: Option<LandDef>,
     #[serde(default)]
     pub props: Vec<PlacedProp>,
     #[serde(default)]
@@ -690,6 +694,13 @@ impl SceneDef {
         }
         Ok(terrain)
     }
+}
+
+/// Land made from a seed rather than drawn by hand: see the `dark_land` crate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct LandDef {
+    /// The world's own number. The same seed is the same country, on every machine.
+    pub seed: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
