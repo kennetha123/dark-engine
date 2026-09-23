@@ -89,7 +89,9 @@ A map made from a seed rather than drawn says `land: (seed: n)` in its scene, an
 carries its own seed. Its `scatter` groups then say what *grows* on it rather than being strewn
 over it once at load: `count` is how many of that group belong in each patch of land (64 tiles a
 side), and what grows is worked out from the seed as the land is made, so every machine grows the
-same wood. The land around each player is shaped as they walk and let go of once nobody
+same wood. A town, a camp or a ruin is drawn as a scene of its own and stamped onto the world with
+`places: [(scene: "scenes/camp.ron", at: (x, y))]`: everything in it becomes part of the map it is
+stamped on, the ground under it is levelled into the land, and nothing grows on it. The land around each player is shaped as they walk and let go of once nobody
 is near it; what the scene draws by hand is kept tile for tile (`Floor` says nothing — level made
 ground on purpose with `Level(0)`), and a start or a doorway the land put under water is moved to
 the nearest ground somebody can stand on.

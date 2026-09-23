@@ -123,13 +123,15 @@ impl Map {
         if terrain.cell(col, row).is_none() {
             return false;
         }
+        // Nothing grows on ground somebody drew. A place stamped on the world is levelled into
+        // it by hand (§24.5), and a town square with saplings coming up through it is not a town
+        // square; the same goes for a hillside a designer put there on purpose.
+        if terrain.drawn_by_hand(col, row) {
+            return false;
+        }
         // The land as the seed makes it, whether or not it has been made yet: a tree must not
         // appear or vanish depending on who has walked past.
-        let cell = if terrain.drawn_by_hand(col, row) {
-            terrain.cell(col, row).unwrap_or(Cell::Floor)
-        } else {
-            land.cell(col, row)
-        };
+        let cell = land.cell(col, row);
         let Some(level) = cell.level() else {
             return false;
         };
@@ -343,6 +345,124 @@ mod tests {
         let project = Project::open(dir.clone()).unwrap();
         let maps = Maps::load(&project, "scenes/made.ron").unwrap();
         (dir, maps)
+    }
+
+    /// A place stamped on a made world: everything it holds belongs to the map it is stamped on,
+    /// moved to where it was put down; the ground under it is levelled and walks back out to the
+    /// land around it; and nothing grows on top of it.
+    ///
+    /// A stamped town is how a made world gets anywhere worth walking to (§24.5), and the whole
+    /// bargain is that nothing downstream can tell it from a town drawn where it stands.
+    #[test]
+    fn a_place_stamped_on_the_world_is_part_of_the_map() {
+        use dark_assets::Project;
+
+        let dir = std::env::temp_dir().join(format!("dark_place_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scenes")).unwrap();
+        std::fs::write(
+            dir.join("project.ron"),
+            r#"(name: "t", tile_size: 16, resolution: (320, 180))"#,
+        )
+        .unwrap();
+        // A camp: a hut with a footprint, a villager who walks to the fire, an inn to sleep in,
+        // a way out to somewhere else, and a patch of raised ground drawn by hand.
+        std::fs::write(
+            dir.join("scenes/camp.ron"),
+            r#"(
+                size: (400, 400),
+                ground: (sheet: "g", frame: 0),
+                terrain: (fill: [(tiles: (2, 2, 4, 4), cell: Level(2))]),
+                props: [(sheet: "hut", frame: 0, position: (100, 100),
+                         colliders: [(shape: Circle(radius: 20))])],
+                npcs: [(sheet: "n", position: (200, 200), lines: [],
+                        day: [(from: 8, at: (240, 200))])],
+                inns: [(area: (300, 300, 80, 80), bed: (340, 340))],
+                exits: [(area: (0, 380, 400, 20), to: "scenes/away.ron", spawn: (50, 50))],
+            )"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("scenes/away.ron"),
+            r#"(size: (600, 600), ground: (sheet: "g", frame: 0))"#,
+        )
+        .unwrap();
+        // The world it is stamped on: made land, with the camp put down well away from the start.
+        std::fs::write(
+            dir.join("scenes/world.ron"),
+            r#"(
+                size: (32000, 32000),
+                land: (seed: 20260923),
+                ground: (sheet: "g", frame: 0),
+                player: (sheet: "p", spawn: (9000, 9000)),
+                places: [(scene: "scenes/camp.ron", at: (12000, 12000))],
+                scatter: [
+                    (sheet: "grass", frames: [15], count: 40, min_spacing: 60, seed: 14),
+                ],
+            )"#,
+        )
+        .unwrap();
+        let project = Project::open(dir.clone()).unwrap();
+        let mut maps = Maps::load(&project, "scenes/world.ron").unwrap();
+        let at = Vec2::new(12_000.0, 12_000.0);
+
+        // Everything the camp holds is in the world's own map, moved to where it was put down —
+        // and the scene it leads to is a map of the world, reached through the camp's own door.
+        let map = &mut maps.maps[0];
+        assert_eq!(map.def.npcs.len(), 1);
+        assert_eq!(map.def.npcs[0].position, (12_200.0, 12_200.0));
+        assert_eq!(map.def.npcs[0].day[0].at, (12_240.0, 12_200.0));
+        assert_eq!(map.def.inns[0].bed, (12_340.0, 12_340.0));
+        assert_eq!(map.props[0].position, (12_100.0, 12_100.0));
+        assert_eq!(map.exits.len(), 1, "the camp's way out is the world's");
+        assert!(map.exits[0].contains(at + Vec2::new(200.0, 390.0)));
+        assert_eq!(maps.maps.len(), 2, "and it leads somewhere");
+
+        // What the camp drew is where it was put down, and the land did not take it back.
+        let map = &mut maps.maps[0];
+        map.make_around(at);
+        let tile = map.collision.terrain.tile();
+        let (col, row) = map.collision.terrain.tile_of(at + Vec2::splat(3.0 * tile));
+        assert_eq!(map.collision.terrain.cell(col, row), Some(Cell::Level(2)));
+
+        // The ground under it is level, and walks back out to the land without a wall or a pit:
+        // no two tiles from the middle of the camp to well outside it differ by more than a step.
+        let (from_col, from_row) = map.collision.terrain.tile_of(at);
+        let level_at = |map: &crate::maps::Map, col: i64, row: i64| {
+            map.collision
+                .terrain
+                .cell(col, row)
+                .and_then(dark_physics::Cell::level)
+        };
+        let inside = level_at(map, from_col + 12, from_row + 12).expect("the camp is dry ground");
+        for step in 0..30 {
+            let (col, row) = (from_col + 12 + step, from_row + 12);
+            let (Some(here), Some(next)) = (level_at(map, col, row), level_at(map, col + 1, row))
+            else {
+                continue;
+            };
+            assert!(
+                here.abs_diff(next) <= 1,
+                "the ground rises {} steps at once, {step} tiles out from the camp",
+                here.abs_diff(next)
+            );
+        }
+        assert_eq!(
+            level_at(map, from_col + 6, from_row + 18),
+            Some(inside),
+            "the ground under the camp is not level"
+        );
+
+        // And nothing grew on the camp: it is drawn ground, and a town square is not a meadow.
+        let grown = map.grown_in_patch(from_col, from_row);
+        for one in &grown {
+            let in_camp = one.at.x >= at.x
+                && one.at.x < at.x + 400.0
+                && one.at.y >= at.y
+                && one.at.y < at.y + 400.0;
+            assert!(!in_camp, "{:?} grew inside the camp", one.at);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// What grows is worked out, not remembered: the same seed and the same patch give the same

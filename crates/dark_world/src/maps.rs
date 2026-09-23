@@ -103,6 +103,10 @@ impl Maps {
         let mut loaded: Vec<(String, SceneDef)> = Vec::new();
         while let Some(name) = queue.pop() {
             let mut def = project.load_scene(&name)?;
+            // The places stamped on this one are laid into it before anything else looks at it —
+            // before its ways out are followed, so a town's own doors are this map's doors, and
+            // before its ground is built, so what a town drew is drawn here (§24.5).
+            def.stamp_places(project, tile, 0)?;
             for exit in &mut def.exits {
                 exit.to = normalise(&exit.to);
                 if !ids.contains_key(&exit.to) {
@@ -235,6 +239,65 @@ impl Maps {
     }
 }
 
+/// How far the ground steps back out to the land around a stamped place, in tiles. Made land
+/// never rises more than one step a tile (§24.4), and there are only three steps, so four tiles
+/// is always enough to meet it — and what is levelled beyond a place is kept small, because it is
+/// ground a designer did not draw.
+const APRON: i64 = 4;
+
+/// Levels the ground under a stamped place, and steps it back out to the land around it.
+///
+/// Inside the place the ground is the level the land has in its middle — flat, whatever the seed
+/// put there, including water. Outside it, for [`APRON`] tiles, each ring may differ from the
+/// place by one more step than the ring before, so the ground walks out to whatever the land does
+/// without ever leaving a wall or a pit: a rise of two steps at once is a wall a walker can never
+/// get up, and a drop of two is a pen they can never get out of.
+///
+/// All of it counts as drawn by hand, so the land does not take it back when the patch under it
+/// is made, and nothing grows on it.
+fn level_place(
+    terrain: &mut dark_physics::Terrain,
+    land: &dark_land::Land,
+    min: (f32, f32),
+    max: (f32, f32),
+) {
+    let (first_col, first_row) = terrain.tile_of(Vec2::from(min));
+    let (last_col, last_row) = terrain.tile_of(Vec2::from(max) - Vec2::splat(0.5));
+    let middle = (
+        (first_col + last_col).div_euclid(2),
+        (first_row + last_row).div_euclid(2),
+    );
+    // The level the place sits at: what the land makes of its middle, or level ground where the
+    // land put water there.
+    let sits = land.cell(middle.0, middle.1).level().unwrap_or(0);
+    for row in (first_row - APRON)..=(last_row + APRON) {
+        for col in (first_col - APRON)..=(last_col + APRON) {
+            let (Ok(c), Ok(r)) = (u32::try_from(col), u32::try_from(row)) else {
+                continue;
+            };
+            if c >= terrain.cols() || r >= terrain.rows() {
+                continue;
+            }
+            // How far outside the place this tile is: nothing, inside it.
+            let out = (first_col - col)
+                .max(col - last_col)
+                .max(first_row - row)
+                .max(row - last_row)
+                .max(0);
+            let level = match land.cell(col, row).level() {
+                // Water beside a place is left as water; only the ground is stepped.
+                None if out > 0 => continue,
+                None => sits,
+                Some(level) => level.clamp(
+                    sits.saturating_sub(out as u8),
+                    sits.saturating_add(out as u8),
+                ),
+            };
+            terrain.fill(c, r, 1, 1, Cell::Level(level));
+        }
+    }
+}
+
 /// A scene path as maps know it: `./a\b.ron` is `a/b.ron`.
 fn normalise(path: &str) -> String {
     let path = path.replace('\\', "/");
@@ -354,7 +417,19 @@ fn build_map(
     ids: &HashMap<String, MapId>,
     arrivals: &[(f32, f32)],
 ) -> Result<Map, (String, String)> {
-    let terrain = def.build_terrain(tile).map_err(|m| (name.clone(), m))?;
+    let mut terrain = def.build_terrain(tile).map_err(|m| (name.clone(), m))?;
+    // A place stamped on made land is levelled into it before anything else is put down: a town
+    // on a hillside would be a town of cliffs (docs/PLAN.md §24.5).
+    if let Some(land) = def.land.map(|land| dark_land::Land::new(land.seed)) {
+        for (min, max) in &def.stamped {
+            level_place(&mut terrain, &land, *min, *max);
+        }
+        // And what the places themselves drew goes back on top of the ground levelled for them:
+        // the levelling is about the land, and a hut's floor is not.
+        if !def.stamped.is_empty() {
+            def.draw_terrain(&mut terrain);
+        }
+    }
     let mut collision = World::new(terrain);
     // Scatter only where the prop's whole footprint (collider, offset included) is on one flat
     // level that the group allows.

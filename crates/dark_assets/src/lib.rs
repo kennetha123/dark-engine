@@ -706,6 +706,26 @@ pub struct SceneDef {
     /// Inns: sleeping inside one is sleeping indoors.
     #[serde(default)]
     pub inns: Vec<InnDef>,
+    /// Places stamped onto this one: a town, a camp, a ruin, each drawn as a scene of its own and
+    /// put down at a spot (docs/PLAN.md §24.5). A world made from a seed is this — the seed, and
+    /// a list of the places somebody built on it.
+    #[serde(default)]
+    pub places: Vec<PlaceDef>,
+    /// What each stamped place covers, in this map's pixels, once they have been laid in. Worked
+    /// out by [`SceneDef::stamp_places`], never written in a scene file: the ground under a place
+    /// is flattened to it, and nothing is grown on it.
+    #[serde(skip)]
+    pub stamped: Vec<((f32, f32), (f32, f32))>,
+}
+
+/// A scene stamped onto another at a spot: everything in it — its ground, what stands on it, who
+/// lives there and its ways out — belongs to the map it is stamped on, moved by `at`.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct PlaceDef {
+    /// The scene this place is drawn in, inside the project.
+    pub scene: String,
+    /// Where its top-left corner goes, in the world it is stamped on, in pixels.
+    pub at: (f32, f32),
 }
 
 /// An inn's rooms. There are no interiors yet, so the inn is an `area` (by its door): sleeping
@@ -788,6 +808,153 @@ impl ExitDef {
 }
 
 impl SceneDef {
+    /// How deep places may be stamped on places.
+    pub const PLACES_DEEP: u32 = 4;
+
+    /// Lays every place this scene stamps onto it into the scene itself, and theirs onto them: a
+    /// stamped place is not a map of its own, it is part of the map it is stamped on.
+    ///
+    /// Everything moves by the place's `at`: the ground it drew, what stands on it, the people
+    /// who live there, the inns and the ways out. Afterwards nothing downstream can tell a
+    /// stamped town from one drawn where it stands, which is the whole point — spawning, talking,
+    /// sleeping, pathfinding and saving go on exactly as they were written.
+    ///
+    /// What a place does *not* bring is its own player start, its own seed, its own scatter
+    /// groups or its own ground sheet: those belong to the world it is stamped on.
+    ///
+    /// A place may stamp places of its own, up to [`Self::PLACES_DEEP`] deep; deeper than that is
+    /// a scene stamping itself, and it is refused rather than followed for ever.
+    pub fn stamp_places(
+        &mut self,
+        project: &Project,
+        tile: u32,
+        deep: u32,
+    ) -> Result<(), AssetError> {
+        if self.places.is_empty() {
+            return Ok(());
+        }
+        if deep >= Self::PLACES_DEEP {
+            return Err(AssetError::Invalid {
+                path: project.path(&self.places[0].scene),
+                message: format!(
+                    "places are stamped on places more than {} deep; a scene may be stamping itself",
+                    Self::PLACES_DEEP
+                ),
+            });
+        }
+        for place in self.places.clone() {
+            let mut stamped = project.load_scene(&place.scene)?;
+            stamped.stamp_places(project, tile, deep + 1)?;
+            self.lay(&stamped, place.at, tile, &project.path(&place.scene))?;
+        }
+        Ok(())
+    }
+
+    /// Lays one already-flattened place into this scene, moved by `at`.
+    fn lay(
+        &mut self,
+        place: &SceneDef,
+        at: (f32, f32),
+        tile: u32,
+        path: &Path,
+    ) -> Result<(), AssetError> {
+        let refuse = |message: String| AssetError::Invalid {
+            path: path.to_owned(),
+            message,
+        };
+        if !(at.0 >= 0.0 && at.1 >= 0.0 && at.0.is_finite() && at.1.is_finite()) {
+            return Err(refuse(format!(
+                "a place is stamped at ({}, {}), which is off the map",
+                at.0, at.1
+            )));
+        }
+        if at.0 + place.size.0 > self.size.0 || at.1 + place.size.1 > self.size.1 {
+            return Err(refuse(format!(
+                "a place {}x{} stamped at ({}, {}) runs off a map {}x{}",
+                place.size.0, place.size.1, at.0, at.1, self.size.0, self.size.1
+            )));
+        }
+        let moved = |(x, y): (f32, f32)| (x + at.0, y + at.1);
+        // The ground it drew, in the tiles of the map it is stamped on. A place is put down on a
+        // whole tile, so what it drew lands on whole tiles too.
+        let (across, down) = (
+            (at.0 / tile as f32).round() as u32,
+            (at.1 / tile as f32).round() as u32,
+        );
+        self.terrain
+            .fill
+            .extend(place.terrain.fill.iter().map(|fill| FillDef {
+                tiles: (
+                    fill.tiles.0 + across,
+                    fill.tiles.1 + down,
+                    fill.tiles.2,
+                    fill.tiles.3,
+                ),
+                cell: fill.cell,
+            }));
+        self.props.extend(place.props.iter().map(|prop| PlacedProp {
+            position: moved(prop.position),
+            ..prop.clone()
+        }));
+        self.npcs.extend(place.npcs.iter().map(|npc| {
+            NpcDef {
+                position: moved(npc.position),
+                day: npc
+                    .day
+                    .iter()
+                    .map(|entry| DayEntry {
+                        at: moved(entry.at),
+                        ..*entry
+                    })
+                    .collect(),
+                ..npc.clone()
+            }
+        }));
+        self.enemies
+            .extend(place.enemies.iter().map(|enemy| EnemyPlacement {
+                position: moved(enemy.position),
+                ..enemy.clone()
+            }));
+        self.inns.extend(place.inns.iter().map(|inn| InnDef {
+            area: (inn.area.0 + at.0, inn.area.1 + at.1, inn.area.2, inn.area.3),
+            bed: moved(inn.bed),
+        }));
+        self.exits.extend(place.exits.iter().map(|exit| ExitDef {
+            area: (
+                exit.area.0 + at.0,
+                exit.area.1 + at.1,
+                exit.area.2,
+                exit.area.3,
+            ),
+            // Where it arrives is in the scene it leads to, which is not stamped anywhere, so it
+            // is left exactly as it was written.
+            ..exit.clone()
+        }));
+        // What it covers here, and what its own places covered inside it.
+        self.stamped
+            .push((at, (at.0 + place.size.0, at.1 + place.size.1)));
+        self.stamped.extend(
+            place
+                .stamped
+                .iter()
+                .map(|(min, max)| (moved(*min), moved(*max))),
+        );
+        Ok(())
+    }
+
+    /// Draws this scene's own ground onto a terrain: its fills, in the order they were written,
+    /// so later ones win.
+    ///
+    /// Apart from building a terrain, this is used to put a scene's drawing back on top of ground
+    /// that was levelled under a stamped place (docs/PLAN.md §24.5): the levelling knows what the
+    /// land does, and this knows what somebody drew, and the drawing wins.
+    pub fn draw_terrain(&self, terrain: &mut Terrain) {
+        for fill in &self.terrain.fill {
+            let (c, r, w, h) = fill.tiles;
+            terrain.fill(c, r, w, h, fill.cell);
+        }
+    }
+
     /// Builds the collision terrain for this scene at the project's tile size.
     /// Largest map, in tiles per side. Twenty thousand is 320 km at 16 px to the tile, or
     /// 20 km if a tile is a metre — past what §24.0 says one `f32` should hold a position in,
@@ -815,10 +982,7 @@ impl SceneDef {
             return Err(format!("level_height {level_height} must be positive"));
         }
         let mut terrain = Terrain::new(cols, rows, tile, level_height);
-        for fill in &self.terrain.fill {
-            let (c, r, w, h) = fill.tiles;
-            terrain.fill(c, r, w, h, fill.cell);
-        }
+        self.draw_terrain(&mut terrain);
         Ok(terrain)
     }
 }

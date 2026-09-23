@@ -1308,7 +1308,7 @@ everything the world holds:
   reads, or a built game ships without its ground.
 - `MapId` stays as it is: it is the interiors' limit, and the outdoors will not be a scene.
 
-### 24.5 Making a world by hand (what grows on it: built)
+### 24.5 Making a world by hand (what grows on it, and places stamped on it: built)
 
 - **What grows on made land is worked out, not written down** (`dark_world::grow`, built). A
   drawn map's props are strewn over it once, when it loads, and remembered; a made map cannot be,
@@ -1337,14 +1337,34 @@ everything the world holds:
   shore search was made to change nothing at all and the making was left to one door. A test
   holds the line: everything drawn on made land has a footprint, and every made patch has grown.
 
+- **A designer works on a place rather than a map** (built). A town, a camp, a ruin is drawn as
+  a scene of its own and *stamped* onto the world at a spot: `places: [(scene: "…", at: (x, y))]`.
+  At load every stamped place is laid into the map it is stamped on — the ground it drew, what
+  stands on it, the people who live there, their days, its inns and its own ways out, all moved to
+  where it was put down. Afterwards **nothing downstream can tell a stamped town from one drawn
+  where it stands**: spawning, talking, sleeping, pathfinding, saving and the map graph go on
+  exactly as they were written. A place may stamp places of its own, four deep, so a town can be
+  built of quarters; deeper than that is a scene stamping itself and is refused.
+- What a place does not bring is a player start, a seed, scatter groups or a ground sheet: those
+  belong to the world it is stamped on. A world is the seed plus a list of places, as promised.
+- **Its edges are blended into the land.** The ground under a place is levelled to whatever the
+  land makes of its middle — water included, so a camp is never half in a lake — and for four
+  tiles beyond it each ring may differ by one more step than the ring before, so the ground walks
+  out to what the seed did without leaving a wall a walker cannot climb or a pit they cannot get
+  out of. Four tiles is always enough: made land rises a step at a time and there are only three
+  steps. All of it counts as drawn by hand, so the land does not take it back when its patch is
+  made, and **nothing grows on drawn ground** — a town square with saplings coming up through it
+  is not a town square.
+- What a place drew is laid over the levelling afterwards, not under it: the levelling is about
+  the land, and a hut's floor is not.
+
 **Still to come in §24.5:**
 
 - The editor gains a **world view**: the whole world as the seed makes it, zoomed out to biomes
-  and roads, with the authored places marked. §24.1's minimap is the small version of the same
-  thing.
-- A designer works on a **place** rather than a map: a town, a camp, a ruin. It is authored in the
-  map view as today, and stamped onto the world at a spot, its edges blended into what the seed
-  made. Stamps are stored, so the world is the seed plus a list of places.
+  and roads, with the authored places marked, and stamps placed and moved in it. §24.1's minimap
+  is the small version of the same thing. Until it exists a place is stamped by writing its `at`
+  into the scene file by hand.
+- Roads and rivers, which are what make a country's places feel joined rather than scattered.
 - Going from a stamp to the world view and back is how a designer moves about 100 km.
 
 ### 24.6 Playing in it together
