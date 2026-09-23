@@ -1139,7 +1139,7 @@ impl DemoView {
         if let Some((face, name, said, size, face_room)) = window {
             let order = 2e9;
             let at = view_min + Vec2::new(WINDOW_MARGIN, view_size.y - WINDOW_MARGIN - size.y);
-            self.panel(at, size, [0.03, 0.03, 0.07, 0.88], Some(PAPER), order);
+            self.panel(at, size, [0.03, 0.03, 0.07, 0.88], Some(PAPER), order, 0);
             if let Some(face) = face {
                 let mut s = Sprite::new(
                     face,
@@ -1192,6 +1192,7 @@ impl DemoView {
                 [0.0, 0.0, 0.0, 0.6],
                 None,
                 3e9,
+                0,
             );
             self.frame_sprites.extend(TextSystem::sprites(
                 &clock,
@@ -1212,7 +1213,7 @@ impl DemoView {
                 max,
                 hostile: false,
             };
-            self.bar(view_min + Vec2::new(8.0, 8.0), 80.0, bar, 3e9);
+            self.bar(view_min + Vec2::new(8.0, 8.0), 80.0, bar, 3e9, 0);
         }
         // Choices sit above the dialogue window.
         if !choices.is_empty() {
@@ -1229,6 +1230,7 @@ impl DemoView {
                 [0.03, 0.03, 0.07, 0.92],
                 Some(NAME),
                 2.1e9,
+                0,
             );
             let mut pen = at + Vec2::new(WINDOW_PAD, WINDOW_PAD - 2.0);
             for choice in &choices {
@@ -1247,7 +1249,7 @@ impl DemoView {
             let pad = Vec2::splat(12.0);
             let size = ending.size + pad * 2.0;
             let at = (view_min + (view_size - size) / 2.0).round();
-            self.panel(at, size, [0.02, 0.02, 0.04, 0.94], Some(NAME), 3.5e9);
+            self.panel(at, size, [0.02, 0.02, 0.04, 0.94], Some(NAME), 3.5e9, 0);
             self.frame_sprites.extend(TextSystem::sprites(
                 ending,
                 texture,
@@ -1263,7 +1265,7 @@ impl DemoView {
             let height: f32 = menu.iter().map(|(l, _)| l.size.y).sum();
             let size = Vec2::new(width, height) + pad * 2.0;
             let at = (view_min + (view_size - size) / 2.0).round();
-            self.panel(at, size, [0.02, 0.02, 0.04, 0.92], Some(NAME), 3.6e9);
+            self.panel(at, size, [0.02, 0.02, 0.04, 0.92], Some(NAME), 3.6e9, 0);
             let mut pen = at + pad;
             for (line, colour) in &menu {
                 self.frame_sprites.extend(TextSystem::sprites(
@@ -1281,7 +1283,13 @@ impl DemoView {
         for (name, bar) in &party {
             let at = Vec2::new(pen.x - name.size.x.max(PARTY_BAR), pen.y);
             self.shadowed(name, texture, at, PAPER, 3e9);
-            self.bar(at + Vec2::new(0.0, name.size.y - 2.0), PARTY_BAR, *bar, 3e9);
+            self.bar(
+                at + Vec2::new(0.0, name.size.y - 2.0),
+                PARTY_BAR,
+                *bar,
+                3e9,
+                2,
+            );
             pen.y += name.size.y + 6.0;
         }
         if let Some((life, air, statuses, counts)) = body {
@@ -1300,6 +1308,7 @@ impl DemoView {
                 [0.0, 0.0, 0.0, 0.6],
                 None,
                 3e9,
+                0,
             );
             self.frame_sprites.extend(TextSystem::sprites(
                 &banner,
@@ -1340,7 +1349,7 @@ impl DemoView {
             (PAPER, INK)
         };
         let border = (!prompt).then_some(INK);
-        self.panel(top_left, size, fill, border, order);
+        self.panel(top_left, size, fill, border, order, 0);
         if !prompt {
             // The tail: shrinking rows under the box, outlined, pointing at the speaker.
             let x = head
@@ -1356,23 +1365,25 @@ impl DemoView {
                     Vec2::new(2.0 * half + 3.0, 1.0),
                     INK,
                     order,
+                    0,
                 );
                 self.rect(
                     Vec2::new(x - half, y),
                     Vec2::new(2.0 * half + 1.0, 1.0),
                     fill,
-                    order + 0.001,
+                    order,
+                    0,
                 );
             }
         }
-        self.frame_sprites.extend(TextSystem::sprites(
-            said,
-            texture,
-            top_left + pad,
-            ink,
-            layer::UI,
-            order + 0.002,
-        ));
+        self.frame_sprites.extend(
+            TextSystem::sprites(said, texture, top_left + pad, ink, layer::UI, order).map(
+                |mut s| {
+                    s.sub = 1;
+                    s
+                },
+            ),
+        );
     }
 
     /// Tents and campfires, standing in the world like props; a fire flickers through its clip.
@@ -1456,18 +1467,14 @@ impl DemoView {
             };
             let inner = GAUGE - Vec2::splat(2.0);
             let filled = (inner.y * level).round();
-            self.rect(at, GAUGE, INK, order);
-            self.rect(
-                at + Vec2::ONE,
-                inner,
-                [0.18, 0.18, 0.22, 1.0],
-                order + 0.001,
-            );
+            self.rect(at, GAUGE, INK, order, 0);
+            self.rect(at + Vec2::ONE, inner, [0.18, 0.18, 0.22, 1.0], order, 1);
             self.rect(
                 at + Vec2::new(1.0, 1.0 + inner.y - filled),
                 Vec2::new(inner.x, filled),
                 colour,
-                order + 0.002,
+                order,
+                2,
             );
         }
         // Blue when it feels cold, red when hot (the body's comfortable range).
@@ -1539,6 +1546,7 @@ impl DemoView {
                 [0.05, 0.05, 0.08, 0.8],
                 Some(border),
                 order,
+                0,
             );
             let Some((id, count)) = slot else {
                 continue;
@@ -1667,7 +1675,7 @@ impl DemoView {
         } else {
             3.0 - t
         };
-        self.rect(view_min, view_size, [0.0, 0.0, 0.0, alpha], 4e9);
+        self.rect(view_min, view_size, [0.0, 0.0, 0.0, alpha], 4e9, 0);
     }
 
     /// A small white burst where each recent hit landed.
@@ -1687,14 +1695,16 @@ impl DemoView {
                 Vec2::new(arm * 2.0 + 1.0, 1.0),
                 white,
                 order,
+                0,
             );
             self.rect(
                 at - Vec2::new(0.0, arm),
                 Vec2::new(1.0, arm * 2.0 + 1.0),
                 white,
                 order,
+                0,
             );
-            self.rect(at - Vec2::ONE, Vec2::splat(3.0), white, order);
+            self.rect(at - Vec2::ONE, Vec2::splat(3.0), white, order, 0);
         }
     }
 
@@ -1725,13 +1735,13 @@ impl DemoView {
                 max,
                 hostile: c.hostile,
             };
-            self.bar(head - Vec2::new(10.0, 0.0), 20.0, bar, c.ground.y);
+            self.bar(head - Vec2::new(10.0, 0.0), 20.0, bar, c.ground.y, 0);
         }
     }
 
     /// A health bar `width` wide at `top_left`: red for enemies, green for friends, with the
     /// health just lost showing pale until it drains away.
-    fn bar(&mut self, top_left: Vec2, width: f32, bar: Bar, order: f32) {
+    fn bar(&mut self, top_left: Vec2, width: f32, bar: Bar, order: f32, sub: i16) {
         let inner = width - 2.0;
         let fill = inner * f32::from(bar.health) / f32::from(bar.max);
         let trail = (inner * bar.trail / f32::from(bar.max)).max(fill);
@@ -1740,24 +1750,29 @@ impl DemoView {
         } else {
             [0.3, 0.85, 0.3, 1.0]
         };
-        self.rect(top_left.round(), Vec2::new(width, 4.0), INK, order);
+        self.rect(top_left.round(), Vec2::new(width, 4.0), INK, order, sub);
         if trail.round() > fill.round() {
             self.rect(
                 top_left.round() + Vec2::ONE,
                 Vec2::new(trail.round(), 2.0),
                 TRAIL,
-                order + 0.0005,
+                order,
+                sub + 1,
             );
         }
         self.rect(
             top_left.round() + Vec2::ONE,
             Vec2::new(fill.round(), 2.0),
             colour,
-            order + 0.001,
+            order,
+            sub + 2,
         );
     }
 
-    /// A box with its corner pixels cut, optionally outlined.
+    /// A box with its corner pixels cut, optionally outlined. Its border and face are both at
+    /// `sub`, one after the other: they are drawn together, so the order they are given in
+    /// settles them, and the level is for saying where the whole panel sits against things drawn
+    /// elsewhere in the frame.
     fn panel(
         &mut self,
         top_left: Vec2,
@@ -1765,6 +1780,7 @@ impl DemoView {
         fill: [f32; 4],
         border: Option<[f32; 4]>,
         order: f32,
+        sub: i16,
     ) {
         if let Some(border) = border {
             self.rect(
@@ -1772,21 +1788,29 @@ impl DemoView {
                 size + Vec2::new(2.0, 0.0),
                 border,
                 order,
+                sub,
             );
             self.rect(
                 top_left - Vec2::Y,
                 size + Vec2::new(0.0, 2.0),
                 border,
                 order,
+                sub,
             );
         }
-        self.rect(top_left, size, fill, order + 0.001);
+        self.rect(top_left, size, fill, order, sub);
     }
 
-    fn rect(&mut self, top_left: Vec2, size: Vec2, color: [f32; 4], order: f32) {
+    /// A flat rectangle of the interface. `sub` settles ties with everything else drawn at the
+    /// same `order`: larger is nearer the front. A whole number, because much of the interface
+    /// is ordered by a character's world y, and an `f32` cannot hold a thousandth off a large
+    /// one — over a kilometre from the origin the nudges this replaced were already lost
+    /// (docs/PLAN.md §24.0).
+    fn rect(&mut self, top_left: Vec2, size: Vec2, color: [f32; 4], order: f32, sub: i16) {
         let mut s = Sprite::fill(self.white, top_left, size, color);
         s.layer = layer::UI;
         s.sort_y = order;
+        s.sub = sub;
         self.frame_sprites.push(s);
     }
 }

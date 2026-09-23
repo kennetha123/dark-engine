@@ -658,8 +658,12 @@ impl ExitDef {
 
 impl SceneDef {
     /// Builds the collision terrain for this scene at the project's tile size.
-    /// Largest map, in tiles per side.
-    pub const MAX_TILES_PER_SIDE: u32 = 4096;
+    /// Largest map, in tiles per side. Twenty thousand is 320 km at 16 px to the tile, or
+    /// 20 km if a tile is a metre — past what §24.0 says one `f32` should hold a position in,
+    /// and far past what anyone will draw by hand. The land itself costs nothing until it is
+    /// shaped (§24.4), so the cap is about what the rest of the engine can carry, not about
+    /// what a grid of tiles costs.
+    pub const MAX_TILES_PER_SIDE: u32 = 20_000;
 
     pub fn build_terrain(&self, tile_size: u32) -> Result<Terrain, String> {
         let tile = tile_size as f32;

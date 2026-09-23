@@ -23,13 +23,27 @@ impl Cell {
     }
 }
 
+/// How many tiles a patch of terrain holds each way (docs/PLAN.md §24.4). A patch is 8 KB, so
+/// shaping one tile costs 8 KB and shaping none costs nothing.
+const PATCH: u32 = 64;
+
+/// The land: what height each tile stands at.
+///
+/// Flat ground is not written down. A patch of tiles is made the first time something is put in
+/// it, and where nothing has been put the ground is simply level — so a terrain may be as wide
+/// as a game likes and costs only what has been shaped in it. Sixteen kilometres of it, at 16 px
+/// to the tile, is a quarter of a million tiles a side and a few hundred kilobytes of
+/// bookkeeping until someone raises a hill.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Terrain {
     cols: u32,
     rows: u32,
     tile: f32,
     level_height: f32,
-    cells: Vec<Cell>,
+    /// One place per patch of the grid, holding the patch's tiles once it has any.
+    patches: Vec<Option<Box<[Cell]>>>,
+    /// Patches across.
+    wide: u32,
 }
 
 impl Terrain {
@@ -40,13 +54,28 @@ impl Terrain {
             tile > 0.0 && level_height > 0.0,
             "tile and level height must be positive"
         );
+        let wide = cols.div_ceil(PATCH);
+        let down = rows.div_ceil(PATCH);
         Self {
             cols,
             rows,
             tile,
             level_height,
-            cells: vec![Cell::Floor; (cols * rows) as usize],
+            patches: vec![None; (wide as usize) * (down as usize)],
+            wide,
         }
+    }
+
+    /// Where a tile lives: which patch, and where in it.
+    fn place(&self, col: u32, row: u32) -> (usize, usize) {
+        let patch = (row / PATCH) as usize * self.wide as usize + (col / PATCH) as usize;
+        let within = (row % PATCH) as usize * PATCH as usize + (col % PATCH) as usize;
+        (patch, within)
+    }
+
+    /// How many patches have been shaped. For tests and logs.
+    pub fn shaped(&self) -> usize {
+        self.patches.iter().filter(|p| p.is_some()).count()
     }
 
     pub fn cols(&self) -> u32 {
@@ -70,19 +99,32 @@ impl Terrain {
         Vec2::new(self.cols as f32, self.rows as f32) * self.tile
     }
 
-    /// `None` outside the grid.
+    /// `None` outside the grid; level ground where nothing has been shaped.
     pub fn cell(&self, col: i64, row: i64) -> Option<Cell> {
         if col < 0 || row < 0 || col >= i64::from(self.cols) || row >= i64::from(self.rows) {
             return None;
         }
-        Some(self.cells[(row as usize) * self.cols as usize + col as usize])
+        let (patch, within) = self.place(col as u32, row as u32);
+        Some(match &self.patches[patch] {
+            Some(tiles) => tiles[within],
+            None => Cell::Floor,
+        })
     }
 
-    /// Sets the tiles of a rectangle, clipped to the grid.
+    /// Sets the tiles of a rectangle, clipped to the grid. Levelling ground that was never
+    /// shaped leaves it unshaped, so filling a whole world with `Floor` costs nothing.
     pub fn fill(&mut self, col: u32, row: u32, width: u32, height: u32, cell: Cell) {
         for r in row..(row.saturating_add(height)).min(self.rows) {
             for c in col..(col.saturating_add(width)).min(self.cols) {
-                self.cells[(r * self.cols + c) as usize] = cell;
+                let (patch, within) = self.place(c, r);
+                let tiles = match &mut self.patches[patch] {
+                    Some(tiles) => tiles,
+                    None if cell == Cell::Floor => continue,
+                    place => {
+                        place.insert(vec![Cell::Floor; (PATCH * PATCH) as usize].into_boxed_slice())
+                    }
+                };
+                tiles[within] = cell;
             }
         }
     }
@@ -124,6 +166,68 @@ impl Terrain {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sixteen kilometres of land, made in a moment and costing nothing until it is shaped —
+    /// which is what lets a world be as large as a game wants (docs/PLAN.md §24.4).
+    #[test]
+    fn a_world_costs_only_what_has_been_shaped_in_it() {
+        // 16 km at 16 px to the metre: a quarter of a million tiles a side, 256 million tiles.
+        let mut land = Terrain::new(16_000, 16_000, 16.0, 16.0);
+        assert_eq!(land.shaped(), 0, "flat ground is not written down");
+        assert_eq!(land.cell(9_000, 9_000), Some(Cell::Floor));
+        // Levelling ground that was never shaped still costs nothing, however much of it.
+        land.fill(0, 0, 16_000, 16_000, Cell::Floor);
+        assert_eq!(land.shaped(), 0);
+        // A hill in the middle of it: only the patches it covers are made.
+        land.fill(8_000, 8_000, 40, 40, Cell::Level(2));
+        assert_eq!(land.shaped(), 1, "40 tiles across fit inside one patch");
+        assert_eq!(land.cell(8_010, 8_010), Some(Cell::Level(2)));
+        assert_eq!(land.cell(8_100, 8_100), Some(Cell::Floor));
+        // A wall across a hundred tiles touches the patches it crosses and no others: it starts
+        // inside one, crosses the whole of the next, and ends in a third.
+        land.fill(4_000, 4_000, 100, 1, Cell::Wall);
+        assert_eq!(land.shaped(), 4, "one hill and three patches of wall");
+        assert_eq!(land.cell(4_099, 4_000), Some(Cell::Wall));
+        assert_eq!(land.cell(4_100, 4_000), Some(Cell::Floor));
+    }
+
+    /// Shaped or not, the land answers as a plain grid of tiles would.
+    #[test]
+    fn patches_answer_as_one_flat_grid_would() {
+        let (cols, rows) = (200u32, 150u32);
+        let mut land = Terrain::new(cols, rows, 16.0, 16.0);
+        let mut flat = vec![Cell::Floor; (cols * rows) as usize];
+        let mut seed = 0x51_7C_C1_B7_27_22_0A_95u64;
+        let mut roll = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        for _ in 0..400 {
+            let (col, row) = (roll() % (cols + 20), roll() % (rows + 20));
+            let (w, h) = (1 + roll() % 70, 1 + roll() % 70);
+            let cell = match roll() % 3 {
+                0 => Cell::Floor,
+                1 => Cell::Wall,
+                _ => Cell::Level((roll() % 4) as u8 + 1),
+            };
+            land.fill(col, row, w, h, cell);
+            for r in row..(row.saturating_add(h)).min(rows) {
+                for c in col..(col.saturating_add(w)).min(cols) {
+                    flat[(r * cols + c) as usize] = cell;
+                }
+            }
+        }
+        for row in -2..i64::from(rows) + 2 {
+            for col in -2..i64::from(cols) + 2 {
+                let inside =
+                    (0..i64::from(cols)).contains(&col) && (0..i64::from(rows)).contains(&row);
+                let want = inside.then(|| flat[(row as u32 * cols + col as u32) as usize]);
+                assert_eq!(land.cell(col, row), want, "tile ({col}, {row})");
+            }
+        }
+    }
 
     #[test]
     fn heights_walls_and_outside() {

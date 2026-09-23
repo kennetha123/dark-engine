@@ -81,7 +81,9 @@ fn drawn_in(sprite: &Sprite, min: Vec2, max: Vec2) -> bool {
 /// Static sprites and debug overlay of one map, in pieces a fraction of a screen across.
 pub struct MapView {
     pub size: Vec2,
-    pieces: Vec<Piece>,
+    /// One place per piece of the map, holding the piece once anything stands in it. A map of
+    /// empty ground costs a pointer a piece and nothing more (docs/PLAN.md §24.4).
+    pieces: Vec<Option<Box<Piece>>>,
     /// Sprites larger than a piece — the ground, a great tree — held once here and pointed at by
     /// every piece they cross, with the place each had when the map was one list.
     wide: Vec<(u32, Sprite, bool)>,
@@ -163,14 +165,19 @@ impl MapView {
         let cols = span(first.x, last.x, self.across);
         let rows = span(first.y, last.y, self.down);
         rows.flat_map(move |row| cols.clone().map(move |col| row * self.across + col))
-            .filter_map(|nth| self.pieces.get(nth))
+            .filter_map(|nth| self.pieces.get(nth).and_then(Option::as_deref))
             .filter(move |piece| piece.seen_in(min, max))
     }
 
     /// How many static sprites the whole map holds. For logs and tests; a frame never asks.
     pub fn sprites(&self) -> usize {
         let wide = self.wide.iter().filter(|(_, _, overlay)| !overlay).count();
-        wide + self.pieces.iter().map(|p| p.statics.len()).sum::<usize>()
+        wide + self
+            .pieces
+            .iter()
+            .flatten()
+            .map(|p| p.statics.len())
+            .sum::<usize>()
     }
 
     /// The piece a sprite stands in. A sprite off the map belongs to the nearest piece, so
@@ -400,7 +407,7 @@ impl MapView {
         let down = ((size.y / PIECE).ceil() as usize).max(1);
         let mut view = Self {
             size,
-            pieces: (0..across * down).map(|_| Piece::default()).collect(),
+            pieces: (0..across * down).map(|_| None).collect(),
             wide: Vec::new(),
             across,
             down,
@@ -417,8 +424,9 @@ impl MapView {
                 let nth = view.wide.len() as u32;
                 view.wide.push((place, sprite, overlay));
                 for piece in view.crossed_by(min, max) {
-                    view.pieces[piece].wide.push(nth);
-                    view.pieces[piece].covering(min, max);
+                    let piece = view.pieces[piece].get_or_insert_default();
+                    piece.wide.push(nth);
+                    piece.covering(min, max);
                 }
                 continue;
             }
@@ -428,7 +436,9 @@ impl MapView {
             let corner = Vec2::new((nth % across) as f32, (nth / across) as f32) * PIECE;
             view.before = view.before.max((corner - min).max(Vec2::ZERO));
             view.after = view.after.max((max - (corner + PIECE)).max(Vec2::ZERO));
-            view.pieces[nth].take(place, sprite, overlay);
+            view.pieces[nth]
+                .get_or_insert_default()
+                .take(place, sprite, overlay);
         }
         view
     }

@@ -974,7 +974,7 @@ how many are in it out of how many it holds, `1/4` until it is `4/4` and closed.
   7777, so two games cannot be opened on one machine; the name in the list is the project's, not
   the host's own, and no password or invitation guards a game — anyone on the network can join.
 
-## 24. The open world: chunks and streaming (designed; §24.1, §24.2 and §24.3's first half built)
+## 24. The open world: chunks and streaming (§24.1–§24.3 built, §24.4 begun)
 
 The world is one continuous outdoors the player walks across without a loading screen. **How big
 is the game's choice, not the engine's** — the first game may want ten or sixteen kilometres, and
@@ -995,7 +995,7 @@ At 16 px to the tile with a tile about a metre (the adventurer project):
 | Across | Tiles a side | Pixels a side | Tiles in all | What it needs on top of the last row |
 |---|---|---|---|---|
 | **4 km** | 4 000 | 64 000 | 16 M | Nothing new: it is inside today's map cap of 4096 tiles. Only §24.2 (draw what is seen) and §24.3's collider grid, both of which the engine wants anyway. |
-| **10–16 km** | 10–16 000 | 160–256 000 | 100–256 M | Lift the cap; stream chunks; make the land from the seed; spatial simulation. Coordinates stay plain absolute `f32`. |
+| **10–16 km** | 10–16 000 | 160–256 000 | 100–256 M | **Done:** the cap is lifted, the land costs only what is shaped in it, and a frame costs what is on the screen. Still wanted: making the land from the seed, and streaming what is shaped. Coordinates stay plain absolute `f32`. |
 | **100 km** | 100 000 | 1 600 000 | 10 000 M | `Spot { chunk, at }` coordinates and rebasing (§24.4). Everything else is the same code. |
 
 Two things to read off that table.
@@ -1141,13 +1141,25 @@ everything the world holds:
   regions are named places joined by travel times, with **no coordinates at all**, so distance in
   chunks is a new index over them. §24.5's stamps are where a chunk learns which region it is in.
 
-### 24.4 The ground itself
+### 24.4 The ground itself (the land itself built; making it and streaming it to come)
 
+- **The land is no longer written down where nothing has been done to it.** Terrain was one
+  array of every tile in the map — a quarter of a gigabyte at 16 km, before anyone had shaped a
+  thing. It is now held in patches of 64×64 tiles, made the first time something is put in one,
+  and level everywhere else; levelling ground that was never shaped costs nothing at all. The
+  same for what a map looks like: the pieces of §24.2 are made where something stands and are a
+  pointer each where nothing does.
+- So a map may now be **20 000 tiles a side** (the old cap was 4096), and the size of a world is
+  no longer a question about what a grid of tiles costs.
+- **Measured**, on this machine, in a release build: a world 16 km across — 256 million tiles, a
+  quarter of a million a side — starts in about a second and a half and holds **10 MB**. Six
+  hundred frames of it cost 5.3 seconds against 5.1 for the first game's meadow, which is 7 500
+  tiles: **a world thirty-four thousand times the size, four per cent slower a frame**. Shape it
+  and it costs what the shaping costs — 400 hills of some quarter of a million raised tiles came
+  to 400 MB, which is the map's own content and what the rest of §24.4 is for.
 - A **chunk** is 64×64 tiles — 1024 px at 16 px to the tile. Sixteen kilometres is 250 chunks a
   side, a hundred is 1563. A chunk holds its tiles' heights, the props standing on them, and what
-  lives there. The size of a chunk is a budget, not a world limit: the world is however many of
-  them the game wants, and the cap on a map's size (4096 tiles) is lifted here because the
-  outdoors stops being one map.
+  lives there. The size of a chunk is a budget, not a world limit.
 - A chunk is **made, not read**: `(world seed, chunk)` gives the same chunk on every machine,
   worked out in whole numbers so a host and a client cannot disagree. An authored chunk is a patch
   laid over what was made; a chunk a player has changed is a smaller patch again, in the save.
@@ -1188,8 +1200,7 @@ everything the world holds:
 - **The packager** (§19) collects what to ship by reading every scene's sheets. Made land names no
   sheets in any scene, so what the generator can choose has to be declared somewhere the packager
   reads, or a built game ships without its ground.
-- `MAX_TILES_PER_SIDE` (4096) and `MapId` stay as they are: they are the interiors' limits, and
-  the outdoors is no longer a scene.
+- `MapId` stays as it is: it is the interiors' limit, and the outdoors will not be a scene.
 
 ### 24.5 Making a world by hand
 
