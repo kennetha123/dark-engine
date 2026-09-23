@@ -99,29 +99,60 @@ pub(crate) fn drop_items(
         {
             life.inventory.worn = None;
         }
-        let by = avatar.map(|a| a.0);
         let at = lands_at(&maps, *map, &body.0, state.facing.vector());
-        // Another of the same lying here: one pile, not a heap of ones.
-        let pile = piles.iter_mut().find(|(pile_map, pile)| {
-            *pile_map == map && pile.item == item && pile.at.distance(at) <= PILES_WITHIN
-        });
-        if let Some((_, mut pile)) = pile {
-            pile.count = pile.count.saturating_add(1);
-            pile.laid_by = by;
-            continue;
-        }
-        commands.spawn((
-            Dropped {
+        lay_down(
+            &mut commands,
+            &mut next_id,
+            &mut piles,
+            *map,
+            &maps,
+            Laying {
                 item,
                 count: 1,
                 at,
-                elevation: maps.get(*map).collision.ground_under(at, DROP_RADIUS),
-                laid_by: by,
+                laid_by: avatar.map(|a| a.0),
             },
-            *map,
-            next_id.allocate(),
-        ));
+        );
     }
+}
+
+/// Something being put down: what it is, how many, where, and whose it is until they walk away.
+pub(crate) struct Laying {
+    pub item: String,
+    pub count: u16,
+    pub at: Vec2,
+    pub laid_by: Option<PlayerId>,
+}
+
+/// Puts it on the ground, joining a pile of the same already lying within reach so that a spot
+/// fought over all day holds one pile rather than a heap of ones.
+pub(crate) fn lay_down(
+    commands: &mut Commands,
+    next_id: &mut NextNetId,
+    piles: &mut Query<(&MapId, &mut Dropped)>,
+    map: MapId,
+    maps: &Maps,
+    laying: Laying,
+) {
+    let pile = piles.iter_mut().find(|(pile_map, pile)| {
+        **pile_map == map && pile.item == laying.item && pile.at.distance(laying.at) <= PILES_WITHIN
+    });
+    if let Some((_, mut pile)) = pile {
+        pile.count = pile.count.saturating_add(laying.count);
+        pile.laid_by = laying.laid_by;
+        return;
+    }
+    commands.spawn((
+        Dropped {
+            item: laying.item,
+            count: laying.count,
+            at: laying.at,
+            elevation: maps.get(map).collision.ground_under(laying.at, DROP_RADIUS),
+            laid_by: laying.laid_by,
+        },
+        map,
+        next_id.allocate(),
+    ));
 }
 
 /// Where a drop lands: in front of the feet if that is clear, open ground level with them, else
@@ -185,6 +216,103 @@ pub(crate) fn pick_up_items(
             commands.entity(entity).despawn();
         }
     }
+}
+
+/// What a character leaves on the ground when it falls (docs/PLAN.md §14).
+#[derive(Component, Clone, Debug)]
+pub struct Loot(pub Vec<dark_combat::DropDef>);
+
+/// Already given up: a body drops what it carries once, however long it lies there.
+#[derive(Component, Clone, Copy, Debug)]
+pub(crate) struct Spilled;
+
+/// What laying something down needs to know: when it is, what the items are, where the ground
+/// is, and the next name to give.
+#[derive(bevy_ecs::system::SystemParam)]
+pub(crate) struct Ground<'w> {
+    tick: Res<'w, dark_core::SimTick>,
+    rules: Res<'w, LifeRules>,
+    maps: Res<'w, Maps>,
+    next_id: ResMut<'w, NextNetId>,
+}
+
+/// A body that has just fallen.
+type Fallen = (
+    Entity,
+    &'static MapId,
+    &'static BodyState,
+    &'static CharacterState,
+    &'static Loot,
+);
+
+/// What the fallen leave behind: each of their drops, rolled once, laid where they fell.
+pub(crate) fn spill_loot(
+    mut commands: Commands,
+    world: Ground,
+    mut unknown: Local<std::collections::HashSet<String>>,
+    fallen: Query<Fallen, Without<Spilled>>,
+    spilled: Query<(Entity, &CharacterState), With<Spilled>>,
+    mut piles: Query<(&MapId, &mut Dropped)>,
+) {
+    let Ground {
+        tick,
+        rules,
+        maps,
+        mut next_id,
+    } = world;
+    // Back at its post, whole again: what it carries is there to be taken the next time it falls.
+    for (entity, state) in &spilled {
+        if !state.fighter.is_dead() {
+            commands.entity(entity).remove::<Spilled>();
+        }
+    }
+    for (entity, map, body, state, loot) in &fallen {
+        if !state.fighter.is_dead() {
+            continue;
+        }
+        commands.entity(entity).insert(Spilled);
+        for (i, def) in loot.0.iter().enumerate() {
+            // The host's own rolls: nothing about them is replayed or predicted.
+            let seed = tick.0 ^ entity.to_bits().rotate_left(20) ^ ((i as u64) << 40);
+            let chance = (roll(seed) % 100) as u8;
+            let count = def.rolled(chance, roll(seed ^ 0x9e37) as u16);
+            if count == 0 {
+                continue;
+            }
+            if !rules.def.items.contains_key(&def.item) {
+                if unknown.insert(def.item.clone()) {
+                    tracing::warn!("{} is dropped by an enemy but is no item", def.item);
+                }
+                continue;
+            }
+            // Laid where a player would lay it: clear ground, on the ground, joining a pile of
+            // the same already there rather than heaping one entity on another.
+            let at = lands_at(&maps, *map, &body.0, Vec2::ZERO);
+            lay_down(
+                &mut commands,
+                &mut next_id,
+                &mut piles,
+                *map,
+                &maps,
+                Laying {
+                    item: def.item.clone(),
+                    count,
+                    at,
+                    // Nobody's to keep: whoever comes by may take it.
+                    laid_by: None,
+                },
+            );
+        }
+    }
+}
+
+/// A number from a seed, for the host's own rolls (an xorshift, not a good deal more).
+fn roll(seed: u64) -> u32 {
+    let mut x = seed.wrapping_mul(0x9e3779b97f4a7c15) | 1;
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58476d1ce4e5b9);
+    x ^= x >> 27;
+    (x >> 33) as u32
 }
 
 /// What lies on the ground in `map`, for the host's own screen (clients are sent it).

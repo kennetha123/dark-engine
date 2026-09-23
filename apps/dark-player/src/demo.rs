@@ -342,6 +342,7 @@ impl DemoScene {
             tent,
             campfire,
             comfort: self.life.rates.comfort,
+            money: self.life.money.clone(),
             seconds: 0.0,
             skeletons,
             poses: HashMap::new(),
@@ -556,6 +557,8 @@ pub struct DemoView {
     campfire: Option<(TextureId, SpriteSheet)>,
     /// Felt temperatures shown plain; colder shows blue, warmer red (the project's `Rates`).
     comfort: (i32, i32),
+    /// The item that is money, counted beside the hotbar (the project's `life.ron`).
+    money: Option<String>,
     /// Seconds drawn, for animating structures.
     seconds: f32,
     skeletons: Vec<SkeletonView>,
@@ -986,6 +989,15 @@ impl DemoView {
                 .collect();
             (life, layout(&air, BUBBLE_WIDTH), statuses, counts)
         });
+        // What the player has to spend, beside the hotbar: the money item's own icon and count.
+        let purse = life.zip(self.money.as_ref()).map(|(life, money)| {
+            let count = life
+                .slots
+                .iter()
+                .find(|(item, _)| item == money)
+                .map_or(0, |(_, n)| *n);
+            (money.clone(), layout(&count.to_string(), BUBBLE_WIDTH))
+        });
         // The party, top right under the clock: whoever of it is in this map, by name.
         let party: Vec<(TextLayout, Bar)> = frame
             .party
@@ -1229,6 +1241,9 @@ impl DemoView {
         if let Some((life, air, statuses, counts)) = body {
             self.draw_body(life, &air, &statuses, texture, view_min);
             self.draw_hotbar(life, &counts, texture, view_min, view_size);
+            if let Some((money, count)) = &purse {
+                self.draw_purse(money, count, texture, view_min, view_size);
+            }
         }
         if let Some(banner) = banner {
             let at = view_min + Vec2::new(8.0, 18.0);
@@ -1425,6 +1440,33 @@ impl DemoView {
             self.shadowed(status, texture, pen, [1.0, 0.85, 0.6, 1.0], order);
             pen.y += status.size.y;
         }
+    }
+
+    /// What the player has to spend (docs/PLAN.md §14): the money item's icon and how many of
+    /// it, left of the hotbar.
+    fn draw_purse(
+        &mut self,
+        money: &str,
+        count: &TextLayout,
+        texture: TextureId,
+        view_min: Vec2,
+        view_size: Vec2,
+    ) {
+        let order = 1e9;
+        let width = HOTBAR_SLOTS as f32 * (SLOT + 2.0) - 2.0;
+        let left = view_min.x + ((view_size.x - width) / 2.0).round();
+        let at = Vec2::new(
+            left - SLOT - 10.0 - count.size.x,
+            view_min.y + view_size.y - SLOT - 4.0,
+        );
+        if let Some(&icon) = self.icons.get(money) {
+            let mut s = Sprite::new(icon, Rect::new(0, 0, ICON_SIZE, ICON_SIZE), at, Vec2::ZERO);
+            s.layer = layer::UI;
+            s.sort_y = order;
+            self.frame_sprites.push(s);
+        }
+        let beside = at + Vec2::new(ICON_SIZE as f32 + 3.0, 0.0);
+        self.shadowed(count, texture, beside, PAPER, order + 0.01);
     }
 
     /// The hotbar along the bottom: what each slot holds and how many, the worn one outlined.

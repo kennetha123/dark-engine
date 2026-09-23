@@ -85,11 +85,12 @@ impl Plugin for CombatPlugin {
                         respawn: kind.ai.respawn,
                     },
                     Brain::new(kind.ai.clone()),
+                    crate::drops::Loot(kind.drops.clone()),
                 ));
             }
         }
         app.world.init_resource::<NextNetId>();
-        for (body, state, post, brain) in spawns {
+        for (body, state, post, brain, loot) in spawns {
             let id = app.world.resource_mut::<NextNetId>().allocate();
             app.world.spawn((
                 body,
@@ -100,6 +101,7 @@ impl Plugin for CombatPlugin {
                 crate::maps::StaysInMap,
                 ControlInput::default(),
                 SwingHits::default(),
+                loot,
                 id,
             ));
         }
@@ -109,7 +111,13 @@ impl Plugin for CombatPlugin {
         )
         .add_systems(
             FixedUpdate,
-            (resolve_hits, fall_and_rise, return_dormant)
+            // What the fallen leave is laid down before their bodies are taken away.
+            (
+                resolve_hits,
+                crate::drops::spill_loot,
+                fall_and_rise,
+                return_dormant,
+            )
                 .chain()
                 .in_set(Fight),
         )

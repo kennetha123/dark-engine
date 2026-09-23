@@ -689,6 +689,8 @@ impl Database {
                             back_off: 30,
                             respawn: 60 * 30,
                         },
+                        // A new enemy leaves nothing behind until someone says what it carries.
+                        drops: Vec::new(),
                     },
                 );
             }
@@ -1045,6 +1047,7 @@ impl Database {
             "Tent",
             "Campfire",
             "Soap",
+            "Carried only",
         ];
         let kind = match &item.use_ {
             ItemUse::Consume(_) => 0,
@@ -1053,6 +1056,7 @@ impl Database {
             ItemUse::Place(Structure::Tent) => 3,
             ItemUse::Place(Structure::Campfire { .. }) => 4,
             ItemUse::Wash => 5,
+            ItemUse::Keep => 6,
         };
         let mut chosen = kind;
         ui.horizontal(|ui| {
@@ -1075,7 +1079,9 @@ impl Database {
                 },
                 3 => ItemUse::Place(Structure::Tent),
                 4 => ItemUse::Place(Structure::Campfire { minutes: 120 }),
-                _ => ItemUse::Wash,
+                5 => ItemUse::Wash,
+                // Money, and anything else carried for its own sake.
+                _ => ItemUse::Keep,
             };
             f.step(("use", id));
         }
@@ -1112,6 +1118,9 @@ impl Database {
             }
             ItemUse::Wash => {
                 ui.weak("Clean again. Used up.");
+            }
+            ItemUse::Keep => {
+                ui.weak("Nothing happens when it is used: money, and things carried to sell.");
             }
         });
     }

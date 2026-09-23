@@ -38,6 +38,10 @@ pub struct LifeDef {
     /// What a new character wears (one of `start`).
     #[serde(default)]
     pub wear: Option<String>,
+    /// The item that is money: what is counted on the screen, and later what buys things. An
+    /// item like any other, so it is dropped, picked up and left by the fallen the same way.
+    #[serde(default)]
+    pub money: Option<String>,
     /// Air temperature by world region (a scene's `region`).
     #[serde(default)]
     pub climates: BTreeMap<String, Climate>,
@@ -106,6 +110,13 @@ impl LifeDef {
                     "wear {worn} must be clothing that start carries"
                 )));
             }
+        }
+        if let Some(money) = &self.money
+            && !self.items.contains_key(money)
+        {
+            return Err(LifeError::Invalid(format!(
+                "money {money} is not one of the items"
+            )));
         }
         if self.rates.chill <= 0 {
             return Err(LifeError::Invalid("rates.chill must be positive".into()));
@@ -343,6 +354,8 @@ pub enum ItemUse {
     Place(Structure),
     /// Soap and water: clean again. Used up.
     Wash,
+    /// Nothing happens: money, and anything else carried for its own sake.
+    Keep,
 }
 
 /// Something set down in the world.

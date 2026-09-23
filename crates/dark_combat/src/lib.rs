@@ -17,7 +17,7 @@ mod def;
 use glam::Vec2;
 use serde::{Deserialize, Serialize};
 
-pub use def::{AiDef, AttackDef, CombatDef, CombatError, DodgeDef, EnemyDef, Moveset};
+pub use def::{AiDef, AttackDef, CombatDef, CombatError, DodgeDef, DropDef, EnemyDef, Moveset};
 
 /// Ticks a press waits to be used.
 pub const BUFFER_TICKS: u8 = 10;

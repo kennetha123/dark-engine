@@ -484,20 +484,32 @@ docs/            this plan
   one who laid it down, until they step out of its reach, so dropping something where you stand
   does not hand it straight back. Only characters with a pack (players, so far) pick things up;
   what is left lying is saved with the world (`SavedDrop`, read as empty in older saves).
+- Money and loot: `life.ron` names the item that is **money** (`money: "coin"`), carried like
+  anything else and counted beside the hotbar; there is nothing to spend it on until shops.
+  An enemy in `combat.ron` lists what it **drops** (an item, the fewest and most of it, and a
+  chance out of a hundred); when it falls, the host rolls each one and lays what falls where the
+  body is — on clear ground, joining a pile of the same already there, as a player's own drop
+  does — for anyone to pick up. An enemy back at its post leaves its loot again the next time it
+  falls. The rolls are the host's own and are never replayed, so a simple seeded shuffle of the
+  tick and the body is enough.
 - Replication: snapshots carry the tents, fires and dropped items in the recipient's map and the
   recipient's own body and pack (nobody else's). The HUD shows six need gauges (fuller is worse),
-  the air's temperature tinted by how it feels, statuses, and the hotbar with the worn item
-  outlined. A drop is drawn on the ground as its hotbar icon.
-- Adventurer: bread, water, ale, a wool cloak (worn), a tent, firewood, a warming charm and soap;
+  the air's temperature tinted by how it feels, statuses, the hotbar with the worn item
+  outlined, and the money beside it. A drop is drawn on the ground as its hotbar icon.
+- Adventurer: bread, water, ale, a wool cloak (worn), a tent, firewood, a warming charm, soap and
+  coins (its money); a demon soldier leaves its pay and sometimes rations, a goblin a few coins
+  and sometimes stolen ale, a brute a heavy purse and often firewood;
   spring climates (the grove is cold at night without the cloak); the Meadowbrook inn is the
   Town01 house; the tent and campfire are placeholder art drawn by
   `placeholder/make_life_art.py`. `--autopilot-camp` pitches camp and gets drunk for screenshots.
 - Scattered props now also keep 12 px out of hand-placed props' footprints (a house).
 - Known gaps: NPCs have no bodies or schedules yet (the model is shared, only players get one);
   no weather or seasons (climate by hour only); no social reaction to soiling or drunkenness;
-  items cannot be found or bought (storylets give them, and they can now be dropped and picked
-  up); a drop lies where it fell for ever, and nobody but a player takes any notice of it; there
-  is no gamepad button for dropping; no interiors; relieving yourself anywhere is fine.
+  items cannot be bought (storylets give them, enemies leave them, and they can be dropped and
+  picked up); money buys nothing yet; what an enemy drops is written in `combat.ron` by hand
+  (the editor's enemy form has no list for it); a drop lies where it fell for ever, and nobody
+  but a player takes any notice of it; there is no gamepad button for dropping; no interiors;
+  relieving yourself anywhere is fine.
 
 ## 15. Factions, parties and loyalty (as built in M5)
 

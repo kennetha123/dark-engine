@@ -145,6 +145,21 @@ pub(crate) fn combat() -> dark_combat::CombatDef {
                     back_off: 30,
                     respawn: 600,
                 },
+                // Always two ales, and a tent one time in a hundred (so never, in a test).
+                drops: vec![
+                    dark_combat::DropDef {
+                        item: "ale".into(),
+                        least: 2,
+                        most: 2,
+                        chance: 100,
+                    },
+                    dark_combat::DropDef {
+                        item: "tent".into(),
+                        least: 1,
+                        most: 1,
+                        chance: 0,
+                    },
+                ],
             },
         )]
         .into(),
@@ -743,6 +758,46 @@ fn a_villager_walks_their_day_and_lies_down_where_it_says_they_sleep() {
         abed.ground
     );
     assert!(abed.state.sleeping, "did not lie down");
+}
+
+#[test]
+fn what_an_enemy_carried_is_left_where_it_fell() {
+    let mut net = Net::arena(1);
+    net.connect();
+    let me = net.me(0).id;
+    let grunt = net.clients[0]
+        .characters()
+        .into_iter()
+        .find(|c| c.hostile)
+        .expect("a grunt to fight")
+        .id;
+    let carried = |net: &mut Net| net.host_life(me).inventory.count("ale");
+    let had = carried(&mut net);
+
+    // Killed on the host, where hits land.
+    {
+        let sheets = net.host.world.resource::<CharacterSheets>().clone();
+        let mut q = net
+            .host
+            .world
+            .query::<(&NetId, &mut crate::CharacterState)>();
+        for (id, mut state) in q.iter_mut(&mut net.host.world) {
+            if *id == grunt {
+                let m = &sheets.look(state.look).moveset;
+                let mut deadly = m.combo[0].clone();
+                deadly.damage = 1000;
+                state.fighter.take_hit(m, &deadly, Vec2::X, me.0);
+            }
+        }
+    }
+    net.run(10, &[Vec2::ZERO]);
+    let lying = net.clients[0].drops().to_vec();
+    assert_eq!(lying.len(), 1, "the ale it carried, and nothing it did not");
+    assert_eq!((lying[0].item.as_str(), lying[0].count), ("ale", 2));
+
+    // And it can be picked up, like anything else left lying.
+    net.run(120, &[Vec2::X]);
+    assert!(carried(&mut net) > had, "walked over and taken");
 }
 
 #[test]

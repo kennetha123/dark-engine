@@ -210,6 +210,47 @@ pub struct EnemyDef {
     pub attack: Option<String>,
     pub moveset: String,
     pub ai: AiDef,
+    /// What it leaves on the ground when it falls.
+    #[serde(default)]
+    pub drops: Vec<DropDef>,
+}
+
+/// Something an enemy may leave behind: an item, how many of it, and how often at all.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DropDef {
+    /// An item of the project's `life.ron`.
+    pub item: String,
+    /// The fewest and the most that fall; one of it when neither is given.
+    #[serde(default = "just_one")]
+    pub least: u16,
+    #[serde(default = "just_one")]
+    pub most: u16,
+    /// Out of a hundred kills, how many leave it. 100: always.
+    #[serde(default = "always")]
+    pub chance: u8,
+}
+
+fn just_one() -> u16 {
+    1
+}
+
+fn always() -> u8 {
+    100
+}
+
+impl DropDef {
+    /// What falls this time, given a roll of 0 to 99 for the chance and another for how many.
+    /// The host decides; nothing about it is replayed, so the rolls need only be its own.
+    pub fn rolled(&self, chance_roll: u8, count_roll: u16) -> u16 {
+        if chance_roll >= self.chance.min(100) {
+            return 0;
+        }
+        // Written the wrong way round, it still means what it says. The span is counted wide
+        // enough to hold the whole range of counts.
+        let (least, most) = (self.least.min(self.most), self.least.max(self.most));
+        let span = u32::from(most) - u32::from(least) + 1;
+        least + (u32::from(count_roll) % span) as u16
+    }
 }
 
 /// Enemy behaviour tuning (the states are fixed: guard, chase, attack, back off, return).
@@ -258,4 +299,50 @@ fn default_respawn() -> u32 {
 }
 fn one() -> f32 {
     1.0
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+
+    fn drop_of(least: u16, most: u16, chance: u8) -> DropDef {
+        DropDef {
+            item: "coin".into(),
+            least,
+            most,
+            chance,
+        }
+    }
+
+    #[test]
+    fn a_chance_of_none_never_falls_and_a_chance_of_all_always_does() {
+        let never = drop_of(1, 1, 0);
+        let always = drop_of(1, 1, 100);
+        for roll in [0, 1, 50, 99] {
+            assert_eq!(never.rolled(roll, 0), 0, "a chance of none, roll {roll}");
+            assert_eq!(always.rolled(roll, 0), 1, "a chance of all, roll {roll}");
+        }
+        // One in four: the first quarter of the rolls, and no more.
+        let sometimes = drop_of(1, 1, 25);
+        assert_eq!(sometimes.rolled(24, 0), 1);
+        assert_eq!(sometimes.rolled(25, 0), 0);
+    }
+
+    #[test]
+    fn how_many_fall_stays_between_the_fewest_and_the_most() {
+        let few = drop_of(3, 8, 100);
+        for roll in [0, 1, 5, 17, 1000, u16::MAX] {
+            let count = few.rolled(0, roll);
+            assert!((3..=8).contains(&count), "{count} from roll {roll}");
+        }
+        assert_eq!(
+            drop_of(4, 4, 100).rolled(0, 12345),
+            4,
+            "the same every time"
+        );
+        // Written the wrong way round, and as wide as counts go.
+        assert_eq!(drop_of(9, 2, 100).rolled(0, 0), 2);
+        // As wide as counts go: it works out a count rather than overflowing.
+        assert_eq!(drop_of(0, u16::MAX, 100).rolled(0, 7), 7);
+    }
 }

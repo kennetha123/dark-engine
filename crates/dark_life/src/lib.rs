@@ -138,6 +138,8 @@ pub fn use_item(
             body.wash();
             Used::Washed(id)
         }
+        // Money and the like: carried, not used, and not spent by pressing its key.
+        ItemUse::Keep => Used::Nothing,
         ItemUse::Wear { .. } => unreachable!("handled above"),
     }
 }
