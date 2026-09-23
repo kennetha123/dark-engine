@@ -46,6 +46,12 @@ impl Land {
         Self { seed }
     }
 
+    /// The number this land was made from. What grows on it is worked out from the same one
+    /// (docs/PLAN.md §24.5).
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
     /// What one tile is: level ground, a rise of one to three steps, or water.
     pub fn cell(&self, col: i64, row: i64) -> Cell {
         let height = self.height(col, row);

@@ -65,8 +65,20 @@ pub struct Map {
     /// What makes this map's land, where it is made rather than drawn (docs/PLAN.md §24.4).
     /// Each map has its own, from its own seed.
     pub land: Option<dark_land::Land>,
-    /// Props exactly as placed; the view draws these same props.
+    /// Props exactly as placed; the view draws these same props. What *grows* on made land is
+    /// not here: it is worked out from the seed a tile at a time (docs/PLAN.md §24.5).
     pub props: Vec<PlacedProp>,
+    /// Where the footprints of what grew on each patch of made land are held, so they can be
+    /// taken away again when that patch is let go of. Keyed by the patch's first tile.
+    pub grown: HashMap<(i64, i64), Vec<u32>>,
+    /// Everywhere props and growth must keep clear of that this map does not say itself: where
+    /// other maps' ways out arrive, and the posts of the people this map places. A player coming
+    /// through a door must not arrive inside a tree.
+    pub arrivals: Vec<(f32, f32)>,
+    /// How many colliders this map was built with, before anything grew on it. They are the
+    /// first ones and are never taken away, so whoever holds their numbers — the view's picture
+    /// of the map — may hold them safely; a grown one's number is given back and used again.
+    pub built_colliders: u32,
     pub collision: World,
     pub exits: Vec<Exit>,
 }
@@ -129,50 +141,29 @@ impl Maps {
                 .map_err(|(name, message)| invalid(project, &name, message))?;
             maps.push(map);
         }
-        // Land made from a seed is shaped around every place the scene puts somebody before
-        // those places are looked at: a spawn, an arrival, a villager's post, an enemy's, an
-        // inn's bed. Otherwise they are all checked against level ground that does not exist
-        // yet, and the first player to walk near turns it into a lake under their feet (§24.4).
-        for (nth, map) in maps.iter_mut().enumerate() {
-            let Some(land) = map.land else {
+        // On made land, where the scene puts people may be under water. That is settled first,
+        // while nothing has been made: a made world has no say in where a scene puts people, and
+        // refusing to load would be honest and useless (§24.4). Only what the engine must place
+        // to be playable at all is moved; a villager or an enemy the scene put in a lake is still
+        // refused, because that is a scene to fix, not a spawn to nudge.
+        for map in maps.iter_mut() {
+            let (Some(land), Some(player)) = (map.land, map.def.player.as_mut()) else {
                 continue;
             };
-            let places = map
-                .def
-                .player
-                .iter()
-                .map(|player| player.spawn)
-                .chain(map.def.npcs.iter().flat_map(|npc| {
-                    std::iter::once(npc.position).chain(npc.day.iter().map(|entry| entry.at))
-                }))
-                .chain(map.def.enemies.iter().map(|enemy| enemy.position))
-                .chain(map.def.inns.iter().map(|inn| inn.bed))
-                .chain(arrivals[nth].iter().copied())
-                .collect::<Vec<_>>();
-            for at in places {
-                crate::land::shape_around(&mut map.collision.terrain, &land, Vec2::from(at));
-            }
-            // Where the land made a lake of the place the player starts, the shore is used
-            // instead. A made world has no say in where a scene puts people, and refusing to load
-            // would be honest and useless (§24.4). Only what the engine must place to be playable
-            // at all is moved; a villager or an enemy the scene put in a lake is still refused,
-            // because that is a scene to fix, not a spawn to nudge.
-            if let Some(player) = &mut map.def.player {
-                let at = Vec2::from(player.spawn);
-                if let Some(dry) =
-                    crate::land::dry_ground_near(&mut map.collision, &land, at, SPAWN_CHECK_RADIUS)
-                    && dry != at
-                {
-                    tracing::info!(
-                        "{}: the player's start was under water, so it is {dry}",
-                        map.name
-                    );
-                    player.spawn = (dry.x, dry.y);
-                }
+            let at = Vec2::from(player.spawn);
+            if let Some(dry) =
+                crate::land::dry_ground_near(&map.collision, &land, at, SPAWN_CHECK_RADIUS)
+                && dry != at
+            {
+                tracing::info!(
+                    "{}: the player's start was under water, so it is {dry}",
+                    map.name
+                );
+                player.spawn = (dry.x, dry.y);
             }
         }
         // The same for where a way out arrives: an arrival is written in the map it leaves from,
-        // so it is moved once the map it leads to has been made.
+        // so it is moved by asking the map it leads to.
         for nth in 0..maps.len() {
             for which in 0..maps[nth].exits.len() {
                 let to = maps[nth].exits[which].to.0 as usize;
@@ -181,7 +172,7 @@ impl Maps {
                     continue;
                 };
                 let dry = crate::land::dry_ground_near(
-                    &mut maps[to].collision,
+                    &maps[to].collision,
                     &land,
                     at,
                     SPAWN_CHECK_RADIUS,
@@ -195,7 +186,41 @@ impl Maps {
                     );
                     maps[nth].exits[which].spawn = dry;
                     maps[nth].def.exits[which].spawn = (dry.x, dry.y);
+                    // The map it leads to keeps clear of where people arrive, so it must be told
+                    // where that is now (§24.5).
+                    if let Some(place) = maps[to]
+                        .arrivals
+                        .iter_mut()
+                        .find(|place| Vec2::from(**place) == at)
+                    {
+                        *place = (dry.x, dry.y);
+                    }
                 }
+            }
+        }
+        // Only now is the land made, around where people will actually be: a spawn, an arrival, a
+        // villager's post, an enemy's, an inn's bed. Making it earlier would check them against
+        // ground that moved afterwards, and would grow a wood around a start nobody uses.
+        for (nth, map) in maps.iter_mut().enumerate() {
+            if map.land.is_none() {
+                continue;
+            }
+            let places = map
+                .def
+                .player
+                .iter()
+                .map(|player| player.spawn)
+                .chain(map.def.npcs.iter().flat_map(|npc| {
+                    std::iter::once(npc.position).chain(npc.day.iter().map(|entry| entry.at))
+                }))
+                .chain(map.def.enemies.iter().map(|enemy| enemy.position))
+                .chain(map.def.inns.iter().map(|inn| inn.bed))
+                .chain(arrivals[nth].iter().copied())
+                .collect::<Vec<_>>();
+            for at in places {
+                // The land, and what grows on it, in one call: a patch is only ever made once, so
+                // ground made by a pass that did not plant would stay bare for ever (§24.5).
+                map.make_around(Vec2::from(at));
             }
         }
         validate_spawns(&maps).map_err(|(name, message)| invalid(project, &name, message))?;
@@ -355,7 +380,16 @@ fn build_map(
         });
         flat && level_ok
     };
-    let props = def.placed_props(crate::SPAWN_CLEARING, arrivals, accept);
+    // A map drawn by hand has its scatter groups strewn over it once, here, where the whole map
+    // is known. A *made* map cannot: it has no end to strew things over, and the ground does not
+    // exist yet. There its scatter groups say what **grows** instead, worked out from the seed a
+    // patch at a time as the land is made (docs/PLAN.md §24.5), so only what the scene placed by
+    // hand is put down now.
+    let props = if def.land.is_some() {
+        def.props.clone()
+    } else {
+        def.placed_props(crate::SPAWN_CLEARING, arrivals, accept)
+    };
     for prop in &props {
         let at = Vec2::from(prop.position);
         let base = collision.ground_under(at, 0.5);
@@ -386,6 +420,9 @@ fn build_map(
         name,
         def,
         props,
+        grown: HashMap::new(),
+        arrivals: arrivals.to_vec(),
+        built_colliders: collision.collider_places(),
         collision,
         exits,
     })
@@ -709,7 +746,7 @@ pub(crate) mod tests {
         assert_eq!(maps.get(MapId(0)).exits[0].to, MapId(1));
         assert_eq!(maps.get(MapId(1)).exits[0].to, MapId(0));
         let a = &maps.get(MapId(0)).collision;
-        assert_eq!(a.colliders().len(), 1);
+        assert_eq!(a.colliders().count(), 1);
         assert_eq!(a.ground_under(Vec2::new(136.0, 40.0), 1.0), 16.0);
     }
 

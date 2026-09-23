@@ -26,6 +26,9 @@ const PIECE: f32 = 256.0;
 const PER_PIECE: u64 = 1 << 20;
 /// Where the things standing on the land begin, after every piece's land.
 const PROPS_FROM: u64 = 1 << 50;
+/// And where what *grew* on it begins, after the props a scene placed by hand. Its own range,
+/// because a grown thing is numbered by where it stands rather than by its place in a list.
+const GROWN_FROM: u64 = 1 << 53;
 /// And where the ways out begin, after those.
 const EXITS_FROM: u64 = 1 << 55;
 
@@ -218,6 +221,10 @@ impl MapView {
             return;
         }
         let terrain = &world.map.collision.terrain;
+        // What grows in a patch is worked out once for all the pieces that stand on it: a patch
+        // is 64 tiles and a piece 16, so sixteen pieces would otherwise ask the same question and
+        // throw away fifteen sixteenths of every answer (§24.5).
+        let mut grown: HashMap<(i64, i64), Vec<dark_world::Grown>> = HashMap::new();
         for nth in self.reach(min - Vec2::ONE, max + Vec2::ONE) {
             // A piece whose land has been made — or let go of — since it was made is made again;
             // the rest are left alone, however much of the map has been shaped elsewhere.
@@ -233,7 +240,7 @@ impl MapView {
                 self.made.retain(|held| *held != nth);
             }
             if matches!(self.pieces.get(nth), Some(None)) {
-                self.make(nth, world);
+                self.make(nth, world, &mut grown);
             }
         }
         while self.made.len() > KEPT {
@@ -407,7 +414,10 @@ impl MapView {
                 view.belongs(&mut props, nth, &sprite, PROPS_FROM, false);
             }
         }
-        for nth in 0..map.collision.colliders().len() {
+        // Only the colliders the map was built with. What grows on made land comes and goes,
+        // and its number is given back and used again (§24.5), so a picture that held one would
+        // later draw a footprint belonging to something a kilometre away.
+        for nth in 0..map.built_colliders as usize {
             let sprite = view
                 .recipe
                 .as_ref()
@@ -464,7 +474,12 @@ impl MapView {
     }
 
     /// Makes one piece: the land in it, and the things standing on that land.
-    fn make(&mut self, nth: usize, world: &Scenery) {
+    fn make(
+        &mut self,
+        nth: usize,
+        world: &Scenery,
+        grown: &mut HashMap<(i64, i64), Vec<dark_world::Grown>>,
+    ) {
         let Some(recipe) = &self.recipe else {
             return;
         };
@@ -486,6 +501,60 @@ impl MapView {
                     piece.take(place, sprite, overlay);
                     place += 1;
                 });
+            }
+        }
+        // What grows on made land is not in the map's list of props: it is worked out from the
+        // seed, the same way the ground it stands on is (docs/PLAN.md §24.5). A piece asks for
+        // what grows in the patches it covers, and keeps only what shows here.
+        if world.map.land.is_some() {
+            let patch = i64::from(dark_physics::Terrain::PATCH);
+            let (first, last) = (
+                (from_col.div_euclid(patch), from_row.div_euclid(patch)),
+                (to_col.div_euclid(patch), to_row.div_euclid(patch)),
+            );
+            for patch_row in first.1..=last.1 {
+                for patch_col in first.0..=last.0 {
+                    // Nothing is drawn on land that has not been made: its footprints are not in
+                    // the collision world yet, and a wood a body can walk through is worse than
+                    // bare ground. The piece is made again when its land is (§24.4).
+                    let (Ok(at_col), Ok(at_row)) = (
+                        u32::try_from(patch_col * patch),
+                        u32::try_from(patch_row * patch),
+                    ) else {
+                        continue;
+                    };
+                    if !terrain.is_made(at_col, at_row) {
+                        continue;
+                    }
+                    let here = grown
+                        .entry((patch_col * patch, patch_row * patch))
+                        .or_insert_with(|| {
+                            world
+                                .map
+                                .grown_in_patch(patch_col * patch, patch_row * patch)
+                        })
+                        .clone();
+                    for one in here {
+                        let (col, row) = terrain.tile_of(one.at);
+                        if !(from_col..=to_col).contains(&col)
+                            || !(from_row..=to_row).contains(&row)
+                        {
+                            continue;
+                        }
+                        // Where it stands is its place in the drawing order, so what is drawn
+                        // never depends on when a piece happened to be made.
+                        let place = grown_place(&one);
+                        if let Some(sprite) = grown_sprite(world, &one) {
+                            piece.take(place, sprite, false);
+                        }
+                        // Its footprint for the overlay, worked out here rather than looked up:
+                        // what grows is not in the map's built list of colliders, and a piece
+                        // must show what a body will walk into.
+                        if let Some(sprite) = grown_overlay(world, recipe, &one) {
+                            piece.take(place, sprite, true);
+                        }
+                    }
+                }
             }
         }
         let which = nth as u32;
@@ -754,10 +823,51 @@ fn prop_sprite(world: &Scenery, nth: usize) -> Option<Sprite> {
     Some(sprite)
 }
 
+/// Where something grown stands in the drawing order: its own place in the world, so every
+/// piece and every machine gives it the same one. Ties by `sort_y` are broken the same way
+/// everywhere, which is all this number is for.
+fn grown_place(grown: &dark_world::Grown) -> u64 {
+    let part = |n: f32| (n as i64).rem_euclid(1 << 21) as u64;
+    GROWN_FROM + (part(grown.at.y) << 21) + part(grown.at.x)
+}
+
+/// What grew on made land, drawn as the props beside it are: standing on the ground, sorted by
+/// where its feet are.
+fn grown_sprite(world: &Scenery, grown: &dark_world::Grown) -> Option<Sprite> {
+    let (sheet, frame) = world.map.grown_look(grown)?;
+    let looks = world.sheets.get(sheet)?;
+    let Some(frame) = looks.sheet.frames.get(frame as usize) else {
+        tracing::warn!("{sheet}: no frame {}", grown.frame);
+        return None;
+    };
+    let ground = world.map.ground_of(grown.at);
+    let mut sprite = Sprite::new(
+        *world.textures.get(sheet)?,
+        frame.rect,
+        grown.at - Vec2::new(0.0, ground),
+        frame.pivot,
+    );
+    sprite.sort_y = grown.at.y;
+    Some(sprite)
+}
+
+/// The footprint of something that grew on made land, for the debug overlay, drawn as the props
+/// beside it are.
+fn grown_overlay(world: &Scenery, recipe: &Recipe, grown: &dark_world::Grown) -> Option<Sprite> {
+    let group = world.map.def.scatter.get(grown.group)?;
+    let collider = grown.collider(group, world.map.ground_of(grown.at))?;
+    Some(footprint_sprite(&collider, recipe))
+}
+
 /// A prop's footprint, for the debug overlay. Orange blocks at any height; cyan is low enough to
 /// jump over or stand on.
 fn collider_sprite(world: &Scenery, recipe: &Recipe, nth: usize) -> Option<Sprite> {
-    let c = world.map.collision.colliders().get(nth)?;
+    let c = world.map.collision.collider(nth as u32)?;
+    Some(footprint_sprite(c, recipe))
+}
+
+/// One footprint drawn: orange blocks at any height, cyan is low enough to jump over or stand on.
+fn footprint_sprite(c: &dark_physics::Collider, recipe: &Recipe) -> Sprite {
     let (half, outline) = match c.shape {
         Shape::Circle { radius } => (Vec2::splat(radius), Outline::Circle),
         Shape::Rect { half } => (half, Outline::Rect),
@@ -767,13 +877,13 @@ fn collider_sprite(world: &Scenery, recipe: &Recipe, nth: usize) -> Option<Sprit
     } else {
         [1.0, 0.6, 0.0, 0.9]
     };
-    Some(Sprite::outline(
+    Sprite::outline(
         recipe.white,
         outline,
         c.center - half - Vec2::new(0.0, c.base),
         half * 2.0,
         color,
-    ))
+    )
 }
 
 /// The pieces between two grid lines, inside a map that has `many` of them.

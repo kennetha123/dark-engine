@@ -86,7 +86,10 @@ The country a seed makes, from far above (it also says where the ground changes 
 cargo run -p dark-cli -- preview-land 20260923 16000 20 out.png
 ```
 A map made from a seed rather than drawn says `land: (seed: n)` in its scene, and each such scene
-carries its own seed. The land around each player is shaped as they walk and let go of once nobody
+carries its own seed. Its `scatter` groups then say what *grows* on it rather than being strewn
+over it once at load: `count` is how many of that group belong in each patch of land (64 tiles a
+side), and what grows is worked out from the seed as the land is made, so every machine grows the
+same wood. The land around each player is shaped as they walk and let go of once nobody
 is near it; what the scene draws by hand is kept tile for tile (`Floor` says nothing — level made
 ground on purpose with `Level(0)`), and a start or a doorway the land put under water is moved to
 the nearest ground somebody can stand on.

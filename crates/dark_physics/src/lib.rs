@@ -134,13 +134,33 @@ impl Grid {
     }
 
     fn put(&mut self, nth: u32, collider: &Collider) {
-        let half = match collider.shape {
-            Shape::Circle { radius } => Vec2::splat(radius),
-            Shape::Rect { half } => half,
-        };
+        let half = Self::half_of(collider);
         self.reach = self.reach.max(half.min_element());
         for square in Self::over(collider.center - half, collider.center + half) {
             self.squares.entry(square).or_default().push(nth);
+        }
+    }
+
+    /// Takes a collider out of every square it was put in. `reach` is left as it was: it only
+    /// says how far a query must look, and looking a little further than needed is right where
+    /// forgetting to look far enough is not.
+    fn take(&mut self, nth: u32, collider: &Collider) {
+        let half = Self::half_of(collider);
+        for square in Self::over(collider.center - half, collider.center + half) {
+            if let Some(here) = self.squares.get_mut(&square) {
+                here.retain(|&held| held != nth);
+                if here.is_empty() {
+                    self.squares.remove(&square);
+                }
+            }
+        }
+    }
+
+    /// How far a collider reaches from its middle, each way.
+    fn half_of(collider: &Collider) -> Vec2 {
+        match collider.shape {
+            Shape::Circle { radius } => Vec2::splat(radius),
+            Shape::Rect { half } => half,
         }
     }
 
@@ -163,7 +183,12 @@ impl Grid {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct World {
     pub terrain: Terrain,
-    colliders: Vec<Collider>,
+    /// Props' footprints, each in a place of its own so that one can be taken away without
+    /// renaming the others: the grid, and anything else that has asked, hold these numbers.
+    colliders: Vec<Option<Collider>>,
+    /// Places whose collider has been taken away, ready for the next one.
+    #[serde(default)]
+    free: Vec<u32>,
     grid: Grid,
 }
 
@@ -172,26 +197,68 @@ impl World {
         Self {
             terrain,
             colliders: Vec::new(),
+            free: Vec::new(),
             grid: Grid::default(),
         }
     }
 
-    /// Adds a prop's footprint. The grid is kept as they arrive, so no query can find a stale one.
-    pub fn add(&mut self, collider: Collider) {
-        self.grid.put(self.colliders.len() as u32, &collider);
-        self.colliders.push(collider);
+    /// Adds a prop's footprint and says where it is held, so it can be taken away again. The
+    /// grid is kept as they arrive, so no query can find a stale one.
+    ///
+    /// A place left by a collider that has been taken away is used again before the list grows:
+    /// what grows on made land comes and goes with the land it grows on (docs/PLAN.md §24.5), and
+    /// a world walked across for an hour would otherwise hold a list of every tree ever seen.
+    pub fn add(&mut self, collider: Collider) -> u32 {
+        let nth = match self.free.pop() {
+            Some(nth) => {
+                self.colliders[nth as usize] = Some(collider);
+                nth
+            }
+            None => {
+                self.colliders.push(Some(collider));
+                self.colliders.len() as u32 - 1
+            }
+        };
+        let held = self.colliders[nth as usize]
+            .as_ref()
+            .expect("just put there");
+        self.grid.put(nth, held);
+        nth
     }
 
-    /// Every collider in the map, for drawing them and for counting them.
-    pub fn colliders(&self) -> &[Collider] {
-        &self.colliders
+    /// Takes a collider away: out of the grid, and its place kept for the next one.
+    pub fn remove(&mut self, nth: u32) {
+        let Some(gone) = self.colliders.get_mut(nth as usize).and_then(Option::take) else {
+            return;
+        };
+        self.grid.take(nth, &gone);
+        self.free.push(nth);
+    }
+
+    /// Every collider in the map with where it is held, for drawing them and for counting them.
+    pub fn colliders(&self) -> impl Iterator<Item = (u32, &Collider)> {
+        self.colliders
+            .iter()
+            .enumerate()
+            .filter_map(|(nth, held)| held.as_ref().map(|c| (nth as u32, c)))
+    }
+
+    /// One collider by where it is held, if anything is held there.
+    pub fn collider(&self, nth: u32) -> Option<&Collider> {
+        self.colliders.get(nth as usize).and_then(Option::as_ref)
+    }
+
+    /// How many places the list of colliders has, held or free. Whoever walks them by number
+    /// walks this far.
+    pub fn collider_places(&self) -> u32 {
+        self.colliders.len() as u32
     }
 
     /// The colliders whose footprint a circle overlaps, in the order they were added.
     pub fn overlapping(&self, center: Vec2, radius: f32) -> impl Iterator<Item = &Collider> {
         self.near(center, radius)
             .into_iter()
-            .map(|nth| &self.colliders[nth as usize])
+            .filter_map(|nth| self.collider(nth))
             .filter(move |c| penetration(c, center, radius).is_some())
     }
 
@@ -199,7 +266,7 @@ impl World {
     fn near(&self, center: Vec2, radius: f32) -> Vec<u32> {
         #[cfg(test)]
         if self.grid.everything {
-            return (0..self.colliders.len() as u32).collect();
+            return self.colliders().map(|(nth, _)| nth).collect();
         }
         self.grid
             .near(center - Vec2::splat(radius), center + Vec2::splat(radius))
@@ -338,8 +405,10 @@ impl World {
             let mut props = self.blocking(from, r, slack, feet, params);
             let mut nth = 0;
             while nth < props.len() {
-                let collider = &self.colliders[props[nth] as usize];
-                if let Some(push) = penetration(collider, next, r) {
+                if let Some(push) = self
+                    .collider(props[nth])
+                    .and_then(|collider| penetration(collider, next, r))
+                {
                     next += push;
                 }
                 nth += 1;
@@ -393,7 +462,7 @@ impl World {
     ) -> Option<&Collider> {
         self.near(center, radius)
             .into_iter()
-            .map(|nth| &self.colliders[nth as usize])
+            .filter_map(|nth| self.collider(nth))
             .filter(|c| c.base + c.height <= feet + params.step_up)
             .filter(|c| penetration(c, center, radius).is_some())
             .max_by(|a, b| (a.base + a.height).total_cmp(&(b.base + b.height)))
@@ -445,8 +514,8 @@ impl World {
     ) -> Vec<u32> {
         let mut near = self.near(center, radius + slack);
         near.retain(|&nth| {
-            let c = &self.colliders[nth as usize];
-            feet < c.base + c.height && feet + params.step_up >= c.base
+            self.collider(nth)
+                .is_some_and(|c| feet < c.base + c.height && feet + params.step_up >= c.base)
         });
         near
     }
@@ -455,7 +524,7 @@ impl World {
     fn prop_overlap(&self, center: Vec2, radius: f32, feet: f32, params: &MoveParams) -> f32 {
         self.blocking(center, radius, 0.0, feet, params)
             .into_iter()
-            .filter_map(|nth| penetration(&self.colliders[nth as usize], center, radius))
+            .filter_map(|nth| penetration(self.collider(nth)?, center, radius))
             .map(Vec2::length)
             .sum()
     }
@@ -690,6 +759,71 @@ mod tests {
         w
     }
 
+    /// A collider taken away is gone from every query, its place is used again, and the props
+    /// that stayed answer exactly as they did before — by the same numbers.
+    ///
+    /// What grows on made land comes and goes with the land it grows on (§24.5), so this happens
+    /// while people are standing on it. A stale number left in the grid would be a tree nobody
+    /// can see and nobody can walk through.
+    #[test]
+    fn a_prop_taken_away_is_gone_from_every_query_and_its_place_is_used_again() {
+        let params = MoveParams::default();
+        let mut w = scattered(512.0, 60);
+        let before: Vec<(u32, Collider)> = w.colliders().map(|(nth, c)| (nth, *c)).collect();
+        let asked: Vec<Vec2> = (0..40)
+            .map(|n| Vec2::new((n % 8) as f32 * 64.0, (n / 8) as f32 * 64.0))
+            .collect();
+        let answers = |w: &World| -> Vec<Vec<u32>> {
+            asked
+                .iter()
+                .map(|at| {
+                    w.blocking(*at, 8.0, 0.0, 0.0, &params)
+                        .into_iter()
+                        .collect()
+                })
+                .collect()
+        };
+        let was = answers(&w);
+
+        // Half of them go.
+        let gone: Vec<u32> = before
+            .iter()
+            .filter(|(nth, _)| nth % 2 == 0)
+            .map(|(nth, _)| *nth)
+            .collect();
+        for nth in &gone {
+            w.remove(*nth);
+        }
+        assert_eq!(w.colliders().count(), before.len() - gone.len());
+        for nth in &gone {
+            assert!(w.collider(*nth).is_none(), "{nth} is still held");
+        }
+        for (at, was) in asked.iter().zip(&was) {
+            let now = w.blocking(*at, 8.0, 0.0, 0.0, &params);
+            let kept: Vec<u32> = was.iter().copied().filter(|n| n % 2 == 1).collect();
+            assert_eq!(now, kept, "what is left at {at} is what was not taken away");
+        }
+
+        // Their places are used again rather than the list growing, and the new props answer.
+        let places = w.collider_places();
+        let mut back = Vec::new();
+        for n in 0..gone.len() {
+            back.push(w.add(Collider {
+                center: Vec2::new(16.0 + n as f32 * 3.0, 16.0),
+                shape: Shape::Circle { radius: 6.0 },
+                base: 0.0,
+                height: 32.0,
+            }));
+        }
+        // Every one of them landed in a place something had left.
+        assert!(back.iter().all(|nth| gone.contains(nth)), "{back:?}");
+        assert_eq!(w.collider_places(), places, "the list did not grow");
+        assert_eq!(w.colliders().count(), before.len());
+        for nth in back {
+            assert!(w.collider(nth).is_some());
+        }
+    }
+
     /// The grid must answer exactly as looking at every collider in turn did — the same prop
     /// held up to, the same props overlapped, in the same order. Anything else is a body that
     /// stands somewhere different than it used to (docs/PLAN.md §24.3).
@@ -706,7 +840,7 @@ mod tests {
                     // Every collider in turn, as the world used to do it.
                     let scan: Vec<&Collider> = w
                         .colliders()
-                        .iter()
+                        .map(|(_, c)| c)
                         .filter(|c| penetration(c, at, radius).is_some())
                         .collect();
                     let grid: Vec<&Collider> = w.overlapping(at, radius).collect();
@@ -714,7 +848,7 @@ mod tests {
 
                     let held_by = w
                         .colliders()
-                        .iter()
+                        .map(|(_, c)| c)
                         .filter(|c| c.base + c.height <= feet + params.step_up)
                         .filter(|c| penetration(c, at, radius).is_some())
                         .max_by(|a, b| (a.base + a.height).total_cmp(&(b.base + b.height)));
@@ -900,9 +1034,9 @@ mod tests {
         let many = scattered(8192.0, 40_000);
         let asked = many.near(at, 16.0).len();
         assert!(
-            asked < many.colliders().len() / 100,
+            asked < many.colliders().count() / 100,
             "asked about {asked} of {}",
-            many.colliders().len()
+            many.colliders().count()
         );
     }
 

@@ -44,10 +44,7 @@ pub fn shape_around_players(
         let Some(map) = maps.maps.get_mut(map.0 as usize) else {
             continue;
         };
-        let Some(land) = map.land else {
-            continue;
-        };
-        shape_around(&mut map.collision.terrain, &land, body.0.position);
+        map.make_around(body.0.position);
     }
     // Then the other way about: made land nobody is near is let go of. The same seed makes the
     // same patch again, so nothing is lost by it.
@@ -64,21 +61,78 @@ pub fn shape_around_players(
             .filter(|(on, _)| *on as usize == nth)
             .map(|(_, at)| *at)
             .collect();
-        forget_far_from(&mut map.collision.terrain, &here);
+        map.forget_far_from(&here);
     }
 }
 
-/// Lets go of the made land none of `standing` is near, on the terms the whole game uses: a host
-/// does this for every player on a map, and a client for the one player it is predicting.
-///
-/// A map with nobody on it keeps nothing, which is what a map a party has left should cost.
-pub fn forget_far_from(terrain: &mut Terrain, standing: &[Vec2]) {
-    let near: Vec<(i64, i64)> = standing.iter().map(|at| terrain.tile_of(*at)).collect();
-    terrain.forget_far(&near, KEEP_NEAR, KEPT);
+impl crate::maps::Map {
+    /// Makes the land around a place, and grows what stands on it: the patches within [`AHEAD`]
+    /// that have not been made yet. A map drawn by hand has no land of its own and is left alone.
+    ///
+    /// The two go together on purpose. Ground that exists with nothing on it, waiting for a
+    /// second pass to plant the trees, is ground a player can walk through a wood on.
+    pub fn make_around(&mut self, at: Vec2) {
+        let Some(land) = self.land else {
+            return;
+        };
+        let patch = i64::from(Terrain::PATCH);
+        let (col, row) = self.collision.terrain.tile_of(at);
+        let (patch_col, patch_row) = (col.div_euclid(patch), row.div_euclid(patch));
+        for down in -AHEAD..=AHEAD {
+            for across in -AHEAD..=AHEAD {
+                let (c, r) = ((patch_col + across) * patch, (patch_row + down) * patch);
+                if c < 0 || r < 0 {
+                    continue;
+                }
+                let (Ok(uc), Ok(ur)) = (u32::try_from(c), u32::try_from(r)) else {
+                    continue;
+                };
+                if self.collision.terrain.is_made(uc, ur) {
+                    continue;
+                }
+                self.collision
+                    .terrain
+                    .shape(uc, ur, |col, row| land.cell(col, row));
+                let grown = self.grow_patch(c, r);
+                if !grown.is_empty() {
+                    self.grown.insert((c, r), grown);
+                }
+            }
+        }
+    }
+
+    /// Lets go of the made land none of `standing` is near, and of everything that grew on it, on
+    /// the terms the whole game uses: a host does this for every player on a map, and a client
+    /// for the one player it is predicting.
+    ///
+    /// A map with nobody on it keeps nothing, which is what a map a party has left should cost.
+    pub fn forget_far_from(&mut self, standing: &[Vec2]) {
+        if self.land.is_none() {
+            return;
+        }
+        let near: Vec<(i64, i64)> = standing
+            .iter()
+            .map(|at| self.collision.terrain.tile_of(*at))
+            .collect();
+        for (col, row) in self.collision.terrain.forget_far(&near, KEEP_NEAR, KEPT) {
+            let Some(held) = self.grown.remove(&(i64::from(col), i64::from(row))) else {
+                continue;
+            };
+            for nth in held {
+                self.collision.remove(nth);
+            }
+        }
+    }
 }
 
-/// Shapes the patches within [`AHEAD`] of a place.
-pub fn shape_around(terrain: &mut Terrain, land: &Land, at: Vec2) {
+/// Shapes the patches within [`AHEAD`] of a place — the ground alone.
+///
+/// The game never calls this: it calls [`crate::maps::Map::make_around`], which makes the land
+/// *and* grows what stands on it. A patch is only ever made once, so ground made here would hold
+/// no trees for the rest of the session while the drawing showed them (§24.5). This is left for
+/// the tests that are about the ground itself, and for nothing else.
+#[cfg(test)]
+fn shape_around(terrain: &mut Terrain, land: &Land, at: Vec2) {
     let patch = i64::from(Terrain::PATCH);
     let (col, row) = terrain.tile_of(at);
     let (patch_col, patch_row) = (col.div_euclid(patch), row.div_euclid(patch));
@@ -122,13 +176,18 @@ const WAYS: [(i64, i64); 8] = [
 ///
 /// Made land has no say in where a scene puts people, so a spawn or a doorway can land in a lake
 /// (docs/PLAN.md §24.4). Refusing to load the map would be honest and useless; this finds the
-/// shore instead. The looking asks [`Land`] about tiles rather than the terrain, so it costs no
-/// shaping — only what is settled on is shaped and then tested for real, props and all.
+/// shore instead.
+///
+/// **This changes nothing.** It asks [`Land`] about tiles rather than making them, so a search
+/// across two lattices costs no ground and, more to the point, leaves no patch made. Making a
+/// patch means growing on it too (§24.5), and a patch is only ever made once — a search that
+/// made land as it went would leave a wood with no collision in it behind every shore it looked
+/// at, and would plant that wood around the *old* place before the new one was chosen.
 ///
 /// `None` if nowhere within [`LOOK_WITHIN`] and on the map can be stood on, and then the map is
 /// refused as before: a scene whose every way out opens into a sea is a scene to fix.
 pub fn dry_ground_near(
-    world: &mut dark_physics::World,
+    world: &dark_physics::World,
     land: &Land,
     at: Vec2,
     radius: f32,
@@ -160,7 +219,6 @@ pub fn dry_ground_near(
     };
     let (from_col, from_row) = world.terrain.tile_of(at);
     if stands(world, from_col, from_row) {
-        shape_around(&mut world.terrain, land, at);
         return Some(at);
     }
     let (cols, rows) = (
@@ -175,10 +233,7 @@ pub fn dry_ground_near(
                 continue;
             }
             if stands(world, col, row) {
-                // Only what is settled on is shaped.
-                let found = (Vec2::new(col as f32, row as f32) + 0.5) * tile;
-                shape_around(&mut world.terrain, land, found);
-                return Some(found);
+                return Some((Vec2::new(col as f32, row as f32) + 0.5) * tile);
             }
         }
     }
@@ -370,7 +425,7 @@ mod tests {
             "{wanted} was meant to be water"
         );
 
-        let found = dry_ground_near(&mut world, &land, wanted, 6.0).expect("a shore somewhere");
+        let found = dry_ground_near(&world, &land, wanted, 6.0).expect("a shore somewhere");
         assert!(
             world.ground_under(found, 6.0).is_finite(),
             "somewhere to stand"
@@ -381,7 +436,7 @@ mod tests {
             found.distance(wanted)
         );
         // Ground that can already be stood on is left exactly where it was.
-        assert_eq!(dry_ground_near(&mut world, &land, found, 6.0), Some(found));
+        assert_eq!(dry_ground_near(&world, &land, found, 6.0), Some(found));
     }
 
     /// Walking shapes the land ahead, and the land already walked is left as it was made.

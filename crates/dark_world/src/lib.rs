@@ -16,6 +16,7 @@ mod client;
 mod combat;
 mod crowd;
 mod drops;
+pub mod grow;
 pub mod land;
 mod life;
 mod maps;
@@ -36,6 +37,7 @@ pub use characters::{
 pub use client::{ClientSession, DrawCharacter, INTERPOLATION_DELAY};
 pub use combat::{CORPSE_TICKS, CombatPlugin, Dormant, Fight, Hostile, PLAYER_RESPAWN_TICKS, Post};
 pub use drops::{DropSnapshot, Dropped, drops_in};
+pub use grow::Grown;
 pub use life::{
     FIRE_REACH, Life, LifePlugin, LifeRules, LifeView, NightPass, Placed, StructureSnapshot,
     TENT_REACH, life_of, structures_in,

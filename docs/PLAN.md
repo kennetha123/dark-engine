@@ -1235,14 +1235,17 @@ everything the world holds:
   makes the same patch again, tile for tile. Without this a map only grew — **measured** at 0.4 ms
   and 8 KB a patch, a player running makes some 3 000 patches an hour, so an evening of four
   players would have held a few hundred megabytes of ground nobody was standing on.
-- **What shaping costs, measured** (release build, this machine): 0.4 ms a patch. Walking makes
-  five patches at a time when a player crosses into the next one — a **2.8 ms** tick, about once
-  every five seconds of running, against a 16.6 ms budget — and the 25 patches of arriving
-  somewhere new cost 10 ms, which happens at map load, not in a tick. So the shaping is done in
-  `FixedUpdate` where it is asked for, and worker threads are not needed yet. They become the
-  answer when §24.5 puts trees, rivers and roads on the land and a patch costs more than a tick
-  can spare; the shape of the code (a patch at a time, made from a seed, never twice) is what
-  makes that a change of scheduling rather than a change of design.
+- **What making the land costs, measured** (release build, this machine): 0.4 ms a patch of
+  ground. Walking makes five patches at a time when a player crosses into the next one — a
+  **2.98 ms** tick with bare ground, about once every five seconds of running, against a 16.6 ms
+  budget — and the 25 patches of arriving somewhere new cost 10 ms, which happens at map load,
+  not in a tick. **Growing a wood on it as well** (§24.5, three groups: trees, rocks, grass)
+  takes that worst tick to **3.49 ms** and the average step from 126 µs to 151 µs — half a
+  millisecond for everything standing on the ground. So it is all done in `FixedUpdate` where it
+  is asked for, and worker threads are still not needed. They become the answer when rivers,
+  roads and towns are on the land too and a patch costs more than a tick can spare; the shape of
+  the code (a patch at a time, made from a seed, never twice) is what makes that a change of
+  scheduling rather than a change of design.
 - **Where a scene puts people, the land may have put a lake.** A start or an arrival that cannot
   be stood on is moved to the nearest ground that can be, looked for by asking the land itself
   rather than by shaping it — eight ways out, a tile at a time, as far as two coarse lattices —
@@ -1257,9 +1260,8 @@ everything the world holds:
   see what a seed made.
 - Known gaps here: only the land's shape is made. What grows on it (trees, rocks, grass), where
   the roads and rivers run, and where anyone lives are still §24.5's work, so a made world is at
-  present a country with nothing in it — and a scene's scattered props are placed before the land
-  is made, so they would fall in lakes, and the clearing kept around a start is worked out before
-  a start in water is moved; scatter on made land belongs with §24.5 too. The **editor** draws a
+  present a country with trees, rocks and grass on it (§24.5) but nobody living in it. The
+  clearing kept around a start is still worked out before a start in water is moved. The **editor** draws a
   made map as the flat ground it is before anyone walks it, and shows a start where the scene puts
   it rather than where the game will move it. A walk around
   a large lake can also cost more than the 12 000 tiles a path is allowed (§24.3), and nothing in
@@ -1306,7 +1308,36 @@ everything the world holds:
   reads, or a built game ships without its ground.
 - `MapId` stays as it is: it is the interiors' limit, and the outdoors will not be a scene.
 
-### 24.5 Making a world by hand
+### 24.5 Making a world by hand (what grows on it: built)
+
+- **What grows on made land is worked out, not written down** (`dark_world::grow`, built). A
+  drawn map's props are strewn over it once, when it loads, and remembered; a made map cannot be,
+  because there is no end to strew things over and the ground does not exist yet. So a scene's
+  `scatter` groups say what *may* grow — which sheet, which frames, how dense, what footprint,
+  which levels it likes — and the seed says *where*, a patch of land at a time, in whole numbers.
+  Nothing is stored: the host and every client grow the same wood without a word between them,
+  and a player who walks away and comes back finds the same tree.
+- On a made map a group's **`count` is how many it wants in a patch** (64 tiles a side), because
+  a made map has no end to fill. Spacing is kept **by construction**: the world is cut into cells
+  as wide as the group's `min_spacing` and at most one thing grows in each, which is what makes
+  the question answerable a tile at a time by anyone, without knowing what grew anywhere else.
+- It comes and goes with its land. A patch's footprints go into the collision world when the
+  patch is made and are taken out again when it is let go of (§24.4), so a world walked across
+  for an hour does not hold every tree ever seen. That needed `dark_physics` to be able to **take
+  a collider away**: a place left empty is used again before the list grows, and the numbers of
+  the props that stayed never change.
+- Nothing grows in water, on ground its group does not like, in a doorway, or where the scene
+  puts somebody — and a great tree is kept further off than a tuft of grass, because what must
+  stay clear is the clearing *plus* the thing's own footprint. Otherwise a player begins the game
+  inside a trunk.
+- Making the land and growing on it are **one call** (`Map::make_around`), and nothing else may
+  make land. A patch is only ever made once, so ground made by a pass that did not plant stays
+  bare for ever while the drawing shows a wood on it — a wood a body walks straight through.
+  That is what happened at every spawn, and then again at every start the water moved, until the
+  shore search was made to change nothing at all and the making was left to one door. A test
+  holds the line: everything drawn on made land has a footprint, and every made patch has grown.
+
+**Still to come in §24.5:**
 
 - The editor gains a **world view**: the whole world as the seed makes it, zoomed out to biomes
   and roads, with the authored places marked. §24.1's minimap is the small version of the same

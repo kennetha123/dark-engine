@@ -144,6 +144,11 @@ impl DemoScene {
         for map in &maps.maps {
             paths.push(map.def.ground.sheet.clone());
             paths.extend(map.props.iter().map(|p| p.sheet.clone()));
+            // The pictures a scene's scatter groups use. On a drawn map they are in the list of
+            // props already; on a made one what grows is never in any list — it is worked out
+            // from the seed as the land is made (docs/PLAN.md §24.5) — so they are asked for
+            // here, or a wood would grow with nothing to draw it.
+            paths.extend(map.def.scatter.iter().map(|group| group.sheet.clone()));
         }
         let mut sheets = HashMap::new();
         for path in paths {

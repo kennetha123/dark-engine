@@ -158,7 +158,8 @@ impl Terrain {
     }
 
     /// Lets go of made patches that nobody is near, once more than `budget` of them are held.
-    /// Returns how many were let go.
+    /// Returns the first tile of each patch let go, so whoever put anything on that ground —
+    /// what grew there, in the first place — can take it away with it.
     ///
     /// Land made from a seed is not worth keeping: the same seed makes the same patch again, tile
     /// for tile, so a player walking back finds the hill they walked over whether or not it was
@@ -174,9 +175,9 @@ impl Terrain {
         keepers: &[(i64, i64)],
         near_patches: i64,
         budget: usize,
-    ) -> usize {
+    ) -> Vec<(u32, u32)> {
         if self.made.len() <= budget {
-            return 0;
+            return Vec::new();
         }
         let patch = i64::from(PATCH);
         let near: Vec<(i64, i64)> = keepers
@@ -197,11 +198,14 @@ impl Terrain {
                 let_go.push(made);
             }
         }
+        let mut gone = Vec::with_capacity(let_go.len());
         for made in &let_go {
             self.made.remove(made);
             self.patches[*made] = None;
+            let (col, row) = (*made as u32 % self.wide, *made as u32 / self.wide);
+            gone.push((col * PATCH, row * PATCH));
         }
-        let_go.len()
+        gone
     }
 
     /// Whether a tile was drawn by hand rather than made from the land. Whoever draws the map

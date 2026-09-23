@@ -230,13 +230,13 @@ impl ClientSession {
         if let Some(me) = &self.me {
             let map = me.map;
             let at = me.body.position;
-            if let Some(map) = self.maps.maps.get_mut(map.0 as usize)
-                && let Some(land) = map.land
-            {
-                crate::land::shape_around(&mut map.collision.terrain, &land, at);
-                // And let go of it on the same terms as the host: a client walks as far as a host
+            if let Some(map) = self.maps.maps.get_mut(map.0 as usize) {
+                // The same ground, and the same wood standing on it, as the host makes: both are
+                // worked out from the map's own seed, in whole numbers (§24.4, §24.5).
+                map.make_around(at);
+                // And let go of on the same terms as the host: a client walks as far as a host
                 // does, and holds the ground it walked over just as long.
-                crate::land::forget_far_from(&mut map.collision.terrain, &[at]);
+                map.forget_far_from(&[at]);
             }
         }
         let Some(me) = &mut self.me else {
