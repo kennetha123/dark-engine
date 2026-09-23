@@ -158,9 +158,8 @@ fn validate_spawns(maps: &[Map]) -> Result<(), (String, String)> {
         let world = &map.collision;
         world.ground_under(at, SPAWN_CHECK_RADIUS).is_finite()
             && !world
-                .colliders
-                .iter()
-                .any(|c| c.height > 0.0 && overlaps(c, at, SPAWN_CHECK_RADIUS))
+                .overlapping(at, SPAWN_CHECK_RADIUS)
+                .any(|c| c.height > 0.0)
     };
     for map in maps {
         if let Some(player) = &map.def.player {
@@ -251,16 +250,6 @@ fn validate_spawns(maps: &[Map]) -> Result<(), (String, String)> {
     Ok(())
 }
 
-pub(crate) fn overlaps(collider: &Collider, at: Vec2, radius: f32) -> bool {
-    match collider.shape {
-        Shape::Circle { radius: r } => collider.center.distance(at) < r + radius,
-        Shape::Rect { half } => {
-            let closest = at.clamp(collider.center - half, collider.center + half);
-            closest.distance(at) < radius
-        }
-    }
-}
-
 fn build_map(
     name: String,
     def: SceneDef,
@@ -299,7 +288,7 @@ fn build_map(
         let at = Vec2::from(prop.position);
         let base = collision.ground_under(at, 0.5);
         for c in &prop.colliders {
-            collision.colliders.push(Collider {
+            collision.add(Collider {
                 center: at + Vec2::from(c.offset),
                 shape: c.shape,
                 base: if base.is_finite() { base } else { 0.0 },
@@ -642,7 +631,7 @@ pub(crate) mod tests {
         assert_eq!(maps.get(MapId(0)).exits[0].to, MapId(1));
         assert_eq!(maps.get(MapId(1)).exits[0].to, MapId(0));
         let a = &maps.get(MapId(0)).collision;
-        assert_eq!(a.colliders.len(), 1);
+        assert_eq!(a.colliders().len(), 1);
         assert_eq!(a.ground_under(Vec2::new(136.0, 40.0), 1.0), 16.0);
     }
 

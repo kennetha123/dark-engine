@@ -289,9 +289,9 @@ docs/            this plan
 - Silhouettes: sprites drawn after, and overlapping, a character write their compact rank into an
   R16Float occlusion mask (max blend, soft shadows excluded); covered character bodies then draw a
   shaded blue silhouette where the mask holds a later rank. Works for any number of characters.
-- Known gaps: plateau sides are only a rim line; no slopes/stairs; collider lookup is a linear scan
-  per map (fine at hundreds, needs a grid at thousands), and so is the crowd (every character
-  against every character the host has loaded, plus a scan of the map's exits); a height
+- Known gaps: plateau sides are only a rim line; no slopes/stairs; the crowd is still every
+  character against every character the host has loaded, plus a scan of the map's exits (the
+  collider lookup was the same and is now a grid, §24.3); a height
   difference above one tile shows only one tile of north cap. Bodies that overlap while neither
   moves stay overlapped until one walks: players spawning on one spot, two arriving through the
   same door (an arrival counts as no travel), someone landing on a sleeper, and a body pressed
@@ -974,7 +974,7 @@ how many are in it out of how many it holds, `1/4` until it is `4/4` and closed.
   7777, so two games cannot be opened on one machine; the name in the list is the project's, not
   the host's own, and no password or invitation guards a game — anyone on the network can join.
 
-## 24. The open world: chunks and streaming (designed; §24.1 and §24.2 built)
+## 24. The open world: chunks and streaming (designed; §24.1, §24.2 and §24.3's first half built)
 
 The world is one continuous outdoors the player walks across without a loading screen. **How big
 is the game's choice, not the engine's** — the first game may want ten or sixteen kilometres, and
@@ -1089,20 +1089,44 @@ frame.
   than the size of the map, and it is what lets the editor zoom out. Lighting and particles (M9)
   want it first as well; a light per map-sized sprite list is the same bill again.
 
-### 24.3 Room for the simulation
+### 24.3 Room for the simulation (the grid and the budget built)
 
 The host walks every body in every loaded map each tick, and several systems are quadratic in
 everything the world holds:
 
-- **Colliders** are a linear scan per query (`dark_physics`), and one body's tick makes tens of
-  them. Props scale with area, so the scan grows with the world. It becomes a **grid keyed on the
-  tiles that already exist** — the terrain lookup beside it is already O(1). §10 has called this
-  out as a known gap since M2.
-- **Paths** are A* over the whole tile grid, exploring all of it when there is no way through
-  (`dark_world::nav`). They become chunk-local, with a **budget of nodes** and a coarse graph of
-  the ways between chunks; past the budget the walker gives up, as a routine already does.
-  The grid comes **before** the path budget: a path asks whether a tile is walkable, which asks
-  the colliders, so the two costs multiply today.
+- **Colliders** were a linear scan per query (`dark_physics`), and one body's tick makes tens of
+  them; props scale with area, so the scan grew with the world. §10 called this out as a known
+  gap in M2. Now every collider is listed in each 64 px square its footprint touches, and a query
+  asks only the squares its own footprint reaches — the terrain lookup beside it was already O(1).
+  Pushing a body out of a prop moves it while the props are being asked about, so that one query
+  looks a little beyond the footprint — the longest push any prop in the map can give — and asks
+  again if the body travels further than that.
+  - A query answers **exactly as the scan did**: candidates come back in the order they were
+    added, each named once, so what holds a body up and which prop it is pushed out of cannot
+    change. A world can be told to look at every collider in turn, as it used to, and the tests
+    play the same moves both ways: twelve thousand questions of a scattered world, forty walks
+    of sixty steps each through props that overlap, hang off the map and are wider than a square,
+    a body pushed sixty pixels along a row of props, and eight thousand knots of small props with
+    a body shoved about inside each — every one landing in the same place. The knots are what
+    find anything here: the trouble needs a prop to arrive late in a crowded place, which no case
+    anyone writes by hand will produce. Taking away either half of the asking-again — the asking,
+    or the rule that a prop the pass has gone past stays gone past — is noticed by them.
+  - The world's collider list is no longer public: props are added through it, so a grid cannot
+    go stale behind the queries' backs. What used to scan every collider — where a dropped thing
+    lands, where a tent may be pitched, where a spawn is clear, whether a companion may stand
+    behind their leader, and whether a tile can be walked — now asks the same question of what
+    is near.
+  - Measured: with the same props under the query, a map four times as wide asks about the same
+    handful; with a hundred times the props, it asks about a hundredth of them.
+- **Paths** were A* over the whole tile grid, exploring all of it when there was no way through
+  (`dark_world::nav`) — and each tile asked the colliders, so the two costs multiplied. A search
+  now has a **budget of twelve thousand tiles**, each of which costs up to sixteen questions of
+  the map. That is set above the whole tile count of any map the game has (the largest is 7 500),
+  so **today it can refuse nothing that exists**: a search that runs out has looked at more tiles
+  than the map holds. On a map far larger it will refuse a long way round — a wall with a gap at
+  its far end costs some thirty thousand tiles — and the walker then makes for its target
+  directly, as it already does when there is no way at all. Searching chunk by chunk, with a
+  coarse graph of the ways between them, is §24.4's answer; this is the bound until then.
 - **Crowds, blows and snapshots** each build a list of everyone in the world and then filter it
   by map (`crowd`, `combat`, `replication`). The crowd is the quadratic one — everyone against
   everyone; the blows are every attacker against everyone; the snapshots are every player against
@@ -1189,7 +1213,7 @@ everything the world holds:
 M10 is this section, and it splits by what needs chunks and what does not.
 
 - **First, on the maps that exist today**, changing no file format: §24.2 (drawing only what is
-  seen — **built**), then §24.3's collider grid, then its path budget. Each of these is a fault the engine
+  seen — **built**), then §24.3's collider grid and its path budget (**built**). Each of these is a fault the engine
   already has; meadow is simply small enough to hide them.
 - **Then the world itself**: §24.4 (chunks, made land, `Spot`), and with it the rest of §24.3 —
   crowds, blows, snapshots and distant people, all of which are keyed on chunks that do not exist

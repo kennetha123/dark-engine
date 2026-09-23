@@ -256,9 +256,8 @@ fn act(
             !body.0.grounded
                 || (ground - body.0.elevation).abs() > 0.5
                 || world
-                    .colliders
-                    .iter()
-                    .any(|c| c.height > 0.0 && crate::maps::overlaps(c, ahead, PLACE_RADIUS))
+                    .overlapping(ahead, PLACE_RADIUS)
+                    .any(|c| c.height > 0.0)
                 || maps.get(*map).exits.iter().any(|e| e.contains(ahead))
                 || placed
                     .iter()

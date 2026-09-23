@@ -91,11 +91,80 @@ pub struct StepEvents {
     pub fell: bool,
 }
 
+/// How wide the squares of the collider grid are, in pixels (docs/PLAN.md §24.3). A few tiles:
+/// small enough that a footprint asks about a handful of props, large enough that a prop rarely
+/// sits in many squares at once.
+const CELL: f32 = 64.0;
+
+/// Where the colliders are, so a query asks about what is near it instead of about all of them.
+/// A collider is listed in every square its footprint touches, so a square holds everything that
+/// could reach into it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+struct Grid {
+    /// Which colliders are in each square, by their place in the world's own list.
+    squares: std::collections::HashMap<(i32, i32), Vec<u32>>,
+    /// Set by a test to make every query look at every collider, as the world did before it had
+    /// a grid. Never written down: a world is the same world either way.
+    #[cfg(test)]
+    #[serde(skip)]
+    everything: bool,
+    /// The longest push any collider here can give: a body inside one leaves by its nearest
+    /// side, so it is the *narrowest* half of a box, not the widest, and a circle's radius.
+    /// It says how far beyond itself a query must look while a body is being pushed about.
+    reach: f32,
+}
+
+impl Grid {
+    /// The squares a rectangle touches. Nothing of it is asked for unless both corners are real
+    /// numbers: an infinite corner would be every square there is, which is a game that never
+    /// draws another frame. (Looking at every collider in turn answered such a question with
+    /// nonsense rather than nothing, so this is the better answer as well as the quicker one.)
+    fn over(min: Vec2, max: Vec2) -> impl Iterator<Item = (i32, i32)> {
+        let real = min.is_finite() && max.is_finite();
+        let (first, last) = if real {
+            ((min / CELL).floor(), (max / CELL).floor())
+        } else {
+            (Vec2::ZERO, Vec2::NEG_ONE)
+        };
+        let (rows, cols) = (
+            first.y as i32..=last.y as i32,
+            first.x as i32..=last.x as i32,
+        );
+        rows.flat_map(move |row| cols.clone().map(move |col| (col, row)))
+    }
+
+    fn put(&mut self, nth: u32, collider: &Collider) {
+        let half = match collider.shape {
+            Shape::Circle { radius } => Vec2::splat(radius),
+            Shape::Rect { half } => half,
+        };
+        self.reach = self.reach.max(half.min_element());
+        for square in Self::over(collider.center - half, collider.center + half) {
+            self.squares.entry(square).or_default().push(nth);
+        }
+    }
+
+    /// Everything that might reach into `min..max`, each named once and in the order they were
+    /// added, so a query answers exactly as it did when it looked at all of them in turn.
+    fn near(&self, min: Vec2, max: Vec2) -> Vec<u32> {
+        let mut near: Vec<u32> = Vec::new();
+        for square in Self::over(min, max) {
+            if let Some(here) = self.squares.get(&square) {
+                near.extend_from_slice(here);
+            }
+        }
+        near.sort_unstable();
+        near.dedup();
+        near
+    }
+}
+
 /// Collision for one map.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct World {
     pub terrain: Terrain,
-    pub colliders: Vec<Collider>,
+    colliders: Vec<Collider>,
+    grid: Grid,
 }
 
 impl World {
@@ -103,7 +172,44 @@ impl World {
         Self {
             terrain,
             colliders: Vec::new(),
+            grid: Grid::default(),
         }
+    }
+
+    /// Adds a prop's footprint. The grid is kept as they arrive, so no query can find a stale one.
+    pub fn add(&mut self, collider: Collider) {
+        self.grid.put(self.colliders.len() as u32, &collider);
+        self.colliders.push(collider);
+    }
+
+    /// Every collider in the map, for drawing them and for counting them.
+    pub fn colliders(&self) -> &[Collider] {
+        &self.colliders
+    }
+
+    /// The colliders whose footprint a circle overlaps, in the order they were added.
+    pub fn overlapping(&self, center: Vec2, radius: f32) -> impl Iterator<Item = &Collider> {
+        self.near(center, radius)
+            .into_iter()
+            .map(|nth| &self.colliders[nth as usize])
+            .filter(move |c| penetration(c, center, radius).is_some())
+    }
+
+    /// The colliders that could touch a circle at `center`.
+    fn near(&self, center: Vec2, radius: f32) -> Vec<u32> {
+        #[cfg(test)]
+        if self.grid.everything {
+            return (0..self.colliders.len() as u32).collect();
+        }
+        self.grid
+            .near(center - Vec2::splat(radius), center + Vec2::splat(radius))
+    }
+
+    /// Makes this world look at every collider in turn, as it did before it had a grid. Only for
+    /// the test that plays the same moves both ways and compares them.
+    #[cfg(test)]
+    fn scan_everything(&mut self) {
+        self.grid.everything = true;
     }
 
     /// Ground under a footprint: the highest tile it overlaps. Infinite if it overlaps a wall.
@@ -223,10 +329,36 @@ impl World {
         }
         // Push out of props whose height range the feet are inside. Two passes settle corners.
         let moved = next;
+        // How much further than its own footprint the query looks. One push is never longer than
+        // this, so a body that has moved less than it since the props were asked for cannot have
+        // come upon one that was not asked for.
+        let slack = r + self.grid.reach;
         for _ in 0..2 {
-            for collider in self.blocking(feet, params) {
+            let mut from = next;
+            let mut props = self.blocking(from, r, slack, feet, params);
+            let mut nth = 0;
+            while nth < props.len() {
+                let collider = &self.colliders[props[nth] as usize];
                 if let Some(push) = penetration(collider, next, r) {
                     next += push;
+                }
+                nth += 1;
+                // Pushed out of one prop and into the reach of others: ask again, and take in
+                // whatever is new. Each prop still pushes at most once in a pass.
+                if next.distance(from) > slack {
+                    from = next;
+                    // Only props the pass has not gone past yet. One it went past cannot have
+                    // been missed: the body had moved less than the slack when its turn came, so
+                    // it was in that asking, and it was passed over because nothing touched it.
+                    // Letting it back in now would push out of a prop a full scan walked past.
+                    let done = props[..nth].iter().copied().max().unwrap_or(0);
+                    let more = self.blocking(from, r, slack, feet, params);
+                    let fresh: Vec<u32> = more
+                        .into_iter()
+                        .filter(|&m| m > done && !props.contains(&m))
+                        .collect();
+                    props.extend(fresh);
+                    props[nth..].sort_unstable();
                 }
             }
         }
@@ -259,8 +391,9 @@ impl World {
         feet: f32,
         params: &MoveParams,
     ) -> Option<&Collider> {
-        self.colliders
-            .iter()
+        self.near(center, radius)
+            .into_iter()
+            .map(|nth| &self.colliders[nth as usize])
             .filter(|c| c.base + c.height <= feet + params.step_up)
             .filter(|c| penetration(c, center, radius).is_some())
             .max_by(|a, b| (a.base + a.height).total_cmp(&(b.base + b.height)))
@@ -299,17 +432,30 @@ impl World {
         from
     }
 
-    /// Props whose height range the feet are inside.
-    fn blocking(&self, feet: f32, params: &MoveParams) -> impl Iterator<Item = &Collider> {
-        self.colliders
-            .iter()
-            .filter(move |c| feet < c.base + c.height && feet + params.step_up >= c.base)
+    /// Props near `center` whose height range the feet are inside. `slack` is how much further
+    /// than its own footprint the query looks: a body being pushed out of one prop moves while
+    /// the pushing goes on, and must still find the next one.
+    fn blocking(
+        &self,
+        center: Vec2,
+        radius: f32,
+        slack: f32,
+        feet: f32,
+        params: &MoveParams,
+    ) -> Vec<u32> {
+        let mut near = self.near(center, radius + slack);
+        near.retain(|&nth| {
+            let c = &self.colliders[nth as usize];
+            feet < c.base + c.height && feet + params.step_up >= c.base
+        });
+        near
     }
 
     /// Total penetration depth into blocking props at `center`.
     fn prop_overlap(&self, center: Vec2, radius: f32, feet: f32, params: &MoveParams) -> f32 {
-        self.blocking(feet, params)
-            .filter_map(|c| penetration(c, center, radius))
+        self.blocking(center, radius, 0.0, feet, params)
+            .into_iter()
+            .filter_map(|nth| penetration(&self.colliders[nth as usize], center, radius))
             .map(Vec2::length)
             .sum()
     }
@@ -473,7 +619,7 @@ mod tests {
     #[test]
     fn tall_prop_blocks_and_body_slides_around_it() {
         let mut w = World::new(Terrain::new(20, 20, 16.0, 16.0));
-        w.colliders.push(Collider {
+        w.add(Collider {
             center: Vec2::new(160.0, 160.0),
             shape: Shape::Circle { radius: 8.0 },
             base: 0.0,
@@ -497,10 +643,273 @@ mod tests {
         );
     }
 
+    /// A world of props scattered over `across` pixels, the same every time.
+    fn scattered(across: f32, many: u32) -> World {
+        let mut w = World::new(Terrain::new(
+            (across / 16.0) as u32,
+            (across / 16.0) as u32,
+            16.0,
+            16.0,
+        ));
+        let mut seed = 0x9E3779B97F4A7C15u64;
+        let mut roll = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as f32 / (u32::MAX / 2) as f32).fract()
+        };
+        for n in 0..many {
+            // A quarter of them off the map: west and north of it, and past its far corner.
+            let at = match n % 4 {
+                0 => Vec2::new(
+                    roll() * across - across / 8.0,
+                    roll() * across - across / 8.0,
+                ),
+                _ => Vec2::new(roll() * across, roll() * across),
+            };
+            // One in nine is wider than a square of the grid, as the game's own great props are.
+            let size = if n % 9 == 0 {
+                CELL + roll() * 128.0
+            } else {
+                4.0 + roll() * 28.0
+            };
+            let shape = if n % 2 == 0 {
+                Shape::Circle { radius: size }
+            } else {
+                Shape::Rect {
+                    half: Vec2::new(size, 4.0 + roll() * 20.0),
+                }
+            };
+            w.add(Collider {
+                center: at,
+                shape,
+                base: (roll() * 3.0).floor() * 8.0,
+                height: 4.0 + roll() * 40.0,
+            });
+        }
+        w
+    }
+
+    /// The grid must answer exactly as looking at every collider in turn did — the same prop
+    /// held up to, the same props overlapped, in the same order. Anything else is a body that
+    /// stands somewhere different than it used to (docs/PLAN.md §24.3).
+    #[test]
+    fn the_grid_answers_as_a_full_scan_does() {
+        let params = MoveParams::default();
+        let w = scattered(2048.0, 400);
+        let mut asked = 0;
+        let mut found = 0;
+        for row in 0..64 {
+            for col in 0..64 {
+                let at = Vec2::new(col as f32 * 32.0, row as f32 * 32.0);
+                for (radius, feet) in [(5.0, 0.0), (9.0, 8.0), (16.0, 24.0)] {
+                    // Every collider in turn, as the world used to do it.
+                    let scan: Vec<&Collider> = w
+                        .colliders()
+                        .iter()
+                        .filter(|c| penetration(c, at, radius).is_some())
+                        .collect();
+                    let grid: Vec<&Collider> = w.overlapping(at, radius).collect();
+                    assert_eq!(scan, grid, "overlapping at {at} with radius {radius}");
+
+                    let held_by = w
+                        .colliders()
+                        .iter()
+                        .filter(|c| c.base + c.height <= feet + params.step_up)
+                        .filter(|c| penetration(c, at, radius).is_some())
+                        .max_by(|a, b| (a.base + a.height).total_cmp(&(b.base + b.height)));
+                    assert_eq!(
+                        held_by,
+                        w.supporting_prop(at, radius, feet, &params),
+                        "what holds up feet at {feet} at {at}"
+                    );
+                    asked += 1;
+                    found += grid.len();
+                }
+            }
+        }
+        assert!(found > 1000, "only {found} overlaps in {asked} questions");
+    }
+
+    /// Walking about with the grid must put a body in exactly the place that looking at every
+    /// collider in turn put it — the whole move, not just the questions it asks on the way:
+    /// blocked steps, sliding along a wall, corner slips, and being pushed out of props, which
+    /// moves the body while the props are being asked about (docs/PLAN.md §24.3).
+    #[test]
+    fn walking_about_lands_where_a_full_scan_lands() {
+        let params = MoveParams::default();
+        let (with_grid, mut scanning) = (scattered(1024.0, 300), scattered(1024.0, 300));
+        scanning.scan_everything();
+        let mut seed = 0x243F_6A88_85A3_08D3u64;
+        let mut roll = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as f32 / (u32::MAX / 2) as f32).fract()
+        };
+        let mut walked = 0.0f32;
+        for walk in 0..40 {
+            let start = Vec2::new(roll() * 1024.0, roll() * 1024.0);
+            let mut here = Body::new(start, 4.0 + roll() * 6.0);
+            here.elevation = (roll() * 3.0).floor() * 8.0;
+            let mut there = here;
+            for step in 0..60 {
+                let push = Vec2::new(roll() * 2.0 - 1.0, roll() * 2.0 - 1.0) * 90.0;
+                let jump = step % 17 == 0;
+                with_grid.step(&mut here, push, jump, 1.0 / 60.0, &params);
+                scanning.step(&mut there, push, jump, 1.0 / 60.0, &params);
+                assert_eq!(
+                    (here.position, here.elevation),
+                    (there.position, there.elevation),
+                    "walk {walk} step {step}: the grid took the body somewhere else"
+                );
+                walked += here.position.distance(start);
+            }
+        }
+        assert!(walked > 10_000.0, "the walks went nowhere ({walked} px)");
+    }
+
+    /// How far beyond its own footprint one asking covers.
+    fn slack_of(world: &World, radius: f32) -> f32 {
+        radius + world.grid.reach
+    }
+
+    /// A body in a row of props that overlap one another is pushed along the row, moving while
+    /// the props are being asked about — so the ones further along were not near it when the
+    /// asking began. The grid must take them in as the body reaches them, or the body is left
+    /// sitting inside a prop the full scan would have pushed it out of.
+    #[test]
+    fn being_pushed_along_a_row_of_props_finds_the_far_ones() {
+        let params = MoveParams::default();
+        let row = |world: &mut World| {
+            for n in 0..120 {
+                world.add(Collider {
+                    center: Vec2::new(0.0, n as f32 * 4.0),
+                    shape: Shape::Circle { radius: 14.0 },
+                    base: 0.0,
+                    height: 40.0,
+                });
+            }
+        };
+        let mut with_grid = World::new(Terrain::new(64, 64, 16.0, 16.0));
+        let mut scanning = World::new(Terrain::new(64, 64, 16.0, 16.0));
+        row(&mut with_grid);
+        row(&mut scanning);
+        scanning.scan_everything();
+        let mut here = Body::new(Vec2::new(0.5, 240.0), 6.0);
+        let mut there = here;
+        for _ in 0..3 {
+            with_grid.step(&mut here, Vec2::new(4.0, 2.0), false, 1.0 / 60.0, &params);
+            scanning.step(&mut there, Vec2::new(4.0, 2.0), false, 1.0 / 60.0, &params);
+        }
+        assert_eq!(here.position, there.position, "pushed along the row");
+        // The pushing really did carry the body a long way down the row — much further than the
+        // slack one asking covers — or this proves nothing.
+        assert!(
+            here.position.y - 240.0 > slack_of(&with_grid, 6.0) * 2.0,
+            "the body was only pushed to {}",
+            here.position.y
+        );
+    }
+
+    /// Bodies shoved about inside tight knots of props, with the grid and with a full scan,
+    /// landing in the same place every time.
+    ///
+    /// This is the guard for the push-out loop, where the body moves while the props are being
+    /// asked about: the props asked for change under it, and the order they are dealt with in
+    /// decides where it ends up. Built cases cannot find the trouble there — a knot has to be
+    /// dense enough, and a body unlucky enough, for a prop to arrive late — so the knots and the
+    /// shoves are rolled instead, and there are a great many of them.
+    #[test]
+    fn knots_of_props_push_a_body_the_same_way_a_full_scan_does() {
+        let params = MoveParams::default();
+        let mut seed = 0xD1B5_4A32_D192_ED03u64;
+        let mut roll = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as f32 / (u32::MAX / 2) as f32).fract()
+        };
+        let mut pushed = 0.0f32;
+        for knot in 0..8_000 {
+            // A knot of props overlapping one another, in a space a few of them wide.
+            let (mut with_grid, mut scanning) = (
+                World::new(Terrain::new(16, 16, 16.0, 16.0)),
+                World::new(Terrain::new(16, 16, 16.0, 16.0)),
+            );
+            let middle = Vec2::splat(128.0);
+            let many = 10 + (roll() * 30.0) as u32;
+            for n in 0..many {
+                let at = middle + Vec2::new(roll() * 60.0 - 30.0, roll() * 60.0 - 30.0);
+                let size = 4.0 + roll() * 7.0;
+                let shape = if n % 3 == 0 {
+                    Shape::Rect {
+                        half: Vec2::new(size, 4.0 + roll() * 7.0),
+                    }
+                } else {
+                    Shape::Circle { radius: size }
+                };
+                let prop = Collider {
+                    center: at,
+                    shape,
+                    base: 0.0,
+                    height: 20.0 + roll() * 30.0,
+                };
+                with_grid.add(prop);
+                scanning.add(prop);
+            }
+            scanning.scan_everything();
+            // A body dropped into the knot and shoved about in it.
+            let start = middle + Vec2::new(roll() * 40.0 - 20.0, roll() * 40.0 - 20.0);
+            let mut here = Body::new(start, 5.0 + roll() * 6.0);
+            let mut there = here;
+            for step in 0..12 {
+                let shove = Vec2::new(roll() * 2.0 - 1.0, roll() * 2.0 - 1.0) * 70.0;
+                with_grid.step(&mut here, shove, false, 1.0 / 60.0, &params);
+                scanning.step(&mut there, shove, false, 1.0 / 60.0, &params);
+                assert_eq!(
+                    (here.position, here.elevation),
+                    (there.position, there.elevation),
+                    "knot {knot} of {many} props, shove {step}: the grid put the body elsewhere"
+                );
+            }
+            pushed += here.position.distance(start);
+        }
+        // The knots really did shove the bodies about, or this proves nothing.
+        assert!(
+            pushed > 100_000.0,
+            "the bodies barely moved ({pushed} px in all)"
+        );
+    }
+
+    /// And it must ask about a handful of props, however many the map holds: this is the whole
+    /// point of it, and a body's tick asks tens of times.
+    #[test]
+    fn a_question_is_about_what_is_near_it() {
+        let at = Vec2::splat(1000.0);
+        // The same props, spread over a map four times as wide in each direction.
+        let close = scattered(2048.0, 400);
+        let far = scattered(8192.0, 400);
+        let (close_asked, far_asked) = (close.near(at, 16.0).len(), far.near(at, 16.0).len());
+        assert!(
+            close_asked <= 24 && far_asked <= 24,
+            "asked about {close_asked} and {far_asked} props"
+        );
+        // A map with a hundred times the props, asked in the same place, asks about what is in
+        // that place — not about the hundred times.
+        let many = scattered(8192.0, 40_000);
+        let asked = many.near(at, 16.0).len();
+        assert!(
+            asked < many.colliders().len() / 100,
+            "asked about {asked} of {}",
+            many.colliders().len()
+        );
+    }
+
     #[test]
     fn low_prop_can_be_jumped_over() {
         let mut w = World::new(Terrain::new(20, 5, 16.0, 16.0));
-        w.colliders.push(Collider {
+        w.add(Collider {
             center: Vec2::new(100.0, 40.0),
             shape: Shape::Rect {
                 half: Vec2::new(4.0, 30.0),
@@ -525,7 +934,7 @@ mod tests {
         let mut t = Terrain::new(20, 20, 16.0, 16.0);
         t.fill(0, 0, 1, 20, Cell::Wall);
         let mut w = World::new(t);
-        w.colliders.push(Collider {
+        w.add(Collider {
             center: Vec2::new(30.0, 80.0),
             shape: Shape::Circle { radius: 8.0 },
             base: 0.0,
@@ -563,7 +972,7 @@ mod tests {
     #[test]
     fn can_stand_on_a_low_prop_after_jumping_onto_it_and_walk_off() {
         let mut w = World::new(Terrain::new(20, 10, 16.0, 16.0));
-        w.colliders.push(Collider {
+        w.add(Collider {
             center: Vec2::new(100.0, 80.0),
             shape: Shape::Circle { radius: 12.0 },
             base: 0.0,

@@ -322,9 +322,8 @@ fn follow(
             let world = &maps.get(*leader_map).collision;
             let open = world.ground_under(behind, CHARACTER_RADIUS).is_finite()
                 && !world
-                    .colliders
-                    .iter()
-                    .any(|c| c.height > 0.0 && crate::maps::overlaps(c, behind, CHARACTER_RADIUS));
+                    .overlapping(behind, CHARACTER_RADIUS)
+                    .any(|c| c.height > 0.0);
             let at = if open { behind } else { leader.0.position };
             crate::combat::place(&mut body, &mut previous, at, &maps, *leader_map);
             *map = *leader_map;

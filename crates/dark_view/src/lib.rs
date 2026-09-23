@@ -346,7 +346,7 @@ impl MapView {
             sprite.sort_y = at.y;
             props.push(sprite);
         }
-        for c in &map.collision.colliders {
+        for c in map.collision.colliders() {
             let (half, outline) = match c.shape {
                 Shape::Circle { radius } => (Vec2::splat(radius), Outline::Circle),
                 Shape::Rect { half } => (half, Outline::Rect),

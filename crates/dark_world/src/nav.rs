@@ -1,10 +1,13 @@
 //! Finding a way on foot for characters the world moves (enemies now, NPCs later): who can walk
 //! where without jumping, whether a straight line is clear, and A* over the tile grid when not.
+//!
+//! Searching has a budget (docs/PLAN.md §24.3). Without one, a way that does not exist costs the
+//! whole map — every tile of it, with the props under each asked about — and on a large map that
+//! is a frozen host. A walker that runs out of budget gives up and does what it does when there
+//! is no way at all, which it must already handle.
 
 use dark_physics::{MoveParams, World};
 use glam::Vec2;
-
-use crate::maps::overlaps;
 
 /// Whether a footprint at `center` can stand there at `elevation` without climbing or dropping
 /// a level, and clear of every prop taller than a step.
@@ -17,10 +20,8 @@ pub fn walkable(
 ) -> bool {
     let (lo, hi) = world.ground_span(center, radius);
     let flat = hi <= elevation + params.step_up && lo >= elevation - params.step_up;
-    flat && !world.colliders.iter().any(|c| {
-        c.base + c.height > elevation + params.step_up
-            && c.base <= elevation + params.step_up
-            && overlaps(c, center, radius)
+    flat && !world.overlapping(center, radius).any(|c| {
+        c.base + c.height > elevation + params.step_up && c.base <= elevation + params.step_up
     })
 }
 
@@ -41,8 +42,22 @@ pub fn clear_line(
 }
 
 /// A walkable way from `from` to `to`: points to head for in turn, the last being `to` itself.
+/// How many tiles a search may take from its queue before giving up. Each costs up to sixteen
+/// questions of the map, so this is the real work, not a pure count of steps.
+///
+/// It is set above the whole tile count of any map the first game has (the largest is 7 500),
+/// so on today's maps it can never refuse a way that exists — a search that runs out has already
+/// looked at more tiles than the map holds. It matters on a map far larger than those: a wall
+/// with a gap at the far end costs about thirty thousand tiles to go round, so a walker there
+/// gives up and makes for the target directly. Searching chunk by chunk, with a coarse graph of
+/// the ways between them, is §24.4's answer; this is the bound until then.
+const BUDGET: usize = 12_000;
+
 /// A* over tile centres (8-way, no cutting corners), then shortened wherever a straight line is
-/// clear. `None` if there is no way.
+/// clear. `None` if there is no way, and also if finding one would cost more than [`BUDGET`]
+/// tiles — a walker cannot tell those apart, and treats both as "make for it directly". A way
+/// found after the budget ran out may not be the shortest one; it is still a way, and what uses
+/// it is an NPC deciding where to put its feet.
 pub fn find_path(
     world: &World,
     from: Vec2,
@@ -51,6 +66,19 @@ pub fn find_path(
     elevation: f32,
     params: &MoveParams,
 ) -> Option<Vec<Vec2>> {
+    way(world, from, to, radius, elevation, params).0
+}
+
+/// The way, and how many tiles were looked at finding it or failing to — which is what the
+/// budget holds down, and what a test can check.
+fn way(
+    world: &World,
+    from: Vec2,
+    to: Vec2,
+    radius: f32,
+    elevation: f32,
+    params: &MoveParams,
+) -> (Option<Vec<Vec2>>, usize) {
     let terrain = &world.terrain;
     let tile = terrain.tile();
     let (cols, rows) = (i64::from(terrain.cols()), i64::from(terrain.rows()));
@@ -66,17 +94,30 @@ pub fn find_path(
     let goal = if open(wanted) {
         wanted
     } else {
-        (1..=2i64)
+        let near = (1..=2i64)
             .flat_map(|r| {
                 (-r..=r).flat_map(move |dc| (-r..=r).map(move |dr| (wanted.0 + dc, wanted.1 + dr)))
             })
             .filter(|&t| open(t))
-            .min_by(|&a, &b| center(a).distance(to).total_cmp(&center(b).distance(to)))?
+            .min_by(|&a, &b| center(a).distance(to).total_cmp(&center(b).distance(to)));
+        match near {
+            Some(goal) => goal,
+            None => return (None, 0),
+        }
     };
-    let (tiles, _) = pathfinding::prelude::astar(
+    // What a search has looked at so far. A way that does not exist would otherwise be paid for
+    // with the whole map.
+    let looked = std::cell::Cell::new(0usize);
+    let (tiles, _) = match pathfinding::prelude::astar(
         &start,
         |&(c, r)| {
             let mut next = Vec::with_capacity(8);
+            if looked.get() >= BUDGET {
+                // Nowhere to go from here: the search runs out and finds nothing. Whatever it
+                // had already queued is still asked, and each of those is turned away here.
+                return next;
+            }
+            looked.set(looked.get() + 1);
             for (dc, dr) in [
                 (1, 0),
                 (-1, 0),
@@ -101,7 +142,10 @@ pub fn find_path(
             (10 * dx.max(dy) + 4 * dx.min(dy)) as u32
         },
         |&n| n == goal,
-    )?;
+    ) {
+        Some(found) => found,
+        None => return (None, looked.get()),
+    };
     // Tile centres after the start, ending exactly at `to`; then drop every point a straight
     // line can skip.
     let mut points: Vec<Vec2> = tiles.iter().skip(1).map(|&t| center(t)).collect();
@@ -122,13 +166,75 @@ pub fn find_path(
         at = points[j];
         i = j + 1;
     }
-    Some(path)
+    (Some(path), looked.get())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use dark_physics::{Cell, Collider, Shape, Terrain};
+
+    /// A way that does not exist costs a few screens of looking, not the whole map. Without the
+    /// budget this walks every tile of a 300×300 map, asking about the props under each — which
+    /// is the frozen host §24.3 is about.
+    #[test]
+    fn a_hopeless_search_gives_up_instead_of_walking_the_whole_map() {
+        // A big open field with a wall right across it: nothing on the far side is reachable.
+        let (cols, rows) = (300u32, 300u32);
+        let mut terrain = Terrain::new(cols, rows, 16.0, 16.0);
+        for col in 0..cols {
+            terrain.fill(col, 150, 1, 1, Cell::Wall);
+        }
+        let world = World::new(terrain);
+        let params = MoveParams::default();
+        let from = Vec2::new(2400.0, 800.0);
+        let (path, looked) = way(&world, from, Vec2::new(2400.0, 4000.0), 5.0, 0.0, &params);
+        assert!(path.is_none(), "there is no way through a wall");
+        assert_eq!(
+            looked, BUDGET,
+            "it stopped at the budget, not at the map's edge"
+        );
+        assert!(
+            (looked as u32) < cols * rows / 4,
+            "looked at {looked} tiles of the {} in the map",
+            cols * rows
+        );
+        // A way that does exist, on the same map, is still found — and cheaply.
+        let (path, looked) = way(&world, from, Vec2::new(2800.0, 1200.0), 5.0, 0.0, &params);
+        assert!(path.is_some(), "the near corner is walkable");
+        assert!(looked < BUDGET / 4, "an easy way looked at {looked} tiles");
+    }
+
+    /// And on a map the size of the ones the game has, the budget refuses nothing: a way right
+    /// round a wall, the dearest kind of search there is, is still found.
+    #[test]
+    fn on_a_map_the_size_of_the_games_own_every_way_is_still_found() {
+        // Meadow is 100×75 tiles; this is that, with a wall across all but its far end.
+        let (cols, rows) = (100u32, 75u32);
+        let mut terrain = Terrain::new(cols, rows, 16.0, 16.0);
+        for col in 0..cols - 6 {
+            terrain.fill(col, 40, 1, 1, Cell::Wall);
+        }
+        let world = World::new(terrain);
+        let params = MoveParams::default();
+        let (path, looked) = way(
+            &world,
+            Vec2::new(200.0, 200.0),
+            Vec2::new(200.0, 1000.0),
+            5.0,
+            0.0,
+            &params,
+        );
+        assert!(
+            path.is_some(),
+            "the way round the wall is there to be found"
+        );
+        assert!(looked < BUDGET, "it took {looked} tiles of the {BUDGET}");
+        assert!(
+            (cols * rows) < BUDGET as u32,
+            "the budget is bigger than the whole map, so nothing reachable can be refused"
+        );
+    }
 
     /// 20×10 tiles of 16 px with a wall across the middle, open only at the bottom row.
     fn walled() -> World {
@@ -171,7 +277,7 @@ mod tests {
         let p = MoveParams::default();
         let (a, b) = (Vec2::new(40.0, 80.0), Vec2::new(280.0, 80.0));
         assert_eq!(find_path(&world, a, b, 5.0, 0.0, &p), Some(vec![b]));
-        world.colliders.push(Collider {
+        world.add(Collider {
             center: Vec2::new(160.0, 80.0),
             shape: Shape::Circle { radius: 20.0 },
             base: 0.0,

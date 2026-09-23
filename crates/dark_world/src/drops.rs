@@ -163,9 +163,8 @@ fn lands_at(maps: &Maps, map: MapId, body: &Body, facing: Vec2) -> Vec2 {
     let ground = world.ground_under(ahead, DROP_RADIUS);
     let blocked = (ground - body.elevation).abs() > 0.5
         || world
-            .colliders
-            .iter()
-            .any(|c| c.height > 0.0 && crate::maps::overlaps(c, ahead, DROP_RADIUS))
+            .overlapping(ahead, DROP_RADIUS)
+            .any(|c| c.height > 0.0)
         || maps.get(map).exits.iter().any(|e| e.contains(ahead));
     if blocked { body.position } else { ahead }
 }
