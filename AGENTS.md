@@ -31,13 +31,15 @@ Trivial changes (typo, comment, formatting, import fix) need no review pass; eve
 
 ```
 cargo run -p dark-player                          # single-player, no project
-cargo run -p dark-player -- --project ../adventurer  # the game project's meadow scene
+cargo run -p dark-player -- --project ../adventurer  # the title screen: carry on, or a new year
 cargo run -p dark-player -- --host 7777           # co-op host
 cargo run -p dark-player -- --join 127.0.0.1:7777 # join
 cargo run -p dark-host -- --port 7777 --project ../adventurer   # headless host with the world
 cargo run -p dark-player -- --project ../adventurer --host 7777 --clients 1 --net-sim 60,20,5
                                                   # host plus one lagged local client
 ```
+Games are saved in `<project>/saves/*.sav`; the title screen lists them (`--title` forces it for
+a screenshot, `--save <file>` or any scripted flag goes straight into the world).
 `--day-secs <n>` shortens the day for testing; `--player <uuid>` keeps a stable identity.
 In the game: WASD/arrows walk, Shift runs, Space jumps, J attacks (again to combo), K dodges,
 E talks to an NPC in reach (number keys answer when a conversation offers choices; on its last
@@ -47,7 +49,8 @@ soap), Ctrl+1–8 lay one down (walk over it to pick it up again), R relieves yo
 it away; with nobody near you leave your party), F1
 toggles the collision overlay (`--overlay` starts with it on), F2 switches language (`--lang ja`
 starts in Japanese), Esc opens the menu (standing and people's feelings; the world waits while
-nobody else is online; `--menu` starts with it open). A gamepad works alongside the keyboard:
+nobody else is online; Q there saves the year and goes back to the title; `--menu` starts with it
+open). A gamepad works alongside the keyboard:
 left stick walks, left trigger runs, A jumps, X attacks, B dodges, Y talks, right shoulder asks
 someone along, Back sleeps, Start opens the menu, the d-pad is the hotbar (with the left shoulder
 for 5–8) and answers conversations. Hosts take `--save <file>` (carry the whole world on; it is saved at each new

@@ -859,6 +859,7 @@ dependencies = [
  "dark_physics",
  "dark_platform",
  "dark_render",
+ "dark_sim",
  "dark_spine",
  "dark_sprite",
  "dark_story",

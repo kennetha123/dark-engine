@@ -858,3 +858,31 @@ gone and the man has one hand; in week 20 he begs; in week 30 you meet only the 
   along the year, branches drawn as the Story tab draws them.
 - `dark-cli simulate` fast-forwards the year, so "what is Aldmoor like in week 30" is a second's
   work to answer without playing.
+
+## 22. The title screen (M9)
+
+A game is started and carried on from the game itself, not from a command line. `dark-player`
+with a project and nothing else to do opens the title screen; anything told what to play — a
+joined game, a co-op host, a scripted or screenshot run, a `--save` named on the command line —
+goes straight in, and `--title` forces the screen for a picture of it.
+
+- The screen is the project's name and a list: **carry on** (the newest game, with its name and
+  the day it reached), **a new year**, **your games** (each save, newest first), **settings**
+  (the language, for now) and **leave**. Up and down choose, Enter (or Space, or E) takes,
+  Esc goes back. It is drawn by the game's own renderer in the project's font and language:
+  no second interface toolkit in the player.
+- Games live in the project's `saves` folder, one `.sav` each (`dark_world::WorldSave`). A new
+  game takes the first free name — `game`, `game-2`, … — so none writes over another, and the
+  folder is made when a game is first saved. A file that will not read is left out of the list
+  and left alone on disk.
+- In the Esc menu, **Q** saves the year and goes back to the title, where it is the game to
+  carry on.
+- Only a game started from the title can be left with Q: a joined game and a co-op host have
+  other players in them, and a scripted run was told what to play. The menu's line is shown only
+  when it can be taken.
+- Known gaps: no settings beyond the language (no volume, no key or pad rebinding, no
+  fullscreen); the title screen takes no gamepad, only keys; a game cannot be deleted or renamed
+  from the screen; at most twelve games are listed, the newest by the day they were written
+  (older files stay in the folder and still play); no picture behind the title, and nothing plays
+  (§1's music and ambience are not built); starting a game reloads the scene from disk, which is
+  a moment's pause.

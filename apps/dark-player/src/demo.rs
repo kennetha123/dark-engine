@@ -77,6 +77,9 @@ pub struct Frame<'a> {
     pub story: &'a dark_world::StoryView,
     /// The Esc menu, while it is open.
     pub menu: Option<Menu>,
+    /// Whether this game can be saved and left for the title screen (§22): only one the player
+    /// started there, not a joined game or a co-op host.
+    pub can_leave: bool,
 }
 
 /// The Esc menu: whether the world waits, where the player stands and who feels for them.
@@ -462,6 +465,10 @@ const ENDING_WIDTH: f32 = 360.0;
 const PARTY_BAR: f32 = 40.0;
 /// Statuses listed under the gauges.
 const MAX_STATUSES: usize = 4;
+/// Night behind the title screen: the world is not drawn there.
+const TITLE_SKY: [f64; 3] = [0.006, 0.006, 0.012];
+/// Between the title screen's heading and its list.
+const MENU_GAP: f32 = 12.0;
 /// The Esc menu's lines wrap at this width.
 const MENU_WIDTH: f32 = 220.0;
 /// People listed in the Esc menu: those who feel most strongly, the warmest first.
@@ -756,6 +763,83 @@ impl DemoView {
         );
     }
 
+    /// The project's string table, in the language showing (the title screen reads it too).
+    pub fn strings(&self) -> &Localization {
+        &self.strings
+    }
+
+    /// A screen of choosing — the title screen (docs/PLAN.md §22) — over an empty background:
+    /// a heading, a list, and a mark against the one picked.
+    pub fn draw_menu(
+        &mut self,
+        renderer: &mut Renderer,
+        heading: &str,
+        items: &[String],
+        picked: usize,
+    ) {
+        self.frame_sprites.clear();
+        self.frame_meshes.clear();
+        let (w, h) = renderer.internal_size();
+        let size = Vec2::new(w as f32, h as f32);
+        let Some(text) = &mut self.text else {
+            renderer.render(size / 2.0, TITLE_SKY, &mut []);
+            return;
+        };
+        let mut layout = |s: &str| text.layout(s, size.x - 4.0 * WINDOW_MARGIN);
+        let heading = layout(heading);
+        // A long list (many saved games) scrolls: the ones around the one picked are shown, so
+        // the cursor is always on the screen.
+        let room = (((size.y - heading.size.y) / heading.size.y.max(1.0)).floor() as usize)
+            .saturating_sub(2)
+            .max(1);
+        let first = picked
+            .saturating_sub(room / 2)
+            .min(items.len().saturating_sub(room));
+        let shown = items.iter().enumerate().skip(first).take(room);
+        let lines: Vec<TextLayout> = shown
+            // A plain arrow: the project's font is a pixel font, and not every one has the
+            // pointing triangles.
+            .map(|(i, item)| layout(&format!("{} {item}", if i == picked { ">" } else { " " })))
+            .collect();
+        let texture = match text.texture(renderer) {
+            Ok(texture) => texture,
+            Err(err) => {
+                tracing::error!("cannot upload glyphs: {err}");
+                return;
+            }
+        };
+        let line_height = lines.first().map_or(0.0, |l| l.size.y);
+        let block = heading.size.y + MENU_GAP + line_height * lines.len() as f32;
+        let mut pen = Vec2::new(0.0, ((size.y - block) / 2.0).max(MENU_GAP)).round();
+        let centre =
+            |line: &TextLayout, pen: Vec2| Vec2::new(((size.x - line.size.x) / 2.0).round(), pen.y);
+        self.frame_sprites.extend(TextSystem::sprites(
+            &heading,
+            texture,
+            centre(&heading, pen),
+            NAME,
+            layer::UI,
+            1.0,
+        ));
+        pen.y += heading.size.y + MENU_GAP;
+        // The list is left-aligned as a block, so the marker does not shift the words.
+        let widest = lines.iter().map(|l| l.size.x).fold(0.0, f32::max);
+        let left = ((size.x - widest) / 2.0).round();
+        for (i, line) in lines.iter().enumerate() {
+            let ink = if first + i == picked { NAME } else { PAPER };
+            self.frame_sprites.extend(TextSystem::sprites(
+                line,
+                texture,
+                Vec2::new(left, pen.y),
+                ink,
+                layer::UI,
+                2.0,
+            ));
+            pen.y += line.size.y;
+        }
+        renderer.render_with(size / 2.0, TITLE_SKY, &mut self.frame_sprites, &[]);
+    }
+
     /// Speech bubbles, sleepers' snores, the talk prompt, the local player's dialogue window, the
     /// day and time, and the language banner, kept inside the view whose top-left is `view_min`.
     fn draw_interface(
@@ -971,6 +1055,10 @@ impl DemoView {
                 section("ui.feelings", &feelings);
                 let resume = format!("Esc  {}", self.strings.text("ui.resume"));
                 lines.push((layout(&resume, MENU_WIDTH), NAME));
+                if frame.can_leave {
+                    let leave = format!("Q  {}", self.strings.text("ui.to_title"));
+                    lines.push((layout(&leave, MENU_WIDTH), NAME));
+                }
                 lines
             })
             .unwrap_or_default();

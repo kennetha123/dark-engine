@@ -17,6 +17,7 @@
 //!   --autopilot-party       ask Borin along, then lead him against the meadow's enemies
 //!   --overlay               start with the collision overlay (F1) on
 //!   --menu                  start with the Esc menu open
+//!   --title                 open the title screen even for a run that would go straight in
 //!   --lang <code>           text language, one of the project's (default: its first)
 //!   --save <file>           when hosting: carry the world on from this file, saving at each new day
 //!                           and on quitting (without `--player`, you play the save's host again)
@@ -37,6 +38,8 @@
 mod demo;
 mod fx;
 mod pad;
+mod saves;
+mod title;
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -64,8 +67,64 @@ use glam::Vec2;
 const DEFAULT_RESOLUTION: (u32, u32) = (640, 360);
 
 enum Mode {
+    /// Before a world: the title screen (docs/PLAN.md §22).
+    Title(Box<title::Title>),
     Host(Box<App>),
     Join(Box<ClientSession>),
+}
+
+/// What it takes to start a world once the title screen has been answered: the same things the
+/// command line would have given.
+struct WorldStart {
+    project: Project,
+    scene: String,
+    clock: ClockConfig,
+    player: PlayerId,
+    /// `--player` was given, so a save's own host does not take it over.
+    player_given: bool,
+    world_seed: Option<u64>,
+}
+
+impl WorldStart {
+    /// Builds the host for a game: `fresh` starts a new world, else `save` is carried on. Either
+    /// way the world is saved to `save` from then on.
+    fn start(&self, save: PathBuf, fresh: bool) -> Result<App, String> {
+        tracing::info!("playing {} (a new year: {fresh})", save.display());
+        let carry_on = (!fresh).then(|| save.clone());
+        let mut host = Host::new(HostConfig { bind: None }).map_err(|e| e.to_string())?;
+        let seed = self.world_seed.unwrap_or_else(time_seed);
+        let world = load_world(&self.project, carry_on.as_deref(), seed)?;
+        let player = match (&world, self.player_given) {
+            (Some(saved), false) => saved.host.unwrap_or(self.player),
+            _ => self.player,
+        };
+        host.connect_local(player);
+        let mut app = App::new(DEFAULT_TICK_RATE);
+        app.add_plugin(HostPlugin {
+            host,
+            clock: self.clock,
+        });
+        let mut scene = DemoScene::load(&self.project, &self.scene).map_err(|e| e.to_string())?;
+        scene.install_host(&mut app);
+        if world.is_none() {
+            tracing::warn!(
+                "{} has no world.ron: this game has no world to save",
+                self.project.path("").display()
+            );
+        }
+        if let Some(world) = world {
+            let names = Localization::load(&self.project).unwrap_or_default();
+            app.add_plugin(WorldSimPlugin {
+                world,
+                // A game is saved where the title screen said, at each new day and on leaving.
+                save: Some(save),
+                names,
+            })
+            .add_plugin(dark_world::PartyPlugin)
+            .add_plugin(dark_world::StoryPlugin(scene.story_def()));
+        }
+        Ok(app)
+    }
 }
 
 struct Screenshot {
@@ -100,6 +159,15 @@ struct Player {
     /// The Esc menu is open: the character takes no input, and the world waits while nobody
     /// else is online.
     menu: bool,
+    /// Leave the game at the next frame: save it and go back to the title screen.
+    to_title: bool,
+    /// What it takes to start a world from the title screen; none when the command line said
+    /// what to play (a joined game, a scripted run).
+    start: Option<WorldStart>,
+    /// What the title screen was last asked for.
+    chosen: title::Chosen,
+    /// Strings for the title screen before the view exists.
+    fallback: Localization,
     /// Language to start in, applied once the view exists.
     lang: Option<String>,
     screenshot: Option<Screenshot>,
@@ -111,6 +179,74 @@ struct Player {
 }
 
 impl Player {
+    /// Saves the picture a `--screenshot` run asked for, once its frames have passed, and says
+    /// the game is done. Whatever is on the screen is what is saved, the title screen included.
+    fn shot(&mut self) -> Flow {
+        let (Some(shot), Some(renderer)) = (&self.screenshot, &mut self.renderer) else {
+            return Flow::Continue;
+        };
+        if self.frames < shot.after_frames {
+            return Flow::Continue;
+        }
+        let capture = renderer.capture();
+        match image::save_buffer(
+            &shot.path,
+            &capture.rgba,
+            capture.width,
+            capture.height,
+            image::ColorType::Rgba8,
+        ) {
+            Ok(()) => tracing::info!("saved {}", shot.path.display()),
+            Err(err) => tracing::error!("cannot save {}: {err}", shot.path.display()),
+        }
+        Flow::Exit
+    }
+
+    /// Whether this game can be saved and left: one started from the title screen. A joined
+    /// game or a co-op host has other players in it, and a scripted run was told what to play.
+    fn can_leave(&self) -> bool {
+        self.start.is_some() && matches!(self.mode, Mode::Host(_))
+    }
+
+    /// The title screen: what the player picked, then the screen drawn again.
+    fn title_frame(&mut self) -> Flow {
+        match std::mem::replace(&mut self.chosen, title::Chosen::Waiting) {
+            title::Chosen::Quit => return Flow::Exit,
+            title::Chosen::Language => {
+                if let Some(view) = &mut self.view {
+                    view.cycle_language();
+                }
+            }
+            title::Chosen::Play { save, fresh } => {
+                match self.start.as_ref().map(|start| start.start(save, fresh)) {
+                    Some(Ok(app)) => {
+                        self.mode = Mode::Host(Box::new(app));
+                        return Flow::Continue;
+                    }
+                    Some(Err(err)) => tracing::error!("cannot start the game: {err}"),
+                    None => tracing::error!("no project to play"),
+                }
+            }
+            title::Chosen::Waiting => {}
+        }
+        self.audio.update();
+        self.frames += 1;
+        if let (Some(renderer), Some(view), Mode::Title(title)) =
+            (&mut self.renderer, &mut self.view, &self.mode)
+        {
+            let (heading, items, picked) = {
+                let strings = view.strings();
+                (title.heading(strings), title.items(strings), title.picked())
+            };
+            view.draw_menu(renderer, &heading, &items, picked);
+        } else if self.screenshot.is_some() {
+            // Nothing can be drawn, so nothing can be saved: say so instead of waiting for ever.
+            tracing::error!("no screen to take a picture of");
+            return Flow::Exit;
+        }
+        self.shot()
+    }
+
     fn elapsed_ticks(&self) -> u64 {
         (self.elapsed.as_secs_f64() * f64::from(DEFAULT_TICK_RATE)) as u64
     }
@@ -316,9 +452,15 @@ impl Game for Player {
             }
         };
         if let Some(scene) = self.scene.take() {
-            let maps = match &self.mode {
-                Mode::Host(app) => app.world.resource::<dark_world::Maps>(),
-                Mode::Join(session) => session.maps(),
+            // The title screen has no world yet: its view is laid out from the scene's own maps,
+            // which the host loads again for itself when a game starts.
+            let mut scene = scene;
+            let alone = matches!(self.mode, Mode::Title(_)).then(|| scene.take_maps());
+            let maps = match (&self.mode, &alone) {
+                (Mode::Title(_), Some(maps)) => maps,
+                (Mode::Host(app), _) => app.world.resource::<dark_world::Maps>(),
+                (Mode::Join(session), _) => session.maps(),
+                (Mode::Title(_), None) => unreachable!("the title takes the scene's own maps"),
             };
             match scene.build_view(&mut renderer, maps) {
                 Ok(mut view) => {
@@ -345,8 +487,34 @@ impl Game for Player {
     }
 
     fn key(&mut self, key: KeyCode, pressed: bool) {
+        // On the title screen the keys choose from the list instead of playing. They are still
+        // remembered, so a key held as the game starts is a key the character feels.
         if pressed {
             self.keys.insert(key);
+        } else {
+            self.keys.remove(&key);
+        }
+        if pressed && let Mode::Title(title) = &mut self.mode {
+            let strings = match &self.view {
+                Some(view) => view.strings(),
+                None => &self.fallback,
+            };
+            match key {
+                KeyCode::ArrowUp | KeyCode::KeyW => title.move_by(-1, strings),
+                KeyCode::ArrowDown | KeyCode::KeyS => title.move_by(1, strings),
+                KeyCode::Enter | KeyCode::Space | KeyCode::KeyE => {
+                    self.chosen = title.choose(strings);
+                }
+                KeyCode::Escape => {
+                    // Taking it back: the page behind, and nothing chosen.
+                    title.back();
+                    self.chosen = title::Chosen::Waiting;
+                }
+                _ => {}
+            }
+            return;
+        }
+        if pressed {
             match key {
                 KeyCode::Space => self.presses.jump = true,
                 KeyCode::KeyJ => self.presses.attack = true,
@@ -354,6 +522,9 @@ impl Game for Player {
                 KeyCode::KeyE => self.presses.interact = true,
                 KeyCode::KeyZ => self.presses.sleep = true,
                 KeyCode::KeyR => self.presses.relieve = true,
+                // In the menu, leaving a game of one's own: it is saved, and the title opens.
+                KeyCode::KeyQ if self.menu && self.can_leave() => self.to_title = true,
+                KeyCode::KeyQ if self.menu => {}
                 KeyCode::KeyQ => self.presses.recruit = true,
                 KeyCode::Escape => self.menu = !self.menu,
                 KeyCode::Digit1 => self.number(1),
@@ -376,8 +547,6 @@ impl Game for Player {
                 }
                 _ => {}
             }
-        } else {
-            self.keys.remove(&key);
         }
     }
 
@@ -391,6 +560,23 @@ impl Game for Player {
     }
 
     fn frame(&mut self, dt: Duration) -> Flow {
+        // Leaving a game: put the world away and go back to the title, where its save is now
+        // one of the games to carry on.
+        if std::mem::take(&mut self.to_title)
+            && let (Mode::Host(app), Some(start)) = (&mut self.mode, &self.start)
+        {
+            match dark_world::save_now(&mut app.world) {
+                Some(Ok(_)) => {}
+                Some(Err(err)) => tracing::error!("the year was not saved: {err}"),
+                None => tracing::warn!("nothing to save: this game has no world"),
+            }
+            app.world.resource_mut::<NetHost>().0.shutdown();
+            self.mode = Mode::Title(Box::new(title::Title::new(start.project.clone())));
+            self.menu = false;
+        }
+        if matches!(self.mode, Mode::Title(_)) {
+            return self.title_frame();
+        }
         // Screenshots advance a fixed step per frame so the same frame count gives the same image.
         // Not when joined: the host runs in real time, and a client that runs faster than real
         // time would overflow the host's input queue.
@@ -421,6 +607,8 @@ impl Game for Player {
         // Simulation and networking advance whether or not anything can be drawn: the host owns
         // the world for every connected player.
         let clear = match &mut self.mode {
+            // Handled above: the title screen draws itself and returns.
+            Mode::Title(_) => return Flow::Continue,
             Mode::Host(app) => {
                 if let Some(mut local) = app.world.get_resource_mut::<LocalInput>() {
                     // A press latched before the menu opened is dropped, not kept for after.
@@ -473,6 +661,7 @@ impl Game for Player {
             }
         };
 
+        let can_leave = self.can_leave();
         let Some(renderer) = &mut self.renderer else {
             if self.screenshot.is_some() {
                 tracing::error!("no renderer; cannot take a screenshot");
@@ -503,6 +692,7 @@ impl Game for Player {
                                 Menu::OthersPlaying
                             }
                         }),
+                        can_leave,
                     };
                     view.draw(renderer, &frame, secs);
                     characters
@@ -528,6 +718,7 @@ impl Game for Player {
                         story: &story,
                         // The host's world goes on.
                         menu: self.menu.then_some(Menu::OthersPlaying),
+                        can_leave,
                     };
                     view.draw(renderer, &frame, secs);
                     characters
@@ -552,27 +743,13 @@ impl Game for Player {
         }
         self.audio.update();
 
-        if let Some(shot) = &self.screenshot
-            && self.frames >= shot.after_frames
-        {
-            let capture = renderer.capture();
-            match image::save_buffer(
-                &shot.path,
-                &capture.rgba,
-                capture.width,
-                capture.height,
-                image::ColorType::Rgba8,
-            ) {
-                Ok(()) => tracing::info!("saved {}", shot.path.display()),
-                Err(err) => tracing::error!("cannot save {}: {err}", shot.path.display()),
-            }
-            return Flow::Exit;
-        }
-        Flow::Continue
+        self.shot()
     }
 
     fn exiting(&mut self) {
         match &mut self.mode {
+            // Nothing is running yet, or the world was already put away on the way here.
+            Mode::Title(_) => {}
             // The host leaving ends the session; tell remote players now instead of letting them time out.
             Mode::Host(app) => {
                 // A world with a save file keeps everything played until now.
@@ -627,6 +804,8 @@ struct Args {
     recruit: bool,
     overlay: bool,
     menu: bool,
+    /// Show the title screen even for a run that would otherwise go straight in.
+    title: bool,
     lang: Option<String>,
     save: Option<PathBuf>,
     world_seed: Option<u64>,
@@ -653,6 +832,7 @@ fn parse_args() -> Result<Args, String> {
         recruit: false,
         overlay: false,
         menu: false,
+        title: false,
         lang: None,
         save: None,
         world_seed: None,
@@ -684,6 +864,10 @@ fn parse_args() -> Result<Args, String> {
             }
             "--menu" => {
                 args.menu = true;
+                continue;
+            }
+            "--title" => {
+                args.title = true;
                 continue;
             }
             _ => {}
@@ -801,7 +985,7 @@ fn main() -> ExitCode {
             eprintln!("error: {err}");
             eprintln!(
                 "usage: dark-player [--project <dir>] [--scene <file>] [--host <port> [--clients <n>] | --join <ip:port>] \
-                 [--net-sim <ms,ms,%>] [--player <uuid>] [--day-secs <s>] [--autopilot] [--overlay] [--menu] \
+                 [--net-sim <ms,ms,%>] [--player <uuid>] [--day-secs <s>] [--autopilot] [--overlay] [--menu] [--title] \
                  [--screenshot <png> [--frames <n>]]"
             );
             return ExitCode::FAILURE;
@@ -841,97 +1025,124 @@ fn main() -> ExitCode {
         None => None,
     };
 
+    // A game started by hand — a scripted run, a screenshot, co-op, a save named on the command
+    // line — goes straight in. Otherwise the player is asked what to play (docs/PLAN.md §22).
+    let scripted = !args.title
+        && (args.screenshot.is_some()
+            || args.autopilot
+            || args.fight
+            || args.camp
+            || args.recruit
+            || args.save.is_some());
+    if args.title && args.save.is_some() {
+        tracing::warn!("--title opens the title screen, so --save is not used");
+    }
+    let start = match (&project, &args.launch, scripted) {
+        (Some(project), Launch::SinglePlayer, false) => Some(WorldStart {
+            project: project.clone(),
+            scene: start_scene(project, &args),
+            clock: args.clock,
+            player: args.player,
+            player_given: args.player_given,
+            world_seed: args.world_seed,
+        }),
+        _ => None,
+    };
+
     let mut children = Vec::new();
-    let mode = match args.launch {
-        Launch::Join(addr) => {
-            let Some(scene) = &mut scene else {
-                unreachable!("--join requires --project, checked in parse_args");
-            };
-            match RemoteClient::connect(addr, args.player) {
-                Ok(mut net) => {
-                    if let Some((raw, conditions)) = &args.net_sim {
-                        tracing::info!(
-                            "simulating network conditions {raw} (latency ms, jitter ms, loss %)"
-                        );
-                        net.set_conditions(Some(*conditions));
+    let mode = match (&start, &args.launch) {
+        (Some(start), _) => Mode::Title(Box::new(title::Title::new(start.project.clone()))),
+        (None, launch) => match launch {
+            Launch::Join(addr) => {
+                let Some(scene) = &mut scene else {
+                    unreachable!("--join requires --project, checked in parse_args");
+                };
+                match RemoteClient::connect(*addr, args.player) {
+                    Ok(mut net) => {
+                        if let Some((raw, conditions)) = &args.net_sim {
+                            tracing::info!(
+                                "simulating network conditions {raw} (latency ms, jitter ms, loss %)"
+                            );
+                            net.set_conditions(Some(*conditions));
+                        }
+                        let sheets = scene.character_sheets();
+                        Mode::Join(Box::new(ClientSession::new(net, scene.take_maps(), sheets)))
                     }
-                    let sheets = scene.character_sheets();
-                    Mode::Join(Box::new(ClientSession::new(net, scene.take_maps(), sheets)))
-                }
-                Err(err) => {
-                    tracing::error!("cannot connect to {addr}: {err}");
-                    return ExitCode::FAILURE;
-                }
-            }
-        }
-        Launch::SinglePlayer | Launch::Host(_) => {
-            let bind = match args.launch {
-                Launch::Host(port) => Some(SocketAddr::from(([0, 0, 0, 0], port))),
-                _ => None,
-            };
-            let mut host = match Host::new(HostConfig { bind }) {
-                Ok(host) => host,
-                Err(err) => {
-                    tracing::error!("cannot start host: {err}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            if let Some(addr) = host.udp_addr() {
-                tracing::info!("hosting co-op on {addr}");
-            }
-            // The world (and whose save it is) comes first: without `--player`, the one who
-            // hosted a save plays their own character again.
-            let world = match (&project, &scene) {
-                (Some(project), Some(_)) => {
-                    // Screenshots and the autopilot need the same world every run.
-                    let seed = args.world_seed.unwrap_or_else(|| {
-                        if args.screenshot.is_some() {
-                            1
-                        } else {
-                            time_seed()
-                        }
-                    });
-                    match load_world(project, args.save.as_deref(), seed) {
-                        Ok(world) => world,
-                        Err(err) => {
-                            tracing::error!("cannot load the world: {err}");
-                            return ExitCode::FAILURE;
-                        }
+                    Err(err) => {
+                        tracing::error!("cannot connect to {addr}: {err}");
+                        return ExitCode::FAILURE;
                     }
                 }
-                _ => None,
-            };
-            let player = match (&world, args.player_given) {
-                (Some(saved), false) => saved.host.unwrap_or(args.player),
-                _ => args.player,
-            };
-            if player != args.player {
-                tracing::info!("player id {player} (who hosted this save)");
             }
-            host.connect_local(player);
-            let mut app = App::new(DEFAULT_TICK_RATE);
-            app.add_plugin(HostPlugin {
-                host,
-                clock: args.clock,
-            });
-            if let (Some(scene), Some(project)) = (&mut scene, &project) {
-                scene.install_host(&mut app);
-                if let Some(world) = world {
-                    let names = Localization::load(project).unwrap_or_default();
-                    app.add_plugin(WorldSimPlugin {
-                        world,
-                        save: args.save.clone(),
-                        names,
-                    })
-                    .add_plugin(dark_world::PartyPlugin)
-                    .add_plugin(dark_world::StoryPlugin(scene.story_def()));
+            Launch::SinglePlayer | Launch::Host(_) => {
+                let bind = match args.launch {
+                    Launch::Host(port) => Some(SocketAddr::from(([0, 0, 0, 0], port))),
+                    _ => None,
+                };
+                let mut host = match Host::new(HostConfig { bind }) {
+                    Ok(host) => host,
+                    Err(err) => {
+                        tracing::error!("cannot start host: {err}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                if let Some(addr) = host.udp_addr() {
+                    tracing::info!("hosting co-op on {addr}");
                 }
+                // The world (and whose save it is) comes first: without `--player`, the one who
+                // hosted a save plays their own character again.
+                let world = match (&project, &scene) {
+                    (Some(project), Some(_)) => {
+                        // Screenshots and the autopilot need the same world every run.
+                        let seed = args.world_seed.unwrap_or_else(|| {
+                            if args.screenshot.is_some() {
+                                1
+                            } else {
+                                time_seed()
+                            }
+                        });
+                        match load_world(project, args.save.as_deref(), seed) {
+                            Ok(world) => world,
+                            Err(err) => {
+                                tracing::error!("cannot load the world: {err}");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    }
+                    _ => None,
+                };
+                let player = match (&world, args.player_given) {
+                    (Some(saved), false) => saved.host.unwrap_or(args.player),
+                    _ => args.player,
+                };
+                if player != args.player {
+                    tracing::info!("player id {player} (who hosted this save)");
+                }
+                host.connect_local(player);
+                let mut app = App::new(DEFAULT_TICK_RATE);
+                app.add_plugin(HostPlugin {
+                    host,
+                    clock: args.clock,
+                });
+                if let (Some(scene), Some(project)) = (&mut scene, &project) {
+                    scene.install_host(&mut app);
+                    if let Some(world) = world {
+                        let names = Localization::load(project).unwrap_or_default();
+                        app.add_plugin(WorldSimPlugin {
+                            world,
+                            save: args.save.clone(),
+                            names,
+                        })
+                        .add_plugin(dark_world::PartyPlugin)
+                        .add_plugin(dark_world::StoryPlugin(scene.story_def()));
+                    }
+                }
+                if let Launch::Host(port) = args.launch {
+                    children = launch_clients(args.clients, port, &args);
+                }
+                Mode::Host(Box::new(app))
             }
-            if let Launch::Host(port) = args.launch {
-                children = launch_clients(args.clients, port, &args);
-            }
-            Mode::Host(Box::new(app))
-        }
+        },
     };
 
     let title = project.as_ref().map_or_else(
@@ -964,6 +1175,10 @@ fn main() -> ExitCode {
         audio,
         overlay: args.overlay,
         menu: args.menu,
+        to_title: false,
+        start,
+        chosen: title::Chosen::Waiting,
+        fallback: Localization::default(),
         screenshot: args.screenshot.map(|path| Screenshot {
             path,
             after_frames: args.frames,

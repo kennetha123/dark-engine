@@ -325,6 +325,13 @@ impl WorldSave {
 /// Writes beside the save first, so a crash mid-write never leaves half a world.
 pub(crate) fn write(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
+    // The folder a game is saved in may not exist yet: a project ships without its saves.
+    if let Some(folder) = path
+        .parent()
+        .filter(|folder| !folder.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(folder)?;
+    }
     let partial = path.with_extension("ron.partial");
     let mut file = std::fs::File::create(&partial)?;
     file.write_all(text.as_bytes())?;

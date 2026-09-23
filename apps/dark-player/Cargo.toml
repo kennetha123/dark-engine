@@ -31,3 +31,7 @@ dark_world.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 dark_physics.workspace = true
+
+[dev-dependencies]
+# The title screen's tests write a saved world to list (`saves.rs`, `title.rs`).
+dark_sim.workspace = true
