@@ -39,6 +39,7 @@ mod demo;
 mod fx;
 mod pad;
 mod saves;
+mod settings;
 mod title;
 
 use std::collections::HashSet;
@@ -166,8 +167,19 @@ struct Player {
     start: Option<WorldStart>,
     /// What the title screen was last asked for.
     chosen: title::Chosen,
+    /// The pad's stick was pushed up or down last frame, so a held stick moves the choosing
+    /// once, not every frame.
+    pad_tilted: bool,
+    /// The same, sideways, for nudging a setting.
+    pad_pushed: bool,
     /// Strings for the title screen before the view exists.
     fallback: Localization,
+    /// What this player has set: language, loudness, the whole screen or a window.
+    settings: settings::Settings,
+    /// The project the settings belong to; none for a run with no project at all.
+    project: Option<Project>,
+    /// The window, for the fullscreen setting.
+    window: Option<Arc<Window>>,
     /// Language to start in, applied once the view exists.
     lang: Option<String>,
     screenshot: Option<Screenshot>,
@@ -202,21 +214,116 @@ impl Player {
         Flow::Exit
     }
 
+    /// Keeps the settings for next time, and shows them on the title screen as they are now.
+    fn settings_changed(&mut self) {
+        if let Some(project) = &self.project {
+            settings::save(project, &self.settings);
+        }
+        if let Mode::Title(title) = &mut self.mode {
+            title.shows(self.settings.clone());
+        }
+    }
+
+    /// Puts the window over the whole screen, or back in its frame.
+    fn show_as_set(&self) {
+        use dark_platform::winit::window::Fullscreen;
+        if let Some(window) = &self.window {
+            let how = self
+                .settings
+                .fullscreen
+                .then_some(Fullscreen::Borderless(None));
+            window.set_fullscreen(how);
+        }
+    }
+
+    /// Fills the screen, or gives it back. What the window is doing now decides which, so one
+    /// put back by anything else (a window manager) does not leave the setting stale.
+    fn toggle_fullscreen(&mut self) {
+        let filling = self
+            .window
+            .as_ref()
+            .is_some_and(|window| window.fullscreen().is_some());
+        self.settings.fullscreen = !filling;
+        self.show_as_set();
+        self.settings_changed();
+    }
+
     /// Whether this game can be saved and left: one started from the title screen. A joined
     /// game or a co-op host has other players in it, and a scripted run was told what to play.
     fn can_leave(&self) -> bool {
         self.start.is_some() && matches!(self.mode, Mode::Host(_))
     }
 
+    /// The pad on the title screen: the stick or the d-pad moves through the list, A takes what
+    /// is picked and B goes back, as the keys do.
+    fn title_pad(&mut self) {
+        let pad = self.pads.poll(&mut self.presses, self.focused);
+        let presses = self.presses.take_presses();
+        // The stick moves the choosing once a tilt, not once a tick.
+        let tilt = pad.movement.y;
+        let tilted = tilt.abs() > 0.5;
+        let stick = if tilted && !self.pad_tilted {
+            tilt.signum() as i32
+        } else {
+            0
+        };
+        self.pad_tilted = tilted;
+        // The d-pad's hotbar slots are up (1) and down (3) here — and 5 and 7 with the shoulder
+        // held, which a player resting a finger on it should not lose the d-pad for.
+        let dpad: i32 = pad
+            .numbers
+            .iter()
+            .map(|slot| match slot {
+                1 | 5 => -1,
+                3 | 7 => 1,
+                _ => 0,
+            })
+            .sum();
+        // Sideways on the stick nudges a setting that has a range.
+        let sideways = pad.movement.x;
+        if sideways.abs() > 0.5 && !self.pad_pushed {
+            self.chosen = match &mut self.mode {
+                Mode::Title(title) => title.nudge(sideways.signum() as i8),
+                _ => title::Chosen::Waiting,
+            };
+        }
+        self.pad_pushed = sideways.abs() > 0.5;
+        let strings = match &self.view {
+            Some(view) => view.strings(),
+            None => &self.fallback,
+        };
+        let Mode::Title(title) = &mut self.mode else {
+            return;
+        };
+        if stick + dpad != 0 {
+            title.move_by(stick + dpad, strings);
+        }
+        if presses.jump {
+            self.chosen = title.choose(strings);
+        }
+        if presses.dodge || pad.menu {
+            title.back();
+            self.chosen = title::Chosen::Waiting;
+        }
+    }
+
     /// The title screen: what the player picked, then the screen drawn again.
     fn title_frame(&mut self) -> Flow {
+        self.title_pad();
         match std::mem::replace(&mut self.chosen, title::Chosen::Waiting) {
             title::Chosen::Quit => return Flow::Exit,
             title::Chosen::Language => {
                 if let Some(view) = &mut self.view {
-                    view.cycle_language();
+                    self.settings.language = Some(view.cycle_language());
                 }
+                self.settings_changed();
             }
+            title::Chosen::Volume(delta) => {
+                self.settings.change_volume(delta);
+                self.audio.set_volume(self.settings.loudness());
+                self.settings_changed();
+            }
+            title::Chosen::Fullscreen => self.toggle_fullscreen(),
             title::Chosen::Play { save, fresh } => {
                 match self.start.as_ref().map(|start| start.start(save, fresh)) {
                     Some(Ok(app)) => {
@@ -444,6 +551,8 @@ impl Player {
 
 impl Game for Player {
     fn init(&mut self, window: Arc<Window>) {
+        self.window = Some(window.clone());
+        self.show_as_set();
         let mut renderer = match Renderer::new(window, self.internal_size) {
             Ok(renderer) => renderer,
             Err(err) => {
@@ -502,6 +611,8 @@ impl Game for Player {
             match key {
                 KeyCode::ArrowUp | KeyCode::KeyW => title.move_by(-1, strings),
                 KeyCode::ArrowDown | KeyCode::KeyS => title.move_by(1, strings),
+                KeyCode::ArrowLeft | KeyCode::KeyA => self.chosen = title.nudge(-1),
+                KeyCode::ArrowRight | KeyCode::KeyD => self.chosen = title.nudge(1),
                 KeyCode::Enter | KeyCode::Space | KeyCode::KeyE => {
                     self.chosen = title.choose(strings);
                 }
@@ -537,9 +648,11 @@ impl Game for Player {
                 KeyCode::Digit8 => self.number(8),
                 KeyCode::F2 => {
                     if let Some(view) = &mut self.view {
-                        view.cycle_language();
+                        self.settings.language = Some(view.cycle_language());
                     }
+                    self.settings_changed();
                 }
+                KeyCode::F11 => self.toggle_fullscreen(),
                 KeyCode::F1 => {
                     if let Some(view) = &mut self.view {
                         view.toggle_debug();
@@ -571,7 +684,10 @@ impl Game for Player {
                 None => tracing::warn!("nothing to save: this game has no world"),
             }
             app.world.resource_mut::<NetHost>().0.shutdown();
-            self.mode = Mode::Title(Box::new(title::Title::new(start.project.clone())));
+            self.mode = Mode::Title(Box::new(title::Title::new(
+                start.project.clone(),
+                self.settings.clone(),
+            )));
             self.menu = false;
         }
         if matches!(self.mode, Mode::Title(_)) {
@@ -1004,7 +1120,7 @@ fn main() -> ExitCode {
         None => None,
     };
     // Screenshot runs stay quiet; otherwise FMOD, when the project has it.
-    let audio = match (&project, &args.screenshot) {
+    let mut audio = match (&project, &args.screenshot) {
         (Some(project), None) => {
             audio_config(project).map_or_else(Audio::silent, |c| Audio::open(&c))
         }
@@ -1027,13 +1143,20 @@ fn main() -> ExitCode {
 
     // A game started by hand — a scripted run, a screenshot, co-op, a save named on the command
     // line — goes straight in. Otherwise the player is asked what to play (docs/PLAN.md §22).
-    let scripted = !args.title
-        && (args.screenshot.is_some()
-            || args.autopilot
-            || args.fight
-            || args.camp
-            || args.recruit
-            || args.save.is_some());
+    // Driven by flags rather than played: a picture or a route, nobody at the keys.
+    let by_hand =
+        args.screenshot.is_some() || args.autopilot || args.fight || args.camp || args.recruit;
+    let scripted = !args.title && (by_hand || args.save.is_some());
+    // What this player set last time they played: their language, loudness and window. A
+    // scripted run ignores them, so a picture is the same whoever took it and whatever they
+    // last set.
+    let settings = match (&project, by_hand) {
+        (Some(project), false) => settings::load(project),
+        _ => settings::Settings::default(),
+    };
+    audio.set_volume(settings.loudness());
+    // The language they read, unless this run asks for another.
+    let lang = args.lang.clone().or_else(|| settings.language.clone());
     if args.title && args.save.is_some() {
         tracing::warn!("--title opens the title screen, so --save is not used");
     }
@@ -1051,7 +1174,10 @@ fn main() -> ExitCode {
 
     let mut children = Vec::new();
     let mode = match (&start, &args.launch) {
-        (Some(start), _) => Mode::Title(Box::new(title::Title::new(start.project.clone()))),
+        (Some(start), _) => Mode::Title(Box::new(title::Title::new(
+            start.project.clone(),
+            settings.clone(),
+        ))),
         (None, launch) => match launch {
             Launch::Join(addr) => {
                 let Some(scene) = &mut scene else {
@@ -1166,7 +1292,7 @@ fn main() -> ExitCode {
         presses: TickInput::default(),
         pads: pad::Pads::new(),
         focused: true,
-        lang: args.lang.clone(),
+        lang,
         autopilot: args.autopilot,
         fight: args.fight,
         camp: args.camp,
@@ -1178,6 +1304,12 @@ fn main() -> ExitCode {
         to_title: false,
         start,
         chosen: title::Chosen::Waiting,
+        pad_tilted: false,
+        pad_pushed: false,
+        settings,
+        // A scripted run keeps its settings to itself: it was given them, not asked.
+        project: project.filter(|_| !by_hand),
+        window: None,
         fallback: Localization::default(),
         screenshot: args.screenshot.map(|path| Screenshot {
             path,

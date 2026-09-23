@@ -73,6 +73,9 @@ pub fn parse_version(text: &str) -> Result<u32, AudioError> {
 pub struct Audio {
     studio: Option<fmod::Studio>,
     pixels_per_metre: f32,
+    /// How loud the player asked for, and whether the mixer has taken it. The master bus is
+    /// only there once a bank holding it is loaded, so this is tried again until it takes.
+    volume: Option<f32>,
 }
 
 impl Audio {
@@ -81,6 +84,7 @@ impl Audio {
         Self {
             studio: None,
             pixels_per_metre: 16.0,
+            volume: None,
         }
     }
 
@@ -96,6 +100,7 @@ impl Audio {
                 Self {
                     studio: Some(studio),
                     pixels_per_metre: config.pixels_per_metre.max(1.0),
+                    volume: None,
                 }
             }
             Err(err) => {
@@ -129,8 +134,28 @@ impl Audio {
         }
     }
 
+    /// How loud the game is, 0 (silent) to 1 (as the project was mixed). Silence takes it
+    /// without a word, as it takes everything else.
+    pub fn set_volume(&mut self, volume: f32) {
+        self.volume = Some(volume);
+        self.take_volume();
+    }
+
+    /// Tries to hand the wanted volume to the mixer, and keeps it to try again if the mixer is
+    /// not ready for it (its master bus comes with a bank).
+    fn take_volume(&mut self) {
+        let (Some(studio), Some(volume)) = (&mut self.studio, self.volume) else {
+            return;
+        };
+        match studio.set_volume(volume) {
+            Ok(()) => self.volume = None,
+            Err(err) => tracing::debug!("the volume is not set yet: {err}"),
+        }
+    }
+
     /// Once a frame: FMOD mixes and plays what was asked for.
     pub fn update(&mut self) {
+        self.take_volume();
         if let Some(studio) = &mut self.studio
             && let Err(err) = studio.update()
         {
@@ -179,6 +204,7 @@ mod tests {
         let audio = Audio {
             studio: None,
             pixels_per_metre: 16.0,
+            volume: None,
         };
         let v = audio.to_fmod(Vec2::new(32.0, -48.0));
         assert_eq!((v.x, v.y, v.z), (2.0, 0.0, 3.0));

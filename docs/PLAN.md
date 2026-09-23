@@ -868,9 +868,19 @@ goes straight in, and `--title` forces the screen for a picture of it.
 
 - The screen is the project's name and a list: **carry on** (the newest game, with its name and
   the day it reached), **a new year**, **your games** (each save, newest first), **settings**
-  (the language, for now) and **leave**. Up and down choose, Enter (or Space, or E) takes,
-  Esc goes back. It is drawn by the game's own renderer in the project's font and language:
-  no second interface toolkit in the player.
+  and **leave**. Up and down choose, Enter (or Space, or E) takes, left and right nudge a
+  setting that has a range, Esc goes back; on a gamepad the stick or d-pad moves and nudges, A
+  takes, B or Start goes back. It is drawn by the game's own renderer in the project's font and
+  language: no second interface toolkit in the player.
+- Settings: the **language** (the project's, in turn; F2 in play changes and keeps it too), how
+  **loud** the game is (tenths, shown as a bar, set on FMOD's master bus — taking the row goes
+  up and comes round to silence, left and right go either way), and **the whole screen** or a
+  window (F11 in play does the same, and reads the window rather than the setting, so one put
+  back by anything else is not fought over). They are the player's, not the project's, and are
+  kept beside the games in `<project>/saves/settings.ron`, written beside and renamed over so a
+  crash mid-write loses nothing; a file that will not read is simply a new player's settings.
+- A scripted run — a screenshot, an autopilot — neither reads nor writes them, so a picture is
+  the same whoever takes it and whatever they last set.
 - Games live in the project's `saves` folder, one `.sav` each (`dark_world::WorldSave`). A new
   game takes the first free name — `game`, `game-2`, … — so none writes over another, and the
   folder is made when a game is first saved. A file that will not read is left out of the list
@@ -880,8 +890,10 @@ goes straight in, and `--title` forces the screen for a picture of it.
 - Only a game started from the title can be left with Q: a joined game and a co-op host have
   other players in them, and a scripted run was told what to play. The menu's line is shown only
   when it can be taken.
-- Known gaps: no settings beyond the language (no volume, no key or pad rebinding, no
-  fullscreen); the title screen takes no gamepad, only keys; a game cannot be deleted or renamed
+- Known gaps: no key or pad rebinding; loudness is one bus, not music and sound apart (there is
+  no music yet), and an older FMOD runtime without the bus calls simply plays as mixed; a game
+  installed somewhere the player cannot write keeps no settings (it says so in the log only);
+  a game cannot be deleted or renamed
   from the screen; at most twelve games are listed, the newest by the day they were written
   (older files stay in the folder and still play); no picture behind the title, and nothing plays
   (§1's music and ambience are not built); starting a game reloads the scene from disk, which is

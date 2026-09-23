@@ -38,8 +38,10 @@ cargo run -p dark-host -- --port 7777 --project ../adventurer   # headless host 
 cargo run -p dark-player -- --project ../adventurer --host 7777 --clients 1 --net-sim 60,20,5
                                                   # host plus one lagged local client
 ```
-Games are saved in `<project>/saves/*.sav`; the title screen lists them (`--title` forces it for
-a screenshot, `--save <file>` or any scripted flag goes straight into the world).
+Games are saved in `<project>/saves/*.sav` and the player's own settings (language, sound,
+fullscreen) in `saves/settings.ron`; the title screen lists the games and holds the settings, and
+takes the keyboard or a pad (`--title` forces it for a screenshot, `--save <file>` or any
+scripted flag goes straight into the world; a screenshot or autopilot run ignores the settings).
 `--day-secs <n>` shortens the day for testing; `--player <uuid>` keeps a stable identity.
 In the game: WASD/arrows walk, Shift runs, Space jumps, J attacks (again to combo), K dodges,
 E talks to an NPC in reach (number keys answer when a conversation offers choices; on its last
@@ -48,7 +50,7 @@ the night passes), 1–8 use the hotbar (food, drink, the cloak on or off, tent,
 soap), Ctrl+1–8 lay one down (walk over it to pick it up again), R relieves yourself, Q asks whoever is in reach to join you (again near your follower sends
 it away; with nobody near you leave your party), F1
 toggles the collision overlay (`--overlay` starts with it on), F2 switches language (`--lang ja`
-starts in Japanese), Esc opens the menu (standing and people's feelings; the world waits while
+starts in Japanese), F11 fills the screen, Esc opens the menu (standing and people's feelings; the world waits while
 nobody else is online; Q there saves the year and goes back to the title; `--menu` starts with it
 open). A gamepad works alongside the keyboard:
 left stick walks, left trigger runs, A jumps, X attacks, B dodges, Y talks, right shoulder asks

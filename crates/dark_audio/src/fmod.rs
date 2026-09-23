@@ -6,7 +6,7 @@
 #![allow(unsafe_code)]
 
 use std::collections::HashMap;
-use std::ffi::{CString, c_char, c_int, c_uint, c_void};
+use std::ffi::{CString, c_char, c_float, c_int, c_uint, c_void};
 use std::path::{Path, PathBuf};
 
 use libloading::Library;
@@ -63,6 +63,9 @@ struct Api {
     start: unsafe extern "C" fn(Handle) -> c_int,
     release_instance: unsafe extern "C" fn(Handle) -> c_int,
     set_listener: unsafe extern "C" fn(Handle, c_int, *const Attributes3d, *const Vector) -> c_int,
+    /// Setting the volume: a runtime without these still plays, it just plays as mixed.
+    get_bus: Option<unsafe extern "C" fn(Handle, *const c_char, *mut Handle) -> c_int>,
+    set_bus_volume: Option<unsafe extern "C" fn(Handle, c_float) -> c_int>,
     update: unsafe extern "C" fn(Handle) -> c_int,
     release: unsafe extern "C" fn(Handle) -> c_int,
 }
@@ -110,6 +113,15 @@ impl Studio {
                 })?
             };
         }
+        // One the game can do without: missing, that one thing is not done.
+        macro_rules! maybe {
+            ($name:literal) => {
+                // SAFETY: as `symbol!`, and only called when it was found.
+                unsafe { lib.get(concat!($name, "\0").as_bytes()) }
+                    .ok()
+                    .map(|symbol| *symbol)
+            };
+        }
         let api = Api {
             create: symbol!("FMOD_Studio_System_Create"),
             initialize: symbol!("FMOD_Studio_System_Initialize"),
@@ -120,6 +132,8 @@ impl Studio {
             start: symbol!("FMOD_Studio_EventInstance_Start"),
             release_instance: symbol!("FMOD_Studio_EventInstance_Release"),
             set_listener: symbol!("FMOD_Studio_System_SetListenerAttributes"),
+            get_bus: maybe!("FMOD_Studio_System_GetBus"),
+            set_bus_volume: maybe!("FMOD_Studio_Bus_SetVolume"),
             update: symbol!("FMOD_Studio_System_Update"),
             release: symbol!("FMOD_Studio_System_Release"),
         };
@@ -207,6 +221,25 @@ impl Studio {
         // listener's own".
         check("SetListenerAttributes", unsafe {
             (self.api.set_listener)(self.system, 0, &attributes, std::ptr::null())
+        })
+    }
+
+    /// How loud everything is, 0 (silent) to 1 (as mixed). The master bus is `bus:/`, which
+    /// every project's mix hangs from.
+    pub fn set_volume(&mut self, volume: f32) -> Result<(), AudioError> {
+        let (Some(get_bus), Some(set_volume)) = (self.api.get_bus, self.api.set_bus_volume) else {
+            // An older runtime without the bus calls: everything plays as the project mixed it.
+            return Ok(());
+        };
+        let path = c"bus:/";
+        let mut bus: Handle = std::ptr::null_mut();
+        // SAFETY: valid system, a nul-terminated path, and a valid out-pointer.
+        check("GetBus", unsafe {
+            get_bus(self.system, path.as_ptr(), &mut bus)
+        })?;
+        // SAFETY: `bus` came from GetBus on this system.
+        check("Bus_SetVolume", unsafe {
+            set_volume(bus, volume.clamp(0.0, 1.0))
         })
     }
 

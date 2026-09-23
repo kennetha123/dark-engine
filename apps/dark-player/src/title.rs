@@ -22,6 +22,10 @@ pub enum Chosen {
     },
     /// Change to the next language the project has.
     Language,
+    /// A tenth louder or quieter.
+    Volume(i8),
+    /// Windowed or the whole screen.
+    Fullscreen,
     Quit,
 }
 
@@ -33,6 +37,13 @@ enum Page {
     Settings,
 }
 
+/// A row of blocks for how loud the game is, so the setting reads at a glance.
+fn loudness_bar(volume: u8) -> String {
+    let full = usize::from(volume.min(crate::settings::LOUDEST));
+    let empty = usize::from(crate::settings::LOUDEST) - full;
+    format!("{}{}", "=".repeat(full), ".".repeat(empty))
+}
+
 /// The title screen, and where the player is in it.
 pub struct Title {
     page: Page,
@@ -40,16 +51,24 @@ pub struct Title {
     saves: Vec<Slot>,
     /// A new game's file, made when one is started.
     project: dark_assets::Project,
+    /// What the settings page shows; the game keeps and acts on them.
+    settings: crate::settings::Settings,
 }
 
 impl Title {
-    pub fn new(project: dark_assets::Project) -> Self {
+    pub fn new(project: dark_assets::Project, settings: crate::settings::Settings) -> Self {
         Self {
             page: Page::Root,
             picked: 0,
             saves: saves::list(&project),
             project,
+            settings,
         }
+    }
+
+    /// The settings shown, after the game has changed them.
+    pub fn shows(&mut self, settings: crate::settings::Settings) {
+        self.settings = settings;
     }
 
     /// The game's name, shown above the list.
@@ -97,6 +116,20 @@ impl Title {
                 .collect(),
             Page::Settings => vec![
                 format!("{}  {}", text("ui.language_setting"), text("ui.language")),
+                format!(
+                    "{}  {}",
+                    text("ui.volume"),
+                    loudness_bar(self.settings.volume)
+                ),
+                format!(
+                    "{}  {}",
+                    text("ui.fullscreen"),
+                    text(if self.settings.fullscreen {
+                        "ui.on"
+                    } else {
+                        "ui.off"
+                    })
+                ),
                 text("ui.back"),
             ],
         }
@@ -155,11 +188,22 @@ impl Title {
             },
             Page::Settings => match picked {
                 0 => Chosen::Language,
+                1 => Chosen::Volume(1),
+                2 => Chosen::Fullscreen,
                 _ => {
                     self.back();
                     Chosen::Waiting
                 }
             },
+        }
+    }
+
+    /// Left or right on a setting that has a range: the sound, so far. Anything else is
+    /// unmoved by it.
+    pub fn nudge(&mut self, delta: i8) -> Chosen {
+        match (self.page, self.picked) {
+            (Page::Settings, 1) => Chosen::Volume(delta),
+            _ => Chosen::Waiting,
         }
     }
 
@@ -195,7 +239,7 @@ mod tests {
     #[test]
     fn with_no_games_going_the_list_is_new_game_settings_and_quit() {
         let project = project("empty");
-        let mut title = Title::new(project);
+        let mut title = Title::new(project, crate::settings::Settings::default());
         let items = title.items(&strings());
         assert_eq!(items.len(), 3, "{items:?}");
         assert_eq!(title.choose(&strings()), {
@@ -231,7 +275,7 @@ mod tests {
         .unwrap();
         let world = dark_world::WorldSave::new(dark_sim::WorldSim::new(&def, 1).unwrap());
         std::fs::write(project.path("saves/game.sav"), world.to_ron().unwrap()).unwrap();
-        let mut title = Title::new(project);
+        let mut title = Title::new(project, crate::settings::Settings::default());
         let items = title.items(&strings());
         assert_eq!(items.len(), 5, "carry on, new, games, settings, quit");
         match title.choose(&strings()) {

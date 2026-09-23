@@ -577,10 +577,12 @@ impl DemoView {
     }
 
     /// Switches to the project's next language and shows its name for a moment.
-    pub fn cycle_language(&mut self) {
+    /// Reads on in the project's next language, and says which that is.
+    pub fn cycle_language(&mut self) -> String {
         self.strings.cycle();
         self.language_shown = LANGUAGE_BANNER_SECS;
         tracing::info!("language: {}", self.strings.language());
+        self.strings.language().to_owned()
     }
 
     fn look(&self, c: &DrawCharacter) -> LookView {

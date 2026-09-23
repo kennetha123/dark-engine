@@ -96,6 +96,10 @@ fn every_line_and_name_has_text_in_every_language_and_faces_and_font_load() {
         "ui.back".to_owned(),
         "ui.quit".to_owned(),
         "ui.language_setting".to_owned(),
+        "ui.volume".to_owned(),
+        "ui.fullscreen".to_owned(),
+        "ui.on".to_owned(),
+        "ui.off".to_owned(),
         "ui.to_title".to_owned(),
     ];
     for entry in entries.flatten() {
