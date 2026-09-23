@@ -1002,11 +1002,15 @@ Two things to read off that table.
 
 - **Ten to sixteen kilometres needs no new coordinate system.** An `f32` at 256 000 px is still
   exact to a sixty-fourth of a pixel, which is far finer than a game drawn at 16 px to the tile
-  can see. What *does* break at that size is the engine's habit of nudging a sort key by a
-  hundredth of a pixel — a shadow drawn behind its owner's feet. That nudge is lost at 262 144 px,
-  and **16 km is 256 000 px: six per cent under the cliff**. So the sort keys get an explicit
-  whole-number sub-layer instead of an epsilon, which is a small change, wanted for its own sake,
-  and after it the 10–16 km world has no precision problem at all.
+  can see. What *did* break at that size was the engine's habit of nudging a sort key by a
+  hundredth of a pixel — a shadow drawn behind its owner's feet — which an `f32` loses at
+  262 144 px, and **16 km is 256 000 px: six per cent under the cliff**. **Built:** a sprite now
+  carries a whole-number sub-layer beside its sort key, and ties are settled by it, so the fine
+  order holds however far out the world goes. A test checks both halves — that the old nudge
+  really does die out there, and that the sub-layer does not. The interface settles some of its
+  own ties by the same hundredths, at orders of a thousand million where even a whole unit is
+  already lost; those are decoration, they rest on nothing but the order things are handed over
+  in, and the sub-layer is there for them when they are next touched.
 - **Only the top row needs `Spot`.** Chunk streaming, made land, spatial queries and area-of-
   interest networking are the same at every size. `Spot` is a coordinate type behind which the
   rest is unchanged, so building the middle row first does not have to be undone to reach the top

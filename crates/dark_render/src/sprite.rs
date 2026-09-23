@@ -52,6 +52,11 @@ pub struct Sprite {
     pub layer: i32,
     /// Fine ordering within a layer: larger draws later (in front). Usually the feet's world y.
     pub sort_y: f32,
+    /// Settles ties at the same `sort_y`: larger draws later. A blob shadow sits just behind the
+    /// feet it belongs to, a panel's words just in front of the panel. It is a whole number
+    /// rather than a hair off `sort_y` because an `f32` cannot hold a hair off a large number —
+    /// past 262 144 px it cannot hold a hundredth at all (docs/PLAN.md §24.0).
+    pub sub: i16,
     /// Pixels to draw above `position` (height off the ground, e.g. a jump).
     pub lift: f32,
     pub kind: SpriteKind,
@@ -70,6 +75,7 @@ impl Sprite {
             color: [1.0; 4],
             layer: 0,
             sort_y: position.y,
+            sub: 0,
             lift: 0.0,
             kind: SpriteKind::Plain,
         }
@@ -230,13 +236,16 @@ pub(crate) fn build_batches(
 ) -> FrameBatches {
     // Stable: equal keys keep submission order. total_cmp, because a NaN position must not
     // break the total order sort_by requires.
-    let key = |layer: i32, y: f32| (layer, y);
-    let before = |a: (i32, f32), b: (i32, f32)| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1));
-    sprites.sort_by(|a, b| before(key(a.layer, a.sort_y), key(b.layer, b.sort_y)));
+    // A mesh (a posed skeleton) has no sub-layer of its own; it ties as if it were zero.
+    let key = |layer: i32, y: f32, sub: i16| (layer, y, sub);
+    let before = |a: (i32, f32, i16), b: (i32, f32, i16)| {
+        a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2))
+    };
+    sprites.sort_by(|a, b| before(key(a.layer, a.sort_y, a.sub), key(b.layer, b.sort_y, b.sub)));
     let mut mesh_order: Vec<usize> = (0..meshes.len()).collect();
     mesh_order.sort_by(|&a, &b| {
         let (a, b) = (&meshes[a], &meshes[b]);
-        before(key(a.layer, a.sort_y), key(b.layer, b.sort_y))
+        before(key(a.layer, a.sort_y, 0), key(b.layer, b.sort_y, 0))
     });
     let mut frame = FrameBatches::default();
     let mut seq = 0u32;
@@ -247,11 +256,11 @@ pub(crate) fn build_batches(
     let mut draw_meshes_before = |frame: &mut FrameBatches,
                                   seq: &mut u32,
                                   bodies: &mut Vec<Drawn>,
-                                  until: Option<(i32, f32)>| {
+                                  until: Option<(i32, f32, i16)>| {
         // Meshes that sort before `until` (all of them when `None`); a sprite wins ties.
         while let Some(&&m) = next_mesh.peek() {
             let mesh = &meshes[m];
-            let due = until.is_none_or(|k| before(key(mesh.layer, mesh.sort_y), k).is_lt());
+            let due = until.is_none_or(|k| before(key(mesh.layer, mesh.sort_y, 0), k).is_lt());
             if !due {
                 break;
             }
@@ -295,7 +304,7 @@ pub(crate) fn build_batches(
             &mut frame,
             &mut seq,
             &mut bodies,
-            Some(key(sprite.layer, sprite.sort_y)),
+            Some(key(sprite.layer, sprite.sort_y, sprite.sub)),
         );
         let (tw, th) = texture_size(sprite.texture);
         let size = Vec2::new(sprite.src.w as f32, sprite.src.h as f32) * sprite.repeat;
@@ -463,31 +472,39 @@ pub fn fit_viewport(internal: (u32, u32), window: (u32, u32)) -> Viewport {
 mod tests {
     use super::*;
 
-    /// How far from the origin the world may go, in one number (docs/PLAN.md §24.0).
+    /// How far from the origin the world may go — which, now that ties are settled by a whole
+    /// number beside the sort key, is no longer a question about hundredths of a pixel.
     ///
-    /// Fine ordering is a world `y` held in an `f32`, and the game settles ties by nudging it a
-    /// hundredth of a pixel — a blob shadow drawn behind its owner's feet. Far enough out, an
-    /// `f32` can no longer hold a hundredth, the two sprites tie, and the shadow draws on the
-    /// feet. That happens just past 262 144 px: **16.38 km** at 16 px to the metre, which is why
-    /// §24.0 says a world of ten to sixteen kilometres needs no new coordinates and a larger one
-    /// does. When the nudge is replaced by a whole-number sub-layer, this test is what says the
-    /// limit has moved.
+    /// The old way nudged `sort_y` by a hundredth to put a blob shadow behind its owner's feet,
+    /// and an `f32` stops holding that nudge past 262 144 px (16.38 km at 16 px to the metre).
+    /// Both are checked here: the nudge really does die out there, and the sub-layer does not.
     #[test]
-    fn the_sort_nudge_says_how_far_the_world_may_reach() {
+    fn the_fine_order_holds_however_far_out_the_world_goes() {
         let behind = |y: f32| (y - 0.01) < y;
-        // 4 km, 10 km, 16 km: a shadow still sorts behind the feet it belongs to.
+        // 4 km, 10 km, 16 km: the old nudge still told the two apart.
         for y in [64_000.0, 160_000.0, 256_000.0, 262_144.0] {
             assert!(
                 behind(y),
                 "the nudge is lost at {y} px, sooner than expected"
             );
         }
-        // Past that it is lost, and only the stable sort keeps the order by luck of submission.
+        // Past that it is lost, and the order would have been luck of the draw.
         for y in [300_000.0, 1_600_000.0] {
             assert!(
                 !behind(y),
                 "the nudge outlived {y} px; §24.0 may be too careful"
             );
+        }
+        // The sub-layer holds anywhere, because it is not a number added to a bigger one.
+        for y in [0.0, 262_144.0, 1_600_000.0, 16_000_000.0] {
+            let feet = sprite(1, y, layer::WORLD);
+            let mut shadow = sprite(1, y, layer::WORLD);
+            shadow.sub = -1;
+            // Given feet first, the shadow must still be drawn before them.
+            let mut both = [feet, shadow];
+            let frame = build_batches(&mut both, &[], |_| (16, 16));
+            assert_eq!(frame.instances.len(), 2);
+            assert_eq!(both[0].sub, -1, "the shadow sorted first at {y} px");
         }
     }
 

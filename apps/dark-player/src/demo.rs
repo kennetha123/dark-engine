@@ -737,7 +737,10 @@ impl DemoView {
             let mut blob =
                 Sprite::fill(self.white, center - size / 2.0, size, [0.0, 0.0, 0.0, 0.4]);
             blob.kind = SpriteKind::Blob;
-            blob.sort_y = sort_y - 0.01;
+            // Just behind the feet it belongs to. A sub-layer rather than a hair off `sort_y`,
+            // which an f32 stops being able to hold far from the origin (docs/PLAN.md §24.0).
+            blob.sort_y = sort_y;
+            blob.sub = -1;
             self.frame_sprites.push(blob);
 
             if self.debug {
