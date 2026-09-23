@@ -52,6 +52,8 @@ struct Recipe {
     white: TextureId,
     top: Option<Rect>,
     face: Option<Rect>,
+    /// What to draw where the land made water, if it made any.
+    water: Option<[f32; 4]>,
     jump_apex: f32,
     /// Which props, colliders and ways out belong to which piece, sorted by piece so a piece can
     /// find its own in a moment. Only the things are listed; the land itself is walked.
@@ -78,6 +80,10 @@ struct Piece {
     max: Vec2,
     statics: Vec<(u64, Sprite)>,
     overlay: Vec<(u64, Sprite)>,
+    /// Whether the land under this piece had been made when it was made (docs/PLAN.md §24.4).
+    /// A piece made over land that was shaped afterwards would show level grass over a hill for
+    /// ever, and one made over land since let go of would show a hill that is no longer there.
+    land_was_made: bool,
 }
 
 impl Default for Piece {
@@ -88,6 +94,7 @@ impl Default for Piece {
             max: Vec2::splat(f32::NEG_INFINITY),
             statics: Vec::new(),
             overlay: Vec::new(),
+            land_was_made: false,
         }
     }
 }
@@ -114,6 +121,32 @@ impl Piece {
     fn seen_in(&self, min: Vec2, max: Vec2) -> bool {
         self.min.x < max.x && min.x < self.max.x && self.min.y < max.y && min.y < self.max.y
     }
+}
+
+/// Whether the land under a piece whose top-left corner is at `corner` has all been made.
+///
+/// A piece is 256 px and a patch of land is 64 tiles, so at any tile size the game uses a piece
+/// lies inside one patch; the four corners are asked all the same, in case a project's tiles are
+/// so small that a patch is narrower than a piece. Ground beyond the map counts as made: there is
+/// nothing there to shape.
+fn land_under(terrain: &dark_physics::Terrain, corner: Vec2) -> bool {
+    let far = corner + Vec2::splat(PIECE - 0.5);
+    [
+        (corner.x, corner.y),
+        (far.x, corner.y),
+        (corner.x, far.y),
+        (far.x, far.y),
+    ]
+    .into_iter()
+    .all(|(x, y)| {
+        let (col, row) = terrain.tile_of(Vec2::new(x, y));
+        match (u32::try_from(col), u32::try_from(row)) {
+            (Ok(col), Ok(row)) => {
+                col >= terrain.cols() || row >= terrain.rows() || terrain.is_made(col, row)
+            }
+            _ => true,
+        }
+    })
 }
 
 /// Whether a sprite is drawn inside `min..max`.
@@ -184,7 +217,21 @@ impl MapView {
         if self.recipe.is_none() {
             return;
         }
+        let terrain = &world.map.collision.terrain;
         for nth in self.reach(min - Vec2::ONE, max + Vec2::ONE) {
+            // A piece whose land has been made — or let go of — since it was made is made again;
+            // the rest are left alone, however much of the map has been shaped elsewhere.
+            let corner = Vec2::new((nth % self.across) as f32, (nth / self.across) as f32) * PIECE;
+            let made = land_under(terrain, corner);
+            if self
+                .pieces
+                .get(nth)
+                .and_then(|piece| piece.as_ref())
+                .is_some_and(|piece| piece.land_was_made != made)
+            {
+                self.pieces[nth] = None;
+                self.made.retain(|held| *held != nth);
+            }
             if matches!(self.pieces.get(nth), Some(None)) {
                 self.make(nth, world);
             }
@@ -322,6 +369,7 @@ impl MapView {
                 white,
                 top: frame_rect(def.terrain.top_frame.unwrap_or(def.ground.frame)),
                 face: frame_rect(def.terrain.face_frame.unwrap_or(def.ground.frame)),
+                water: def.land.map(|_| [0.10, 0.22, 0.42, 1.0]),
                 jump_apex,
                 props: Vec::new(),
                 colliders: Vec::new(),
@@ -382,13 +430,20 @@ impl MapView {
         // A top is drawn its own height above the tile it covers, so the tallest level the scene
         // asks for says how far the land reaches beyond the piece holding it. That is known
         // without walking a single tile.
-        let tallest = def
+        let drawn = def
             .terrain
             .fill
             .iter()
             .filter_map(|fill| fill.cell.level())
             .max()
             .unwrap_or(0);
+        // Made land can raise a tile as high as the land makes them, and the view has not seen
+        // any of it yet, so it must allow for the highest there is (docs/PLAN.md §24.4).
+        let tallest = if def.land.is_some() {
+            drawn.max(dark_land::HIGHEST)
+        } else {
+            drawn
+        };
         view.before.y = view
             .before
             .y
@@ -416,6 +471,7 @@ impl MapView {
         let mut piece = Piece::default();
         let corner = Vec2::new((nth % self.across) as f32, (nth / self.across) as f32) * PIECE;
         let terrain = &world.map.collision.terrain;
+        piece.land_was_made = land_under(terrain, corner);
         let (from_col, from_row) = terrain.tile_of(corner);
         let (to_col, to_row) = terrain.tile_of(corner + Vec2::splat(PIECE - 0.5));
         // Every sprite carries where it would have stood in one list of the whole map, so what is
@@ -572,6 +628,14 @@ fn tiles(
             tint(white, origin, Vec2::splat(tile), [0.9, 0.1, 0.1, 0.35], 0.0),
             true,
         );
+        // A wall a scene drew is hidden under its own art; one the land made has none, so it is
+        // drawn as what it is — water — rather than left as grass nobody may walk on. The terrain
+        // knows which is which, so an authored cliff on a made map is not painted blue.
+        if let Some(water) = recipe.water.filter(|_| !terrain.drawn_by_hand(col, row)) {
+            let mut s = tint(white, origin, Vec2::splat(tile), water, 0.0);
+            s.layer = layer::TERRAIN;
+            land(s, false);
+        }
         return;
     }
     let level = cell.level().unwrap_or(0);

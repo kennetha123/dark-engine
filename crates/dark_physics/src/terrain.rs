@@ -1,5 +1,7 @@
 //! Height grid: each tile has a ground level; walls and the map edge block at every height.
 
+use std::collections::{HashMap, HashSet};
+
 use glam::Vec2;
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +44,14 @@ pub struct Terrain {
     level_height: f32,
     /// One place per patch of the grid, holding the patch's tiles once it has any.
     patches: Vec<Option<Box<[Cell]>>>,
+    /// Which patches have been made from the land already, so none is ever made twice. Whoever
+    /// draws this terrain asks [`Self::is_made`] about the ground under what they drew, and draws
+    /// it again when the answer changes.
+    made: HashSet<usize>,
+    /// The tiles somebody drew by hand, a bit each, for the patches that have any. Made land is
+    /// laid underneath them: a hill drawn on a made world is still there once the seed has had
+    /// its say.
+    drawn: HashMap<usize, Box<[u64]>>,
     /// Patches across.
     wide: u32,
 }
@@ -62,6 +72,8 @@ impl Terrain {
             tile,
             level_height,
             patches: vec![None; (wide as usize) * (down as usize)],
+            made: HashSet::new(),
+            drawn: HashMap::new(),
             wide,
         }
     }
@@ -104,13 +116,14 @@ impl Terrain {
     /// time.
     pub const PATCH: u32 = PATCH;
 
-    /// Whether the patch holding a tile has been shaped yet.
-    pub fn is_shaped(&self, col: u32, row: u32) -> bool {
-        col < self.cols && row < self.rows && self.patches[self.place(col, row).0].is_some()
+    /// Whether the patch holding a tile has been made from the land yet.
+    pub fn is_made(&self, col: u32, row: u32) -> bool {
+        col < self.cols && row < self.rows && self.made.contains(&self.place(col, row).0)
     }
 
-    /// Shapes the patch holding a tile, asking `what` for each tile in it. A patch already
-    /// shaped is left alone, so land made once is never made differently later.
+    /// Makes the patch holding a tile, asking `what` for each tile in it. A patch already made is
+    /// left alone, so land made once is never made differently later, and what was drawn by hand
+    /// is kept: the made land goes underneath it.
     ///
     /// This is how a world too large to write down is made: the patches near the players are
     /// shaped as they are reached, from the world's own seed (docs/PLAN.md §24.4).
@@ -119,7 +132,7 @@ impl Terrain {
             return;
         }
         let (patch, _) = self.place(col, row);
-        if self.patches[patch].is_some() {
+        if !self.made.insert(patch) {
             return;
         }
         let (first_col, first_row) = (col - col % PATCH, row - row % PATCH);
@@ -127,13 +140,103 @@ impl Terrain {
         for within_row in 0..PATCH {
             for within_col in 0..PATCH {
                 let (c, r) = (first_col + within_col, first_row + within_row);
-                if c < self.cols && r < self.rows {
-                    tiles[(within_row * PATCH + within_col) as usize] =
-                        what(i64::from(c), i64::from(r));
+                let within = (within_row * PATCH + within_col) as usize;
+                if c >= self.cols || r >= self.rows {
+                    continue;
                 }
+                // A tile somebody drew stays as they drew it; the rest is the land's.
+                tiles[within] = if self.is_drawn(patch, within) {
+                    self.patches[patch]
+                        .as_ref()
+                        .map_or(Cell::Floor, |tiles| tiles[within])
+                } else {
+                    what(i64::from(c), i64::from(r))
+                };
             }
         }
         self.patches[patch] = Some(tiles);
+    }
+
+    /// Lets go of made patches that nobody is near, once more than `budget` of them are held.
+    /// Returns how many were let go.
+    ///
+    /// Land made from a seed is not worth keeping: the same seed makes the same patch again, tile
+    /// for tile, so a player walking back finds the hill they walked over whether or not it was
+    /// kept. What a patch costs while it is kept is 8 KB, and a player running for an hour makes
+    /// some three thousand of them, so a long evening of four players would hold a few hundred
+    /// megabytes of ground nobody is standing on (docs/PLAN.md §24.4).
+    ///
+    /// Patches holding anything drawn by hand are kept whatever happens: nothing can make those
+    /// again. `keepers` are the places to keep land around — the players — in tiles, and
+    /// `near_patches` how far around each of them to keep it.
+    pub fn forget_far(
+        &mut self,
+        keepers: &[(i64, i64)],
+        near_patches: i64,
+        budget: usize,
+    ) -> usize {
+        if self.made.len() <= budget {
+            return 0;
+        }
+        let patch = i64::from(PATCH);
+        let near: Vec<(i64, i64)> = keepers
+            .iter()
+            .map(|(col, row)| (col.div_euclid(patch), row.div_euclid(patch)))
+            .collect();
+        let wide = self.wide as i64;
+        let mut let_go = Vec::new();
+        for &made in &self.made {
+            if self.drawn.contains_key(&made) {
+                continue;
+            }
+            let (col, row) = (made as i64 % wide, made as i64 / wide);
+            let kept = near.iter().any(|(keeper_col, keeper_row)| {
+                (col - keeper_col).abs() <= near_patches && (row - keeper_row).abs() <= near_patches
+            });
+            if !kept {
+                let_go.push(made);
+            }
+        }
+        for made in &let_go {
+            self.made.remove(made);
+            self.patches[*made] = None;
+        }
+        let_go.len()
+    }
+
+    /// Whether a tile was drawn by hand rather than made from the land. Whoever draws the map
+    /// needs this: a wall a scene drew has its own art, and one the land made is water.
+    pub fn drawn_by_hand(&self, col: i64, row: i64) -> bool {
+        if col < 0 || row < 0 || col >= i64::from(self.cols) || row >= i64::from(self.rows) {
+            return false;
+        }
+        let (patch, within) = self.place(col as u32, row as u32);
+        self.is_drawn(patch, within)
+    }
+
+    /// Whether a tile of a patch was drawn by hand rather than made.
+    fn is_drawn(&self, patch: usize, within: usize) -> bool {
+        self.drawn
+            .get(&patch)
+            .is_some_and(|rows| rows[within / 64] & (1 << (within % 64)) != 0)
+    }
+
+    /// Remembers that a tile of a patch was drawn by hand. One bit a tile, and only for the
+    /// patches that have any: a whole patch of drawing costs half a kilobyte against its 8 KB of
+    /// tiles.
+    fn mark_drawn(&mut self, patch: usize, within: usize) {
+        let rows = self
+            .drawn
+            .entry(patch)
+            .or_insert_with(|| vec![0u64; (PATCH * PATCH / 64) as usize].into_boxed_slice());
+        rows[within / 64] |= 1 << (within % 64);
+    }
+
+    /// Forgets that a tile of a patch was drawn by hand, so the land may have it back.
+    fn forget_drawn(&mut self, patch: usize, within: usize) {
+        if let Some(rows) = self.drawn.get_mut(&patch) {
+            rows[within / 64] &= !(1u64 << (within % 64));
+        }
     }
 
     /// `None` outside the grid; level ground where nothing has been shaped.
@@ -148,15 +251,30 @@ impl Terrain {
         })
     }
 
-    /// Sets the tiles of a rectangle, clipped to the grid. Levelling ground that was never
-    /// shaped leaves it unshaped, so filling a whole world with `Floor` costs nothing.
+    /// Sets the tiles of a rectangle, clipped to the grid, and remembers them as drawn by hand:
+    /// land made from a seed afterwards goes underneath them (docs/PLAN.md §24.4).
+    ///
+    /// `Floor` is the exception, and says nothing: it is the ground every map starts as, so maps
+    /// are filled with it by the acre and a made world would be wiped flat by one. To level made
+    /// ground by hand — to make room on it for something built — a scene draws `Level(0)`, which
+    /// stands at the same height and *is* an opinion. Filling with `Floor` where nothing has been
+    /// put therefore still costs nothing at all.
     pub fn fill(&mut self, col: u32, row: u32, width: u32, height: u32, cell: Cell) {
         for r in row..(row.saturating_add(height)).min(self.rows) {
             for c in col..(col.saturating_add(width)).min(self.cols) {
                 let (patch, within) = self.place(c, r);
+                if cell == Cell::Floor {
+                    // Floor takes back whatever was said here, as later fills win; where nothing
+                    // was said it costs nothing at all.
+                    if self.patches[patch].is_none() {
+                        continue;
+                    }
+                    self.forget_drawn(patch, within);
+                } else {
+                    self.mark_drawn(patch, within);
+                }
                 let tiles = match &mut self.patches[patch] {
                     Some(tiles) => tiles,
-                    None if cell == Cell::Floor => continue,
                     place => {
                         place.insert(vec![Cell::Floor; (PATCH * PATCH) as usize].into_boxed_slice())
                     }

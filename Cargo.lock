@@ -1037,6 +1037,7 @@ name = "dark_view"
 version = "0.1.0"
 dependencies = [
  "dark_assets",
+ "dark_land",
  "dark_physics",
  "dark_render",
  "dark_sprite",

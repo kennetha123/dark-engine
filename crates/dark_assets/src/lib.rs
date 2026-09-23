@@ -699,7 +699,10 @@ impl SceneDef {
 /// Land made from a seed rather than drawn by hand: see the `dark_land` crate.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct LandDef {
-    /// The world's own number. The same seed is the same country, on every machine.
+    /// This scene's own number — each scene that asks to be made carries one, and two scenes with
+    /// the same seed are the same country. The same seed makes the same land on every machine, but
+    /// nothing checks that a host and a client are playing the same scene files: a client given a
+    /// different seed would walk on ground its host does not have (docs/PLAN.md §24.4).
     pub seed: u64,
 }
 

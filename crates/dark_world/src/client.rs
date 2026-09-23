@@ -224,6 +224,21 @@ impl ClientSession {
 
     fn predict(&mut self, input: TickInput) {
         let dt = self.timestep.step().as_secs_f32();
+        // Made land is shaped here exactly as the host shapes it, from the map's own seed, or
+        // this player would be predicting against level ground where the host has a hill
+        // (docs/PLAN.md §24.4). The same numbers on both sides, so the same land.
+        if let Some(me) = &self.me {
+            let map = me.map;
+            let at = me.body.position;
+            if let Some(map) = self.maps.maps.get_mut(map.0 as usize)
+                && let Some(land) = map.land
+            {
+                crate::land::shape_around(&mut map.collision.terrain, &land, at);
+                // And let go of it on the same terms as the host: a client walks as far as a host
+                // does, and holds the ground it walked over just as long.
+                crate::land::forget_far_from(&mut map.collision.terrain, &[at]);
+            }
+        }
         let Some(me) = &mut self.me else {
             return;
         };

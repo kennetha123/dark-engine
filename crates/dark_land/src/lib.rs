@@ -2,7 +2,7 @@
 //! rather than written down.
 //!
 //! A world too large to draw by hand — ten or sixteen kilometres, a hundred million tiles — is
-//! not stored. Given the world's seed, this says what any tile is: level ground, a step up onto a
+//! not stored. Given the seed the scene carries, this says what any tile is: level ground, a step up onto a
 //! rise, or water too deep to wade. Ask for the same tile twice, on any machine, and the answer
 //! is the same, because every number here is a whole one: a host and a client that disagreed
 //! about the land would have players falling through different rocks.
@@ -18,16 +18,22 @@ use serde::{Deserialize, Serialize};
 /// How many tiles apart the corners of the coarsest lattice are: the width of a whole country's
 /// worth of high and low ground. Two thousand tiles is two kilometres at a tile to the metre, so
 /// a world of sixteen carries eight of them across — highlands, lowlands and the water between.
-const COARSE: i64 = 2_048;
+pub const COARSE: i64 = 2_048;
 /// How many lattices are laid over one another, each half the width and half the weight of the
 /// one before. Six of them take 2 km down to 64 tiles, which is the size of a copse.
 const OCTAVES: u32 = 6;
-/// Everything below this is water. Measured over six kilometres of a made country, it leaves
-/// about a twelfth of it under water: lakes and inlets rather than an ocean.
+/// Everything below this is water. Measured over five countries, twenty-five kilometres of each,
+/// it leaves 13% to 21% of the land under water, 17% of it taken together: lakes and inlets
+/// rather than an ocean.
 const WATER: u32 = 24_300;
 /// Where each step up begins, out of the full height. Measured the same way, these leave about
-/// three fifths of the country walkable plain and the rest rising in three steps.
+/// half the country walkable plain, and the rest rising in three steps — roughly 12, 13 and 4
+/// parts in a hundred, so the highest ground is rare.
 const STEPS: [u32; 3] = [38_100, 41_600, 47_900];
+
+/// The highest a made tile ever stands, in steps. Anything drawing made land must allow for a
+/// tile this high being drawn above where it stands, before it has seen any of the land.
+pub const HIGHEST: u8 = STEPS.len() as u8;
 
 /// The land of one world, from its seed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,9 +59,13 @@ impl Land {
         }
     }
 
-    /// How high a tile stands, from nothing (0) to the top of the world (65 535). Several
-    /// lattices laid over one another: a broad one for the shape of the country, finer ones for
-    /// the shape of a hillside.
+    /// How high a tile stands. Several lattices laid over one another: a broad one for the shape
+    /// of the country, finer ones for the shape of a hillside.
+    ///
+    /// The number runs 0 to 65 535 in principle, but it is a weighted average of lattice corners
+    /// and so keeps to the middle of that: measured over five countries of twenty-five kilometres
+    /// each it ran from 5 278 to 60 328, and the thresholds below are set against that spread,
+    /// not against the ends.
     pub fn height(&self, col: i64, row: i64) -> u32 {
         let mut height: u64 = 0;
         let mut weight: u64 = 0;
@@ -85,7 +95,7 @@ impl Land {
         mix(top, bottom, down)
     }
 
-    /// How high one corner of a lattice stands: the world's seed and that corner, stirred.
+    /// How high one corner of a lattice stands: the seed and that corner, stirred.
     fn corner(&self, col: i64, row: i64, octave: u32) -> u32 {
         let mut n = self.seed;
         for part in [col as u64, row as u64, u64::from(octave)] {
@@ -120,17 +130,32 @@ fn stir(mut n: u64) -> u64 {
 mod tests {
     use super::*;
 
-    /// The same tile, asked for twice, in any order, is the same tile. Everything rests on this:
-    /// a host and a client that disagreed would have players falling through different rocks.
+    /// The land a seed makes, written down. Asking the same tile twice in one process proves
+    /// nothing — the answer is a pure sum — so this pins the sum itself: change the stirring,
+    /// the easing, the lattices or the thresholds and this fails, which is what should happen,
+    /// because a host and a client built from different code would disagree about the ground.
     #[test]
-    fn a_tile_is_always_the_same_tile() {
-        let land = Land::new(12_345);
-        let asked: Vec<Cell> = (0..500).map(|n| land.cell(n * 7, n * 13)).collect();
-        let again: Vec<Cell> = (0..500).rev().map(|n| land.cell(n * 7, n * 13)).collect();
-        assert_eq!(asked, again.into_iter().rev().collect::<Vec<_>>());
-        // And far from the origin, where a world of sixteen kilometres reaches.
-        let far = (16_000, 15_999);
-        assert_eq!(land.cell(far.0, far.1), land.cell(far.0, far.1));
+    fn a_seed_makes_the_same_land_it_always_made() {
+        let land = Land::new(20_260_923);
+        // A handful of tiles, near and far, above and below the origin.
+        let asked = [
+            (0i64, 0i64),
+            (1, 1),
+            (-1, -1),
+            (9_350, 100),
+            (128_000, 128_000),
+            (-4_321, 8_765),
+            (16_000, 15_999),
+            (1_000_000, -1_000_000),
+        ];
+        let heights: Vec<u32> = asked.iter().map(|(c, r)| land.height(*c, *r)).collect();
+        assert_eq!(
+            heights,
+            vec![
+                21_474, 21_475, 21_474, 24_590, 28_185, 27_156, 29_480, 32_859
+            ],
+            "the land of seed 20260923 is not what it was"
+        );
     }
 
     /// Another seed is another country.
@@ -147,7 +172,14 @@ mod tests {
     /// not one flat plain, and not a wall of cliffs either.
     #[test]
     fn the_land_has_plains_rises_and_water() {
-        let land = Land::new(7);
+        for seed in [1u64, 2, 7, 11, 20_260_923] {
+            a_country_of(seed);
+        }
+    }
+
+    /// What one seed's country is made of, as parts of a hundred.
+    fn a_country_of(seed: u64) {
+        let land = Land::new(seed);
         let mut counts = [0usize; 5];
         for row in 0..500 {
             for col in 0..500 {
@@ -163,38 +195,66 @@ mod tests {
         let all: usize = counts.iter().sum();
         let part = |n: usize| counts[n] * 100 / all;
         assert!(
-            (3..20).contains(&part(0)),
-            "water is {}% of the country: {counts:?}",
+            (8..28).contains(&part(0)),
+            "water is {}% of seed {seed}'s country: {counts:?}",
             part(0)
         );
         assert!(
-            (40..80).contains(&part(1)),
-            "{}% of it is level plain: {counts:?}",
+            (40..70).contains(&part(1)),
+            "{}% of seed {seed} is level plain: {counts:?}",
             part(1)
         );
         assert!(
-            counts[2] > all / 50 && counts[3] > all / 200 && counts[4] > 0,
-            "the rises are too few: {counts:?}"
+            counts[2] > all / 20 && counts[3] > all / 50 && counts[4] > all / 200,
+            "seed {seed}'s rises are too few: {counts:?}"
         );
     }
 
-    /// Hillsides are walked up, not climbed: a tile's neighbours are at most one step away, or a
-    /// walker meets a wall of cliffs it can never get up.
+    /// Hillsides are walked up, not climbed. A rise of two steps at once is a wall a walker can
+    /// never get up, and a world full of them is a world of pens.
+    ///
+    /// The real reason it holds is that neighbouring tiles differ in height by far less than the
+    /// gap between one step and the next, so that is what is checked — everywhere, in every
+    /// direction. Add an octave or narrow the steps and this says so.
     #[test]
     fn the_land_rises_a_step_at_a_time() {
-        let land = Land::new(3);
-        let mut steep = 0;
-        for row in 0..300 {
-            for col in 0..300 {
-                let here = land.cell(col, row).level();
-                let east = land.cell(col + 1, row).level();
-                if let (Some(a), Some(b)) = (here, east)
-                    && a.abs_diff(b) > 1
-                {
-                    steep += 1;
+        let mut worst = 0u32;
+        for seed in [1u64, 3, 20_260_923] {
+            let land = Land::new(seed);
+            // Four windows, near and far from the origin, north-west of it as well as south-east.
+            for (from_col, from_row) in [(0i64, 0i64), (7_000_000, -3_000_000), (-120_345, 98_765)]
+            {
+                for row in 0..200 {
+                    for col in 0..200 {
+                        let (c, r) = (from_col + col, from_row + row);
+                        let here = land.height(c, r);
+                        for (dc, dr) in [(1, 0), (0, 1), (1, 1), (1, -1)] {
+                            worst = worst.max(here.abs_diff(land.height(c + dc, r + dr)));
+                        }
+                        let level = land.cell(c, r).level();
+                        for (dc, dr) in [(1, 0), (0, 1), (1, 1), (1, -1)] {
+                            if let (Some(a), Some(b)) = (level, land.cell(c + dc, r + dr).level()) {
+                                assert!(
+                                    a.abs_diff(b) <= 1,
+                                    "a rise of {} steps at ({c}, {r}) in seed {seed}",
+                                    a.abs_diff(b)
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
-        assert_eq!(steep, 0, "{steep} places rise more than a step at once");
+        // And why it holds: no two neighbours are ever a step's worth of height apart.
+        let narrowest = STEPS
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .chain(std::iter::once(STEPS[0] - WATER))
+            .min()
+            .unwrap_or(0);
+        assert!(
+            worst * 4 < narrowest,
+            "neighbours differ by up to {worst}, against {narrowest} between one step and the next"
+        );
     }
 }

@@ -78,12 +78,15 @@ cargo build --release -p dark-player -p dark-cli
 cargo run --release -p dark-cli -- package ../adventurer ../builds/Adventurer
 ```
 
-The country a world seed makes, from far above (it also says where the ground changes most):
+The country a seed makes, from far above (it also says where the ground changes most):
 ```
 cargo run -p dark-cli -- preview-land 20260923 16000 20 out.png
 ```
-A map made from a seed rather than drawn says `land: (seed: n)` in its scene; the land around each
-player is shaped as they walk, and what the scene draws by hand is left alone.
+A map made from a seed rather than drawn says `land: (seed: n)` in its scene, and each such scene
+carries its own seed. The land around each player is shaped as they walk and let go of once nobody
+is near it; what the scene draws by hand is kept tile for tile (`Floor` says nothing — level made
+ground on purpose with `Level(0)`), and a start or a doorway the land put under water is moved to
+the nearest ground somebody can stand on.
 
 The world simulation, fast-forwarded:
 ```

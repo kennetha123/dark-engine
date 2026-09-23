@@ -11,6 +11,15 @@ pub fn preview(seed: u64, tiles: u32, every: u32, out: &str) -> Result<(), Strin
     }
     let land = Land::new(seed);
     let side = tiles.div_ceil(every);
+    // A picture is four bytes a pixel, so asking for 16 km at a tile to the pixel would be a
+    // gigabyte of it. Say so instead of reaching for the memory.
+    const WIDEST: u32 = 8_192;
+    if side > WIDEST {
+        return Err(format!(
+            "{tiles} tiles at {every} to the pixel is {side} pixels across; \
+             at most {WIDEST} — ask for more tiles to the pixel"
+        ));
+    }
     let mut rgba = vec![0u8; (side as usize) * (side as usize) * 4];
     for row in 0..side {
         for col in 0..side {

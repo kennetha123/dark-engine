@@ -62,6 +62,9 @@ pub struct Map {
     /// Scene path inside the project.
     pub name: String,
     pub def: SceneDef,
+    /// What makes this map's land, where it is made rather than drawn (docs/PLAN.md §24.4).
+    /// Each map has its own, from its own seed.
+    pub land: Option<dark_land::Land>,
     /// Props exactly as placed; the view draws these same props.
     pub props: Vec<PlacedProp>,
     pub collision: World,
@@ -126,19 +129,74 @@ impl Maps {
                 .map_err(|(name, message)| invalid(project, &name, message))?;
             maps.push(map);
         }
-        // Land made from a seed is shaped around the spawns before they are looked at, or a
-        // player could be found a place to stand on ground that does not exist yet (§24.4).
-        for map in &mut maps {
-            let Some(land) = map.def.land else {
+        // Land made from a seed is shaped around every place the scene puts somebody before
+        // those places are looked at: a spawn, an arrival, a villager's post, an enemy's, an
+        // inn's bed. Otherwise they are all checked against level ground that does not exist
+        // yet, and the first player to walk near turns it into a lake under their feet (§24.4).
+        for (nth, map) in maps.iter_mut().enumerate() {
+            let Some(land) = map.land else {
                 continue;
             };
-            let land = dark_land::Land::new(land.seed);
-            let spawn = map
+            let places = map
                 .def
                 .player
-                .as_ref()
-                .map_or(Vec2::ZERO, |player| Vec2::from(player.spawn));
-            crate::land::shape_around(&mut map.collision.terrain, &land, spawn);
+                .iter()
+                .map(|player| player.spawn)
+                .chain(map.def.npcs.iter().flat_map(|npc| {
+                    std::iter::once(npc.position).chain(npc.day.iter().map(|entry| entry.at))
+                }))
+                .chain(map.def.enemies.iter().map(|enemy| enemy.position))
+                .chain(map.def.inns.iter().map(|inn| inn.bed))
+                .chain(arrivals[nth].iter().copied())
+                .collect::<Vec<_>>();
+            for at in places {
+                crate::land::shape_around(&mut map.collision.terrain, &land, Vec2::from(at));
+            }
+            // Where the land made a lake of the place the player starts, the shore is used
+            // instead. A made world has no say in where a scene puts people, and refusing to load
+            // would be honest and useless (§24.4). Only what the engine must place to be playable
+            // at all is moved; a villager or an enemy the scene put in a lake is still refused,
+            // because that is a scene to fix, not a spawn to nudge.
+            if let Some(player) = &mut map.def.player {
+                let at = Vec2::from(player.spawn);
+                if let Some(dry) =
+                    crate::land::dry_ground_near(&mut map.collision, &land, at, SPAWN_CHECK_RADIUS)
+                    && dry != at
+                {
+                    tracing::info!(
+                        "{}: the player's start was under water, so it is {dry}",
+                        map.name
+                    );
+                    player.spawn = (dry.x, dry.y);
+                }
+            }
+        }
+        // The same for where a way out arrives: an arrival is written in the map it leaves from,
+        // so it is moved once the map it leads to has been made.
+        for nth in 0..maps.len() {
+            for which in 0..maps[nth].exits.len() {
+                let to = maps[nth].exits[which].to.0 as usize;
+                let at = maps[nth].exits[which].spawn;
+                let Some(land) = maps[to].land else {
+                    continue;
+                };
+                let dry = crate::land::dry_ground_near(
+                    &mut maps[to].collision,
+                    &land,
+                    at,
+                    SPAWN_CHECK_RADIUS,
+                );
+                if let Some(dry) = dry
+                    && dry != at
+                {
+                    tracing::info!(
+                        "{}: a way out arrived under water, so it arrives at {dry}",
+                        maps[nth].name
+                    );
+                    maps[nth].exits[which].spawn = dry;
+                    maps[nth].def.exits[which].spawn = (dry.x, dry.y);
+                }
+            }
         }
         validate_spawns(&maps).map_err(|(name, message)| invalid(project, &name, message))?;
         Ok(Self {
@@ -324,6 +382,7 @@ fn build_map(
         })
         .collect();
     Ok(Map {
+        land: def.land.map(|land| dark_land::Land::new(land.seed)),
         name,
         def,
         props,
@@ -388,13 +447,6 @@ impl Plugin for MapsPlugin {
         let maps = self.0;
         // A map made from a seed brings its land into the world, so the patches ahead of every
         // player keep being shaped as they walk (docs/PLAN.md §24.4).
-        let made = maps
-            .maps
-            .iter()
-            .find_map(|map| map.def.land.map(|land| dark_land::Land::new(land.seed)));
-        if let Some(land) = made {
-            app.insert_resource(crate::land::MadeLand(land));
-        }
         app.insert_resource(maps).add_systems(
             FixedUpdate,
             // Paused, bodies still take their positions as the previous ones, so nothing jitters.
@@ -404,8 +456,7 @@ impl Plugin for MapsPlugin {
                 // anyone out of it before they have gone through.
                 (
                     // The land ahead is made before anyone walks onto it.
-                    crate::land::shape_around_players
-                        .run_if(bevy_ecs::prelude::resource_exists::<crate::land::MadeLand>),
+                    crate::land::shape_around_players,
                     step_bodies,
                     take_exits,
                     crate::crowd::make_room_for_each_other,

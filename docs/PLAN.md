@@ -974,7 +974,7 @@ how many are in it out of how many it holds, `1/4` until it is `4/4` and closed.
   7777, so two games cannot be opened on one machine; the name in the list is the project's, not
   the host's own, and no password or invitation guards a game — anyone on the network can join.
 
-## 24. The open world: chunks and streaming (§24.1–§24.3 built, §24.4 well begun)
+## 24. The open world: chunks and streaming (§24.1–§24.4 built, §24.5–§24.6 designed)
 
 The world is one continuous outdoors the player walks across without a loading screen. **How big
 is the game's choice, not the engine's** — the first game may want ten or sixteen kilometres, and
@@ -995,7 +995,7 @@ At 16 px to the tile with a tile about a metre (the adventurer project):
 | Across | Tiles a side | Pixels a side | Tiles in all | What it needs on top of the last row |
 |---|---|---|---|---|
 | **4 km** | 4 000 | 64 000 | 16 M | Nothing new: it is inside today's map cap of 4096 tiles. Only §24.2 (draw what is seen) and §24.3's collider grid, both of which the engine wants anyway. |
-| **10–16 km** | 10–16 000 | 160–256 000 | 100–256 M | **Done:** the cap is lifted, the land costs only what is shaped in it, and a frame costs what is on the screen. Still wanted: making the land from the seed, and streaming what is shaped. Coordinates stay plain absolute `f32`. |
+| **10–16 km** | 10–16 000 | 160–256 000 | 100–256 M | **Done:** the cap is lifted, the land costs only what is shaped in it, a frame costs what is on the screen, the land is made from a seed as the players walk, and what nobody is near is let go of. Still wanted: what grows on the land (§24.5). Coordinates stay plain absolute `f32`. |
 | **100 km** | 100 000 | 1 600 000 | 10 000 M | `Spot { chunk, at }` coordinates and rebasing (§24.4). Everything else is the same code. |
 
 Two things to read off that table.
@@ -1144,7 +1144,7 @@ everything the world holds:
   regions are named places joined by travel times, with **no coordinates at all**, so distance in
   chunks is a new index over them. §24.5's stamps are where a chunk learns which region it is in.
 
-### 24.4 The ground itself (the land itself built; making it and streaming it to come)
+### 24.4 The ground itself (built: held in patches, made from a seed, shaped and let go of)
 
 - **The land is no longer written down where nothing has been done to it.** Terrain was one
   array of every tile in the map — a quarter of a gigabyte at 16 km, before anyone had shaped a
@@ -1174,35 +1174,75 @@ everything the world holds:
 - A **chunk** is 64×64 tiles — 1024 px at 16 px to the tile. Sixteen kilometres is 250 chunks a
   side, a hundred is 1563. A chunk holds its tiles' heights, the props standing on them, and what
   lives there. The size of a chunk is a budget, not a world limit.
-- **The land is made, not read** (`dark_land`, built): the world's seed and a tile give the same
-  answer on every machine, worked out in whole numbers so a host and a client cannot disagree —
-  one that did would have players falling through different rocks. Six lattices are laid over one
-  another, the broadest two kilometres across and each next half the width and half the weight, so
-  a country has highlands, lowlands and the water between, down to copses of rough ground. What
-  comes out is water, level plain, or one of three steps up; measured over twenty-five kilometres
-  that is about a twelfth water and three fifths plain, and a hillside never rises more than one
-  step at a time, so there are no cliffs a walker can never get up.
+- **The land is made, not read** (`dark_land`, built): a seed and a tile give the same answer on
+  every machine, worked out in whole numbers so a host and a client cannot disagree — one that did
+  would have players falling through different rocks. Six lattices are laid over one another, the
+  broadest two kilometres across and each next half the width and half the weight, so a country
+  has highlands, lowlands and the water between, down to copses of rough ground. What comes out is
+  water, level plain, or one of three steps up. **Measured** over five countries, twenty-five
+  kilometres of each: **17%** water (13–21% by seed), **55%** level plain, and the three steps
+  12%, 13% and 4%. A hillside never rises more than one step at a time, so there are no cliffs a
+  walker can never get up.
 - **It is shaped around the players as they walk** (`dark_world::land`, built): the patches within
   two of each player — 128 tiles, three screenfuls — are made if they have not been made already,
-  and never made twice, so a player walking back finds the hill they walked over. The same patches
-  are made the same way on every machine, so a client predicts against the ground the host has.
-  A map says `land: (seed: n)` to be made this way; one without it is drawn by hand as before, and
-  what *is* drawn by hand is left alone where the two meet.
+  and never made twice. The same patches are made the same way on every machine, so a client
+  predicts against the ground the host has. A map says `land: (seed: n)` in its scene to be made
+  this way; one without it is drawn by hand as before.
+- **What is drawn by hand wins, tile by tile.** A scene's own fills are remembered as drawn — one
+  bit a tile, only for the patches that have any — and the made land is laid underneath them. So a
+  hand-drawn rock stays a rock, and the 4 095 tiles around it are still the land's own.
+  **`Floor` is the exception and says nothing**: it is the ground every map starts as, filled by
+  the acre, and a made world would be wiped flat by one such fill. To level made ground on purpose
+  — to make room on it for something built — a scene draws **`Level(0)`**, which stands at the
+  same height and *is* an opinion; a later `Floor` over a drawn tile takes the opinion back, as
+  later fills have always won. Filling with `Floor` where nothing has been put still costs
+  nothing at all.
+- **Land nobody is near is let go of**, on the host and on every client alike (a client shapes and
+  releases around the one player it predicts). A map keeps 4 096 made patches — 32 MB — and past
+  that drops the ones more than eight patches (512 tiles) from every player; patches holding
+  hand-drawn tiles are never dropped, because nothing can make those again. Nothing is lost by it: the seed
+  makes the same patch again, tile for tile. Without this a map only grew — **measured** at 0.4 ms
+  and 8 KB a patch, a player running makes some 3 000 patches an hour, so an evening of four
+  players would have held a few hundred megabytes of ground nobody was standing on.
+- **What shaping costs, measured** (release build, this machine): 0.4 ms a patch. Walking makes
+  five patches at a time when a player crosses into the next one — a **2.8 ms** tick, about once
+  every five seconds of running, against a 16.6 ms budget — and the 25 patches of arriving
+  somewhere new cost 10 ms, which happens at map load, not in a tick. So the shaping is done in
+  `FixedUpdate` where it is asked for, and worker threads are not needed yet. They become the
+  answer when §24.5 puts trees, rivers and roads on the land and a patch costs more than a tick
+  can spare; the shape of the code (a patch at a time, made from a seed, never twice) is what
+  makes that a change of scheduling rather than a change of design.
+- **Where a scene puts people, the land may have put a lake.** A start or an arrival that cannot
+  be stood on is moved to the nearest ground that can be, looked for by asking the land itself
+  rather than by shaping it — eight ways out, a tile at a time, as far as two coarse lattices —
+  and only what is settled on is then shaped, so a long search costs no ground. A villager or an
+  enemy placed in water is still refused at load: that is a scene to fix, not a spawn to nudge.
+- **A piece of the drawn map knows which land it was drawn over.** Each piece (§24.2) remembers
+  whether the patch beneath it had been made, and is drawn again when that changes — so land
+  shaped or let go of far away costs nothing, and a piece is never left showing level grass over a
+  hill, or a hill that has been let go of.
 - `dark-cli preview-land <seed> <tiles> <tiles-per-pixel> <out.png>` draws the country a seed
   makes from far above, and says where in it the ground changes most — somewhere worth standing to
   see what a seed made.
 - Known gaps here: only the land's shape is made. What grows on it (trees, rocks, grass), where
   the roads and rivers run, and where anyone lives are still §24.5's work, so a made world is at
-  present a country with nothing in it. Nothing yet stops a spawn landing in a lake — the map
-  refuses to load, which is honest but unhelpful; a made world should find its own dry ground.
+  present a country with nothing in it — and a scene's scattered props are placed before the land
+  is made, so they would fall in lakes, and the clearing kept around a start is worked out before
+  a start in water is moved; scatter on made land belongs with §24.5 too. The **editor** draws a
+  made map as the flat ground it is before anyone walks it, and shows a start where the scene puts
+  it rather than where the game will move it. A walk around
+  a large lake can also cost more than the 12 000 tiles a path is allowed (§24.3), and nothing in
+  the first game walks a made world yet. And **nothing checks that a host and its clients hold the
+  same scene files**: two machines given different seeds would each stand on their own country,
+  and the handshake (§23) would not notice. That check belongs with the protocol, not with the
+  land.
 - An authored chunk is a patch laid over what was made; a chunk a player has changed is a smaller
   patch again, in the save.
-- Chunks are made on **worker threads**, in a ring ahead of each player (five by five resident,
-  the middle nine simulated), and let go behind. Count it honestly: crossing one chunk of the ring
-  makes **five** new ones, a chunk is 1024 px, and a player walks at 80 px a second and runs at
-  150. That is about 23 chunks a minute walking, 44 running, and up to four players going four
-  ways — call it **200 a minute**, so a chunk has **tens of milliseconds**, not seconds. That is
-  the generator's budget, and it is why generation is a job and not a load.
+- When a patch does become too dear for a tick, it is made on **worker threads**, in a ring ahead
+  of each player, and let go behind. Count it honestly: crossing one chunk of the ring makes
+  **five** new ones, a chunk is 1024 px, and a player walks at 80 px a second and runs at 150.
+  That is about 23 chunks a minute walking, 44 running, and up to four players going four ways —
+  call it **200 a minute**, so a chunk would have **tens of milliseconds**, not seconds.
 - What a resident chunk costs has to be **measured, not assumed**. The heights are 8 KB and the
   colliders a few more; the sprites are the part that varies, because a wooded hillside emits one
   for every raised tile, every rim and every prop, and that is what today's `MapView` already does
