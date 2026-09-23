@@ -204,7 +204,7 @@ docs/            this plan
 | M7 ✅ | Narrative + save | Storylets, dialogue, relationships/marriage, endings, full world save (done; see §17) |
 | M8 ✅ | Editor MVP | Maps + height, database, roles/factions, calendar, storylets, hitbox/enemy editors, multi-client playtest, manual slice overrides (done; see §18) |
 | M9 | Polish + ship | Steam lobby/relay, lighting, particles, Luau, localization, export |
-| M10 | Open world | Chunk streaming, made land, visible-set drawing, spatial sim, world authoring (see §24) |
+| M10 | Open world | Visible-set drawing, spatial sim, chunk streaming, made land, world authoring. Size is the game's choice (§24.0); the design holds to 100 km (see §24) |
 
 ## 8. Risks
 
@@ -976,21 +976,50 @@ how many are in it out of how many it holds, `1/4` until it is `4/4` and closed.
 
 ## 24. The open world: chunks and streaming (designed; §24.1 built)
 
-The world is one continuous outdoors the player walks across without a loading screen, as large
-as 100 km on a side. Interiors stay as they are: a house, a cave or a dungeon is a scene behind
-a door (§10), loaded in a moment, and the rules below are about the outdoors only.
+The world is one continuous outdoors the player walks across without a loading screen. **How big
+is the game's choice, not the engine's** — the first game may want ten or sixteen kilometres, and
+the design must not be the reason a later one cannot have a hundred. Interiors stay as they are:
+a house, a cave or a dungeon is a scene behind a door (§10), loaded in a moment, and the rules
+below are about the outdoors only.
 
-**The numbers this has to survive.** The adventurer project is 16 px to the tile and a tile is
-about a metre, so 100 km is 100 000 tiles, 1 600 000 px, and 100 km square is **ten thousand
-million tiles**. Two bytes a tile would be 20 GB. So the first decision decides the rest:
+**Nothing that costs time may grow with the world.** Every frame and every tick is paid for by
+what is near the players, never by how much world exists. That is the rule the rest of §24
+serves, and each piece below names the thing that breaks it today. Hold to it and the size stops
+being an engine question: the same code runs a four-kilometre world and a hundred-kilometre one,
+and only the numbers in a couple of types change.
+
+### 24.0 What each size costs
+
+At 16 px to the tile with a tile about a metre (the adventurer project):
+
+| Across | Tiles a side | Pixels a side | Tiles in all | What it needs on top of the last row |
+|---|---|---|---|---|
+| **4 km** | 4 000 | 64 000 | 16 M | Nothing new: it is inside today's map cap of 4096 tiles. Only §24.2 (draw what is seen) and §24.3's collider grid, both of which the engine wants anyway. |
+| **10–16 km** | 10–16 000 | 160–256 000 | 100–256 M | Lift the cap; stream chunks; make the land from the seed; spatial simulation. Coordinates stay plain absolute `f32`. |
+| **100 km** | 100 000 | 1 600 000 | 10 000 M | `Spot { chunk, at }` coordinates and rebasing (§24.4). Everything else is the same code. |
+
+Two things to read off that table.
+
+- **Ten to sixteen kilometres needs no new coordinate system.** An `f32` at 256 000 px is still
+  exact to a sixty-fourth of a pixel, which is far finer than a game drawn at 16 px to the tile
+  can see. What *does* break at that size is the engine's habit of nudging a sort key by a
+  hundredth of a pixel — a shadow drawn behind its owner's feet. That nudge is lost at 262 144 px,
+  and **16 km is 256 000 px: six per cent under the cliff**. So the sort keys get an explicit
+  whole-number sub-layer instead of an epsilon, which is a small change, wanted for its own sake,
+  and after it the 10–16 km world has no precision problem at all.
+- **Only the top row needs `Spot`.** Chunk streaming, made land, spatial queries and area-of-
+  interest networking are the same at every size. `Spot` is a coordinate type behind which the
+  rest is unchanged, so building the middle row first does not have to be undone to reach the top
+  one — but the systems it touches (physics, drawing, the wire, sound) should be written so their
+  position type can change without them being rewritten.
+
+**Storage decides the same way.** Even the middle row is 100–256 million tiles: at two bytes each
+that is a quarter of a gigabyte of ground nobody drew. So at any size past a few kilometres:
 
 - **The land is not stored. It is worked out.** Ground, height, woods, rivers and roads come from
   the world seed, the same answer on every machine, worked out for the piece being walked on and
   let go behind. What a designer makes by hand, and what players change, is stored — and that is
   small, because it is only the places that have someone's hand in them.
-- **Nothing that costs time may grow with the world.** Every frame and every tick is paid for by
-  what is near the players, never by how much world exists. This is the rule the rest of §24
-  serves, and each piece below names the thing that breaks it today.
 
 ### 24.1 Seeing where you are (built)
 
@@ -1004,7 +1033,8 @@ a screenful and never zooms out past 1:1, so on a map of any size one is lost im
   be worked on with that edge down the middle of the screen, and panning or zooming can no longer
   wander off into nothing and leave a designer hunting for their own map.
 - The fitting is `apps/dark-editor/src/minimap.rs`, apart from the interface and tested without a
-  window as `scene_ops` is: a map of 100 km fits its box, a door 44 px wide is still drawn, and a
+  window as `scene_ops` is: a map fits its box at any size up to the 100 km ceiling, a door 44 px
+  wide is still drawn, and a
   click in the box leaves the view looking at the place that was clicked — the click, the clamp,
   the rounding and the view's own mapping are each harmless alone and meet there. Hand-placed
   props are marked; scattered undergrowth is not, or the map would be nothing but dots.
@@ -1057,8 +1087,11 @@ everything the world holds:
 
 ### 24.4 The ground itself
 
-- A **chunk** is 64×64 tiles — 1024 px at 16 px to the tile. A hundred kilometres is 1563 chunks
-  a side. A chunk holds its tiles' heights, the props standing on them, and what lives there.
+- A **chunk** is 64×64 tiles — 1024 px at 16 px to the tile. Sixteen kilometres is 250 chunks a
+  side, a hundred is 1563. A chunk holds its tiles' heights, the props standing on them, and what
+  lives there. The size of a chunk is a budget, not a world limit: the world is however many of
+  them the game wants, and the cap on a map's size (4096 tiles) is lifted here because the
+  outdoors stops being one map.
 - A chunk is **made, not read**: `(world seed, chunk)` gives the same chunk on every machine,
   worked out in whole numbers so a host and a client cannot disagree. An authored chunk is a patch
   laid over what was made; a chunk a player has changed is a smaller patch again, in the save.
@@ -1072,18 +1105,21 @@ everything the world holds:
   colliders a few more; the sprites are the part that varies, because a wooded hillside emits one
   for every raised tile, every rim and every prop, and that is what today's `MapView` already does
   for whole maps. The ring's size follows the measurement, not the other way about.
-- **Where a thing is** becomes `Spot { chunk, at }` — which chunk, and where in it. A client
-  rebases on its own player's chunk; the host cannot, because its four players may be 50 km apart,
-  so it rebases **per body** on that body's own chunk, and the collider grid is keyed by chunk
-  rather than by one shared origin. Either way no coordinate an `f32` touches is bigger than a few
-  thousand pixels.
-- Why that matters, at 1 600 000 px: an `f32` there is only exact to **an eighth of a pixel**, in
-  a game drawn at 16 px to the tile. Positions quantise, movement judders, and the bisection that
-  ends a blocked move against a wall stops resolving. The sort keys go too: a shadow is drawn
-  behind its owner's feet by taking a hundredth of a pixel off its sort key, and an `f32` cannot
-  hold that nudge past **262 144 px — 16 km**. (The interface already nudges sort keys at 3e9,
-  where a whole unit is lost; that only works because the sort is stable. It is decoration there;
-  it is the ground under the player's feet here.)
+- **Where a thing is** stays an absolute `f32` position up to about sixteen kilometres (§24.0),
+  and every system here is written to work that way first. What must change at any size is the
+  **sort keys**: a shadow is drawn behind its owner's feet by taking a hundredth of a pixel off
+  its sort key, and an `f32` cannot hold that nudge past 262 144 px, which 16 km very nearly is.
+  A whole-number sub-layer beside the sort key replaces the epsilon and the cliff goes away. (The
+  interface already nudges sort keys at 3e9, where a whole unit is lost; that works only because
+  the sort is stable. Decoration there; the ground under the player's feet here.)
+- **Past sixteen kilometres**, where an `f32` is no longer fine enough to hold a position (an
+  eighth of a pixel at 1 600 000 px: movement judders and a blocked move stops resolving against
+  a wall), a position becomes `Spot { chunk, at }` — which chunk, and where in it. A client
+  rebases on its own player's chunk; the host cannot, because its players may be 50 km apart, so
+  it rebases **per body**, and the collider grid is keyed by chunk rather than by one origin.
+  Nothing else in §24 changes. That is the point of naming it here: physics, drawing, the wire and
+  sound should each take a position from one type, so the day it becomes a `Spot` is a day of
+  changing that type and not of rewriting them.
 - **The save** stops being one file of everything and becomes the world's own state (§17) plus the
   chunks that differ from what the seed makes. §17's save is flat lists of characters, structures,
   drops and people with no place-key; the list that grows with the world is the people, and what
@@ -1131,12 +1167,17 @@ M10 is this section, and it splits by what needs chunks and what does not.
   crowds, blows, snapshots and distant people, all of which are keyed on chunks that do not exist
   until §24.4 does.
 - **Then** §24.5 (authoring) and §24.6 (company).
+- **The size is chosen last, not first.** Everything above is the same work for four kilometres
+  or a hundred; what the chosen size decides is only whether §24.4 ends with absolute positions
+  or with `Spot` (§24.0). A game that turns out to want ten kilometres pays for none of the
+  hundred-kilometre machinery, and a game that later wants a hundred does not start again.
 
 ### Known gaps and risks
 
-- A hundred kilometres of *made* land is not a hundred kilometres of *worth walking to*. This says
-  where the tiles come from, not what is out there; that is the game's problem, and §21 (people's
-  days and lives) is the start of the answer.
+- Made land is not land *worth walking to*. This says where the tiles come from, not what is out
+  there; that is the game's problem, and §21 (people's days and lives) is the start of the answer.
+  It is also the real argument for ten kilometres over a hundred: the engine will carry either,
+  and the smaller one is the one a studio this size can fill.
 - Made land has to agree exactly on every machine, or players fall through different rocks.
   Whole-number generation is the plan, and it has to be tested against itself on both platforms.
   Agreeing on the rocks is only half of it: the physics that slides a body along them is `f32`

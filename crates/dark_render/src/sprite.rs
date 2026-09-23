@@ -448,6 +448,34 @@ pub fn fit_viewport(internal: (u32, u32), window: (u32, u32)) -> Viewport {
 mod tests {
     use super::*;
 
+    /// How far from the origin the world may go, in one number (docs/PLAN.md §24.0).
+    ///
+    /// Fine ordering is a world `y` held in an `f32`, and the game settles ties by nudging it a
+    /// hundredth of a pixel — a blob shadow drawn behind its owner's feet. Far enough out, an
+    /// `f32` can no longer hold a hundredth, the two sprites tie, and the shadow draws on the
+    /// feet. That happens just past 262 144 px: **16.38 km** at 16 px to the metre, which is why
+    /// §24.0 says a world of ten to sixteen kilometres needs no new coordinates and a larger one
+    /// does. When the nudge is replaced by a whole-number sub-layer, this test is what says the
+    /// limit has moved.
+    #[test]
+    fn the_sort_nudge_says_how_far_the_world_may_reach() {
+        let behind = |y: f32| (y - 0.01) < y;
+        // 4 km, 10 km, 16 km: a shadow still sorts behind the feet it belongs to.
+        for y in [64_000.0, 160_000.0, 256_000.0, 262_144.0] {
+            assert!(
+                behind(y),
+                "the nudge is lost at {y} px, sooner than expected"
+            );
+        }
+        // Past that it is lost, and only the stable sort keeps the order by luck of submission.
+        for y in [300_000.0, 1_600_000.0] {
+            assert!(
+                !behind(y),
+                "the nudge outlived {y} px; §24.0 may be too careful"
+            );
+        }
+    }
+
     fn sprite(texture: u32, y: f32, layer: i32) -> Sprite {
         let mut s = Sprite::new(
             TextureId(texture),
