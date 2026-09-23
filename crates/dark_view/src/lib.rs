@@ -21,6 +21,54 @@ use glam::Vec2;
 /// A screenful of the first game is 640×360, so a view meets three or four pieces a side.
 const PIECE: f32 = 256.0;
 
+/// How many places in the drawing order one piece's land may take. A piece is sixteen tiles a
+/// side and a tile draws a handful of things, so this is room to spare.
+const PER_PIECE: u64 = 1 << 20;
+/// Where the things standing on the land begin, after every piece's land.
+const PROPS_FROM: u64 = 1 << 50;
+/// And where the ways out begin, after those.
+const EXITS_FROM: u64 = 1 << 55;
+
+/// How many pieces a sprite may cross before it is simply drawn wherever the camera looks. The
+/// ground covers every piece there is, and listing it against each of them would be the very
+/// cost this is all about.
+const SPREAD: usize = 64;
+
+/// How many pieces are kept made at once. A screenful reaches a dozen, so this is a good deal of
+/// walking about before the piece made longest ago is let go.
+const KEPT: usize = 512;
+
+/// What a piece of a map is made from: the map itself and the pictures its things are drawn with.
+/// Held by whoever is drawing, and lent to the view when a piece has to be made.
+pub struct Scenery<'a> {
+    pub map: &'a Map,
+    pub sheets: &'a HashMap<String, LoadedSheet>,
+    pub textures: &'a HashMap<String, TextureId>,
+}
+
+/// What it takes to make a piece, worked out once when the map is opened.
+struct Recipe {
+    ground_tex: TextureId,
+    white: TextureId,
+    top: Option<Rect>,
+    face: Option<Rect>,
+    jump_apex: f32,
+    /// Which props, colliders and ways out belong to which piece, sorted by piece so a piece can
+    /// find its own in a moment. Only the things are listed; the land itself is walked.
+    props: Vec<(u32, u32)>,
+    colliders: Vec<(u32, u32)>,
+    exits: Vec<(u32, u32)>,
+}
+
+impl Recipe {
+    /// What one piece holds, out of a list sorted by piece.
+    fn belonging(of: &[(u32, u32)], piece: u32) -> &[(u32, u32)] {
+        let first = of.partition_point(|(p, _)| *p < piece);
+        let last = of.partition_point(|(p, _)| *p <= piece);
+        &of[first..last]
+    }
+}
+
 /// One piece of a map: the sprites standing in it, each with the place it had when the map was
 /// one list, and what they cover once drawn.
 struct Piece {
@@ -28,11 +76,8 @@ struct Piece {
     /// its own feet. Empty until something is put here.
     min: Vec2,
     max: Vec2,
-    statics: Vec<(u32, Sprite)>,
-    overlay: Vec<(u32, Sprite)>,
-    /// Sprites too wide or tall for one piece, held once by the map: where each sits in
-    /// [`MapView::wide`].
-    wide: Vec<u32>,
+    statics: Vec<(u64, Sprite)>,
+    overlay: Vec<(u64, Sprite)>,
 }
 
 impl Default for Piece {
@@ -43,7 +88,6 @@ impl Default for Piece {
             max: Vec2::splat(f32::NEG_INFINITY),
             statics: Vec::new(),
             overlay: Vec::new(),
-            wide: Vec::new(),
         }
     }
 }
@@ -56,7 +100,7 @@ impl Piece {
         self.max = self.max.max(max);
     }
 
-    fn take(&mut self, nth: u32, sprite: Sprite, overlay: bool) {
+    fn take(&mut self, nth: u64, sprite: Sprite, overlay: bool) {
         let (min, max) = sprite.covers();
         self.covering(min, max);
         if overlay {
@@ -79,14 +123,28 @@ fn drawn_in(sprite: &Sprite, min: Vec2, max: Vec2) -> bool {
 }
 
 /// Static sprites and debug overlay of one map, in pieces a fraction of a screen across.
+///
+/// A piece is made the first time the camera reaches it and let go once a great many others have
+/// been made since, so what a map costs is what is being looked at rather than how much of it
+/// there is (docs/PLAN.md §24.4).
 pub struct MapView {
     pub size: Vec2,
-    /// One place per piece of the map, holding the piece once anything stands in it. A map of
-    /// empty ground costs a pointer a piece and nothing more (docs/PLAN.md §24.4).
+    /// One place per piece of the map, holding the piece once it has been made. A map nobody has
+    /// looked at costs a pointer a piece and nothing more.
     pieces: Vec<Option<Box<Piece>>>,
-    /// Sprites larger than a piece — the ground, a great tree — held once here and pointed at by
-    /// every piece they cross, with the place each had when the map was one list.
-    wide: Vec<(u32, Sprite, bool)>,
+    /// The pieces made so far, in the order they were made, so the oldest can be let go.
+    made: Vec<usize>,
+    /// What to make a piece from. None in a view built from ready-made sprites, which is how the
+    /// tests make one.
+    recipe: Option<Recipe>,
+    /// Sprites larger than a piece — the ground, a great tree — held once here, with the place
+    /// each had when the map was one list.
+    wide: Vec<(u64, Sprite, bool)>,
+    /// Which of those each piece crosses. Kept by the map, because a piece one crosses may not
+    /// have been made yet.
+    crossing: HashMap<usize, Vec<u32>>,
+    /// And those that cross so much of the map that it is cheaper to look at them every time.
+    everywhere: Vec<u32>,
     /// Pieces across, and down; a sprite's piece is its position divided by [`PIECE`].
     across: usize,
     down: usize,
@@ -101,20 +159,40 @@ pub struct MapView {
 impl MapView {
     /// Copies the static sprites drawn inside the world rectangle `min..max` — the camera's own
     /// rectangle — onto the end of `out`, in the order the whole map would have given them.
-    pub fn seen(&self, min: Vec2, max: Vec2, out: &mut Vec<Sprite>) {
+    pub fn seen(&mut self, world: &Scenery, min: Vec2, max: Vec2, out: &mut Vec<Sprite>) {
+        self.ready(world, min, max);
         self.gather(min, max, false, out, &|s| s);
     }
 
     /// The same for the debug overlay, each sprite passed through `each` on the way (the editor
     /// dims it).
     pub fn seen_overlay(
-        &self,
+        &mut self,
+        world: &Scenery,
         min: Vec2,
         max: Vec2,
         out: &mut Vec<Sprite>,
         each: impl Fn(Sprite) -> Sprite,
     ) {
+        self.ready(world, min, max);
         self.gather(min, max, true, out, &each);
+    }
+
+    /// Makes every piece this view reaches that has not been made yet, and lets go of the ones
+    /// made longest ago once there are more than [`KEPT`] of them.
+    fn ready(&mut self, world: &Scenery, min: Vec2, max: Vec2) {
+        if self.recipe.is_none() {
+            return;
+        }
+        for nth in self.reach(min - Vec2::ONE, max + Vec2::ONE) {
+            if matches!(self.pieces.get(nth), Some(None)) {
+                self.make(nth, world);
+            }
+        }
+        while self.made.len() > KEPT {
+            let oldest = self.made.remove(0);
+            self.pieces[oldest] = None;
+        }
     }
 
     /// Everything of one sort drawn in the view, put back into the order the map was built in.
@@ -135,16 +213,18 @@ impl MapView {
         // renderer rounds a sprite's corner to whole pixels and this does not, so something
         // whose rounded corner would just reach the screen is kept rather than dropped.
         let (min, max) = (min - Vec2::ONE, max + Vec2::ONE);
-        let mut gathered: Vec<(u32, Sprite)> = Vec::new();
-        let mut wide: Vec<u32> = Vec::new();
-        for piece in self.around(min, max) {
+        let mut gathered: Vec<(u64, Sprite)> = Vec::new();
+        let mut wide: Vec<u32> = self.everywhere.clone();
+        for (nth, piece) in self.around(min, max) {
             let held = if overlay {
                 &piece.overlay
             } else {
                 &piece.statics
             };
             gathered.extend(held.iter().filter(|(_, s)| drawn_in(s, min, max)));
-            wide.extend_from_slice(&piece.wide);
+            if let Some(crossing) = self.crossing.get(&nth) {
+                wide.extend_from_slice(crossing);
+            }
         }
         // A wide sprite crosses several pieces, and the view may see more than one of them.
         wide.sort_unstable();
@@ -157,16 +237,33 @@ impl MapView {
         out.extend(gathered.into_iter().map(|(_, s)| each(s)));
     }
 
+    /// The pieces a view of `min..max` reaches — the ones that must be made for it, whether or
+    /// not they turn out to hold anything. However large the map, this is a handful.
+    fn reach(&self, min: Vec2, max: Vec2) -> Vec<usize> {
+        let first = ((min - self.after) / PIECE).floor();
+        let last = ((max + self.before) / PIECE).floor();
+        let cols = span(first.x, last.x, self.across);
+        let rows = span(first.y, last.y, self.down);
+        rows.flat_map(|row| cols.clone().map(move |col| row * self.across + col))
+            .collect()
+    }
+
     /// The pieces that show inside `min..max`. Only the pieces whose own square is near the view
     /// are asked — never all of them — so this costs the size of the view and not of the map.
-    fn around(&self, min: Vec2, max: Vec2) -> impl Iterator<Item = &Piece> {
+    fn around(&self, min: Vec2, max: Vec2) -> impl Iterator<Item = (usize, &Piece)> {
         let first = ((min - self.after) / PIECE).floor();
         let last = ((max + self.before) / PIECE).floor();
         let cols = span(first.x, last.x, self.across);
         let rows = span(first.y, last.y, self.down);
         rows.flat_map(move |row| cols.clone().map(move |col| row * self.across + col))
-            .filter_map(|nth| self.pieces.get(nth).and_then(Option::as_deref))
-            .filter(move |piece| piece.seen_in(min, max))
+            .filter_map(|nth| Some((nth, self.pieces.get(nth)?.as_deref()?)))
+            .filter(move |(_, piece)| piece.seen_in(min, max))
+    }
+
+    /// How many pieces have been made. For the tests: a view of a great map that has only been
+    /// looked at in one place should have made only the pieces around that place.
+    pub fn made(&self) -> usize {
+        self.made.len()
     }
 
     /// How many static sprites the whole map holds. For logs and tests; a frame never asks.
@@ -211,222 +308,228 @@ impl MapView {
         let def = &map.def;
         let terrain = &map.collision.terrain;
         let size = Vec2::from(def.size);
-        let mut statics = Vec::new();
-        let mut props = Vec::new();
-        let mut overlay = Vec::new();
-
         let ground_sheet = &sheets[&def.ground.sheet].sheet;
         let ground_tex = textures[&def.ground.sheet];
         let frame_rect = |index: u32| ground_sheet.frames.get(index as usize).map(|f| f.rect);
+        let across = ((size.x / PIECE).ceil() as usize).max(1);
+        let down = ((size.y / PIECE).ceil() as usize).max(1);
+        let mut view = Self {
+            size,
+            pieces: (0..across * down).map(|_| None).collect(),
+            made: Vec::new(),
+            recipe: Some(Recipe {
+                ground_tex,
+                white,
+                top: frame_rect(def.terrain.top_frame.unwrap_or(def.ground.frame)),
+                face: frame_rect(def.terrain.face_frame.unwrap_or(def.ground.frame)),
+                jump_apex,
+                props: Vec::new(),
+                colliders: Vec::new(),
+                exits: Vec::new(),
+            }),
+            wide: Vec::new(),
+            crossing: HashMap::new(),
+            everywhere: Vec::new(),
+            across,
+            down,
+            before: Vec2::ZERO,
+            after: Vec2::ZERO,
+        };
+
+        // The ground is one sprite repeated over the whole map: too big for any piece, so the
+        // map holds it and every piece it crosses points at it.
         if let Some(rect) = frame_rect(def.ground.frame) {
             let mut sprite = Sprite::new(ground_tex, rect, Vec2::ZERO, Vec2::ZERO);
             sprite.repeat = size / Vec2::new(rect.w as f32, rect.h as f32);
             sprite.layer = layer::GROUND;
-            statics.push(sprite);
+            view.lay_wide(0, sprite, false);
         }
 
-        // Raised tiles. A top is a floor: drawn in the terrain layer (per level) below every
-        // character and prop, so whatever stands on it is always visible. Two pieces are drawn in
-        // the world layer to hide things correctly:
-        //  - a north cap, the strip of top that can overlap someone standing just behind (north
-        //    of) the plateau, sorted by the plateau's north edge;
-        //  - a cliff face down to the tile in front, sorted by its south edge, so anything
-        //    standing in front draws after it.
-        let top = frame_rect(def.terrain.top_frame.unwrap_or(def.ground.frame));
-        let face = frame_rect(def.terrain.face_frame.unwrap_or(def.ground.frame));
-        let (tile, lh) = (terrain.tile(), terrain.level_height());
-        let rim = [0.0, 0.0, 0.0, 0.45];
-        for row in 0..i64::from(terrain.rows()) {
-            for col in 0..i64::from(terrain.cols()) {
-                let cell = terrain.cell(col, row).unwrap_or_default();
-                let origin = Vec2::new(col as f32, row as f32) * tile;
-                if cell == Cell::Wall {
-                    overlay.push(tint(
-                        white,
-                        origin,
-                        Vec2::splat(tile),
-                        [0.9, 0.1, 0.1, 0.35],
-                        0.0,
-                    ));
-                    continue;
-                }
-                let level = cell.level().unwrap_or(0);
-                if level == 0 {
-                    continue;
-                }
-                let height = f32::from(level) * lh;
-                let lifted = origin - Vec2::new(0.0, height);
-                // Clamped so absurdly high levels never reach the world layer.
-                let floor_layer = layer::TERRAIN + i32::from(level.min(40));
-                overlay.push(tint(
-                    white,
-                    lifted,
-                    Vec2::splat(tile),
-                    [0.2, 0.4, 1.0, 0.12 * f32::from(level)],
-                    0.0,
-                ));
-                let neighbour =
-                    |dc: i64, dr: i64| terrain.cell(col + dc, row + dr).and_then(Cell::level);
-                let lower = |dc: i64, dr: i64| neighbour(dc, dr).is_some_and(|n| n < level);
-                let on_floor = |mut s: Sprite| {
-                    s.layer = floor_layer;
-                    s.sort_y = origin.y;
-                    s
-                };
-                if let Some(rect) = top {
-                    statics.push(on_floor(Sprite::new(
-                        ground_tex,
-                        sub_rect(rect, origin, Vec2::splat(tile)),
-                        lifted,
-                        Vec2::ZERO,
-                    )));
-                }
-                // Darkened rims where the neighbour is lower, so plateaus read at a glance.
-                if lower(-1, 0) {
-                    statics.push(on_floor(tint(
-                        white,
-                        lifted,
-                        Vec2::new(1.0, tile),
-                        rim,
-                        0.0,
-                    )));
-                }
-                if lower(1, 0) {
-                    statics.push(on_floor(tint(
-                        white,
-                        lifted + Vec2::new(tile - 1.0, 0.0),
-                        Vec2::new(1.0, tile),
-                        rim,
-                        0.0,
-                    )));
-                }
-                if let Some(north) = neighbour(0, -1)
-                    && north < level
-                {
-                    // Anyone standing north of the edge overlaps at most the height difference
-                    // of this top (clipped to one tile).
-                    let cap = (f32::from(level - north) * lh).min(tile);
-                    if let Some(rect) = top {
-                        let mut s = Sprite::new(
-                            ground_tex,
-                            sub_rect(rect, origin, Vec2::new(tile, cap)),
-                            lifted,
-                            Vec2::ZERO,
-                        );
-                        s.sort_y = origin.y;
-                        statics.push(s);
-                    }
-                    statics.push(tint(white, lifted, Vec2::new(tile, 1.0), rim, origin.y));
-                }
-                let front = neighbour(0, 1);
-                if let (Some(rect), Some(front)) = (face, front)
-                    && front < level
-                {
-                    let south = origin.y + tile;
-                    for step in front..level {
-                        let y = south - f32::from(step + 1) * lh;
-                        let src = sub_rect(rect, Vec2::new(origin.x, y), Vec2::new(tile, lh));
-                        let mut s =
-                            Sprite::new(ground_tex, src, Vec2::new(origin.x, y), Vec2::ZERO);
-                        s.color = [0.75, 0.75, 0.75, 1.0];
-                        s.sort_y = south;
-                        statics.push(s);
-                    }
-                }
+        // Which piece everything standing on the land belongs to, and how far each hangs beyond
+        // it — which is what a view must look past itself to find them. The land is not made
+        // here; it is made when the camera reaches it.
+        let world = Scenery {
+            map,
+            sheets,
+            textures,
+        };
+        let (mut props, mut colliders, mut exits) = (Vec::new(), Vec::new(), Vec::new());
+        for nth in 0..map.props.len() {
+            if let Some(sprite) = prop_sprite(&world, nth) {
+                view.belongs(&mut props, nth, &sprite, PROPS_FROM, false);
             }
         }
-
-        for prop in &map.props {
-            let Some(frame) = sheets[&prop.sheet].sheet.frames.get(prop.frame as usize) else {
-                tracing::warn!("{}: no frame {}", prop.sheet, prop.frame);
-                continue;
-            };
-            let at = Vec2::from(prop.position);
-            let ground = map.collision.ground_under(at, 0.5);
-            let ground = if ground.is_finite() { ground } else { 0.0 };
-            let mut sprite = Sprite::new(
-                textures[&prop.sheet],
-                frame.rect,
-                at - Vec2::new(0.0, ground),
-                frame.pivot,
-            );
-            sprite.sort_y = at.y;
-            props.push(sprite);
+        for nth in 0..map.collision.colliders().len() {
+            let sprite = view
+                .recipe
+                .as_ref()
+                .and_then(|recipe| collider_sprite(&world, recipe, nth));
+            if let Some(sprite) = sprite {
+                view.belongs(&mut colliders, nth, &sprite, PROPS_FROM, true);
+            }
         }
-        for c in map.collision.colliders() {
-            let (half, outline) = match c.shape {
-                Shape::Circle { radius } => (Vec2::splat(radius), Outline::Circle),
-                Shape::Rect { half } => (half, Outline::Rect),
-            };
-            // Orange: blocks at any height. Cyan: low enough to jump over or stand on.
-            let color = if c.height <= jump_apex {
-                [0.3, 0.9, 1.0, 0.9]
-            } else {
-                [1.0, 0.6, 0.0, 0.9]
-            };
-            overlay.push(Sprite::outline(
-                white,
-                outline,
-                c.center - half - Vec2::new(0.0, c.base),
-                half * 2.0,
-                color,
-            ));
-        }
-        for exit in &map.exits {
-            overlay.push(tint(
+        for (nth, exit) in map.exits.iter().enumerate() {
+            let sprite = tint(
                 white,
                 exit.min,
                 exit.max - exit.min,
                 [1.0, 1.0, 0.2, 0.35],
                 0.0,
-            ));
+            );
+            view.belongs(&mut exits, nth, &sprite, EXITS_FROM, true);
         }
-        // In the order a map used to be one list: the ground and the land, then what stands on
-        // it, then the overlay.
-        let view = Self::place(
-            size,
-            statics
-                .into_iter()
-                .chain(props)
-                .map(|s| (s, false))
-                .chain(overlay.into_iter().map(|s| (s, true))),
-        );
+
+        // A top is drawn its own height above the tile it covers, so the tallest level the scene
+        // asks for says how far the land reaches beyond the piece holding it. That is known
+        // without walking a single tile.
+        let tallest = def
+            .terrain
+            .fill
+            .iter()
+            .filter_map(|fill| fill.cell.level())
+            .max()
+            .unwrap_or(0);
+        view.before.y = view
+            .before
+            .y
+            .max(f32::from(tallest) * terrain.level_height());
+
+        if let Some(recipe) = &mut view.recipe {
+            props.sort_unstable();
+            colliders.sort_unstable();
+            exits.sort_unstable();
+            (recipe.props, recipe.colliders, recipe.exits) = (props, colliders, exits);
+        }
         tracing::debug!(
-            "{}: {} static sprites in {} pieces",
+            "{}: {} pieces, made as they are reached",
             map.name,
-            view.sprites(),
-            view.pieces.len()
+            across * down
         );
         view
     }
 
-    /// Lays sprites out in pieces by where each one stands, remembering the place each had in
-    /// the list they came in.
+    /// Makes one piece: the land in it, and the things standing on that land.
+    fn make(&mut self, nth: usize, world: &Scenery) {
+        let Some(recipe) = &self.recipe else {
+            return;
+        };
+        let mut piece = Piece::default();
+        let corner = Vec2::new((nth % self.across) as f32, (nth / self.across) as f32) * PIECE;
+        let terrain = &world.map.collision.terrain;
+        let (from_col, from_row) = terrain.tile_of(corner);
+        let (to_col, to_row) = terrain.tile_of(corner + Vec2::splat(PIECE - 0.5));
+        // Every sprite carries where it would have stood in one list of the whole map, so what is
+        // drawn never depends on when a piece happened to be made.
+        let mut place = 1 + (nth as u64) * PER_PIECE;
+        for row in from_row..=to_row {
+            for col in from_col..=to_col {
+                let Some(cell) = terrain.cell(col, row) else {
+                    continue;
+                };
+                tiles(recipe, terrain, col, row, cell, &mut |sprite, overlay| {
+                    piece.take(place, sprite, overlay);
+                    place += 1;
+                });
+            }
+        }
+        let which = nth as u32;
+        for &(_, prop) in Recipe::belonging(&recipe.props, which) {
+            if let Some(sprite) = prop_sprite(world, prop as usize) {
+                piece.take(PROPS_FROM + u64::from(prop), sprite, false);
+            }
+        }
+        for &(_, collider) in Recipe::belonging(&recipe.colliders, which) {
+            if let Some(sprite) = collider_sprite(world, recipe, collider as usize) {
+                piece.take(PROPS_FROM + u64::from(collider), sprite, true);
+            }
+        }
+        for &(_, exit) in Recipe::belonging(&recipe.exits, which) {
+            if let Some(area) = world.map.exits.get(exit as usize) {
+                let sprite = tint(
+                    recipe.white,
+                    area.min,
+                    area.max - area.min,
+                    [1.0, 1.0, 0.2, 0.35],
+                    0.0,
+                );
+                piece.take(EXITS_FROM + u64::from(exit), sprite, true);
+            }
+        }
+        self.pieces[nth] = Some(Box::new(piece));
+        self.made.push(nth);
+    }
+
+    /// Notes which piece a thing belongs to, and how far its picture hangs beyond that piece.
+    /// Anything too big for a piece is held by the map itself instead.
+    fn belongs(
+        &mut self,
+        into: &mut Vec<(u32, u32)>,
+        nth: usize,
+        sprite: &Sprite,
+        from: u64,
+        overlay: bool,
+    ) {
+        let (min, max) = sprite.covers();
+        if (max - min).max_element() > PIECE {
+            self.lay_wide(from + nth as u64, *sprite, overlay);
+            return;
+        }
+        let piece = self.piece_of(sprite.position);
+        let corner = Vec2::new((piece % self.across) as f32, (piece / self.across) as f32) * PIECE;
+        self.before = self.before.max((corner - min).max(Vec2::ZERO));
+        self.after = self.after.max((max - (corner + PIECE)).max(Vec2::ZERO));
+        into.push((piece as u32, nth as u32));
+    }
+
+    /// Holds a sprite too big for one piece. One that crosses a few pieces is pointed at by
+    /// each of them; one that covers half the map — the ground — is simply looked at every time,
+    /// because listing it against a million pieces would cost more than the map itself.
+    fn lay_wide(&mut self, place: u64, sprite: Sprite, overlay: bool) {
+        let (min, max) = sprite.covers();
+        let nth = self.wide.len() as u32;
+        self.wide.push((place, sprite, overlay));
+        let crossed = self.crossed_by(min, max);
+        if crossed.len() > SPREAD {
+            self.everywhere.push(nth);
+            return;
+        }
+        for piece in crossed {
+            self.crossing.entry(piece).or_default().push(nth);
+        }
+    }
+
+    /// Lays ready-made sprites out in pieces by where each one stands, remembering the place
+    /// each had in the list they came in. Only the tests make a view this way; a map's own view
+    /// keeps a recipe and makes its pieces as the camera reaches them.
+    #[cfg(test)]
     fn place(size: Vec2, sprites: impl Iterator<Item = (Sprite, bool)>) -> Self {
         let across = ((size.x / PIECE).ceil() as usize).max(1);
         let down = ((size.y / PIECE).ceil() as usize).max(1);
         let mut view = Self {
             size,
             pieces: (0..across * down).map(|_| None).collect(),
+            made: Vec::new(),
+            recipe: None,
             wide: Vec::new(),
+            crossing: HashMap::new(),
+            everywhere: Vec::new(),
             across,
             down,
             before: Vec2::ZERO,
             after: Vec2::ZERO,
         };
         for (place, (sprite, overlay)) in sprites.enumerate() {
-            let place = place as u32;
+            let place = place as u64;
             let (min, max) = sprite.covers();
             // Larger than a piece — the ground, a great tree — so no one piece can hold it: the
             // map holds it and every piece it crosses points at it. Holding it where it stands
             // would make every view ask far beyond itself to be sure of finding it.
             if (max - min).max_element() > PIECE {
-                let nth = view.wide.len() as u32;
-                view.wide.push((place, sprite, overlay));
+                view.lay_wide(place, sprite, overlay);
                 for piece in view.crossed_by(min, max) {
-                    let piece = view.pieces[piece].get_or_insert_default();
-                    piece.wide.push(nth);
-                    piece.covering(min, max);
+                    view.pieces[piece]
+                        .get_or_insert_default()
+                        .covering(min, max);
                 }
                 continue;
             }
@@ -442,6 +545,171 @@ impl MapView {
         }
         view
     }
+}
+
+/// The sprites of one tile of land: its top, its rims, the cap that hides anyone standing just
+/// behind it, and the cliff face below it. Each is handed to `land` with whether it belongs to
+/// the debug overlay.
+///
+/// A top is a floor: drawn in the terrain layer (per level) below every character and prop, so
+/// whatever stands on it is always visible. Two pieces are drawn in the world layer to hide
+/// things correctly: a north cap, the strip of top that can overlap someone standing just behind
+/// (north of) the plateau, sorted by the plateau's north edge; and a cliff face down to the tile
+/// in front, sorted by its south edge, so anything standing in front draws after it.
+fn tiles(
+    recipe: &Recipe,
+    terrain: &dark_physics::Terrain,
+    col: i64,
+    row: i64,
+    cell: Cell,
+    land: &mut impl FnMut(Sprite, bool),
+) {
+    let (tile, lh, white) = (terrain.tile(), terrain.level_height(), recipe.white);
+    let rim = [0.0, 0.0, 0.0, 0.45];
+    let origin = Vec2::new(col as f32, row as f32) * tile;
+    if cell == Cell::Wall {
+        land(
+            tint(white, origin, Vec2::splat(tile), [0.9, 0.1, 0.1, 0.35], 0.0),
+            true,
+        );
+        return;
+    }
+    let level = cell.level().unwrap_or(0);
+    if level == 0 {
+        return;
+    }
+    let height = f32::from(level) * lh;
+    let lifted = origin - Vec2::new(0.0, height);
+    // Clamped so absurdly high levels never reach the world layer.
+    let floor_layer = layer::TERRAIN + i32::from(level.min(40));
+    land(
+        tint(
+            white,
+            lifted,
+            Vec2::splat(tile),
+            [0.2, 0.4, 1.0, 0.12 * f32::from(level)],
+            0.0,
+        ),
+        true,
+    );
+    let neighbour = |dc: i64, dr: i64| terrain.cell(col + dc, row + dr).and_then(Cell::level);
+    let lower = |dc: i64, dr: i64| neighbour(dc, dr).is_some_and(|n| n < level);
+    let on_floor = |mut s: Sprite| {
+        s.layer = floor_layer;
+        s.sort_y = origin.y;
+        s
+    };
+    if let Some(rect) = recipe.top {
+        land(
+            on_floor(Sprite::new(
+                recipe.ground_tex,
+                sub_rect(rect, origin, Vec2::splat(tile)),
+                lifted,
+                Vec2::ZERO,
+            )),
+            false,
+        );
+    }
+    // Darkened rims where the neighbour is lower, so plateaus read at a glance.
+    if lower(-1, 0) {
+        land(
+            on_floor(tint(white, lifted, Vec2::new(1.0, tile), rim, 0.0)),
+            false,
+        );
+    }
+    if lower(1, 0) {
+        land(
+            on_floor(tint(
+                white,
+                lifted + Vec2::new(tile - 1.0, 0.0),
+                Vec2::new(1.0, tile),
+                rim,
+                0.0,
+            )),
+            false,
+        );
+    }
+    if let Some(north) = neighbour(0, -1)
+        && north < level
+    {
+        // Anyone standing north of the edge overlaps at most the height difference of this top
+        // (clipped to one tile).
+        let cap = (f32::from(level - north) * lh).min(tile);
+        if let Some(rect) = recipe.top {
+            let mut s = Sprite::new(
+                recipe.ground_tex,
+                sub_rect(rect, origin, Vec2::new(tile, cap)),
+                lifted,
+                Vec2::ZERO,
+            );
+            s.sort_y = origin.y;
+            land(s, false);
+        }
+        land(
+            tint(white, lifted, Vec2::new(tile, 1.0), rim, origin.y),
+            false,
+        );
+    }
+    let front = neighbour(0, 1);
+    if let (Some(rect), Some(front)) = (recipe.face, front)
+        && front < level
+    {
+        let south = origin.y + tile;
+        for step in front..level {
+            let y = south - f32::from(step + 1) * lh;
+            let src = sub_rect(rect, Vec2::new(origin.x, y), Vec2::new(tile, lh));
+            let mut s = Sprite::new(recipe.ground_tex, src, Vec2::new(origin.x, y), Vec2::ZERO);
+            s.color = [0.75, 0.75, 0.75, 1.0];
+            s.sort_y = south;
+            land(s, false);
+        }
+    }
+}
+
+/// A prop standing on the land, drawn with its feet where it stands.
+fn prop_sprite(world: &Scenery, nth: usize) -> Option<Sprite> {
+    let prop = world.map.props.get(nth)?;
+    let Some(frame) = world.sheets[&prop.sheet]
+        .sheet
+        .frames
+        .get(prop.frame as usize)
+    else {
+        tracing::warn!("{}: no frame {}", prop.sheet, prop.frame);
+        return None;
+    };
+    let at = Vec2::from(prop.position);
+    let ground = world.map.collision.ground_under(at, 0.5);
+    let ground = if ground.is_finite() { ground } else { 0.0 };
+    let mut sprite = Sprite::new(
+        world.textures[&prop.sheet],
+        frame.rect,
+        at - Vec2::new(0.0, ground),
+        frame.pivot,
+    );
+    sprite.sort_y = at.y;
+    Some(sprite)
+}
+
+/// A prop's footprint, for the debug overlay. Orange blocks at any height; cyan is low enough to
+/// jump over or stand on.
+fn collider_sprite(world: &Scenery, recipe: &Recipe, nth: usize) -> Option<Sprite> {
+    let c = world.map.collision.colliders().get(nth)?;
+    let (half, outline) = match c.shape {
+        Shape::Circle { radius } => (Vec2::splat(radius), Outline::Circle),
+        Shape::Rect { half } => (half, Outline::Rect),
+    };
+    let color = if c.height <= recipe.jump_apex {
+        [0.3, 0.9, 1.0, 0.9]
+    } else {
+        [1.0, 0.6, 0.0, 0.9]
+    };
+    Some(Sprite::outline(
+        recipe.white,
+        outline,
+        c.center - half - Vec2::new(0.0, c.base),
+        half * 2.0,
+        color,
+    ))
 }
 
 /// The pieces between two grid lines, inside a map that has `many` of them.
@@ -521,9 +789,11 @@ mod tests {
         MapView::place(size, sprites.into_iter().map(|s| (s, false)))
     }
 
+    /// What a view hands over for a camera. A view of ready-made sprites has nothing to make
+    /// first, so it is asked directly.
     fn seen(view: &MapView, min: Vec2, max: Vec2) -> Vec<Sprite> {
         let mut out = Vec::new();
-        view.seen(min, max, &mut out);
+        view.gather(min, max, false, &mut out, &|s| s);
         out
     }
 
@@ -608,6 +878,30 @@ mod tests {
                 "the sweep did not notice a view that never looks {blinded} itself"
             );
         }
+    }
+
+    /// However large the map, a screenful reaches a handful of pieces — and only those are ever
+    /// made. This is what keeps a great map from costing anything until it is walked through
+    /// (docs/PLAN.md §24.4).
+    #[test]
+    fn a_screenful_reaches_a_handful_of_pieces_however_large_the_map() {
+        // 16 km at 16 px to the metre: a million pieces.
+        let world = Vec2::splat(16_000.0 * 16.0);
+        let view = view_of(world, vec![standing(1000.0, 1000.0, 48, 96)]);
+        assert_eq!(view.pieces.len(), 1_000_000, "a thousand pieces a side");
+        let middle = world / 2.0;
+        let reached = view.reach(middle, middle + Vec2::new(640.0, 360.0));
+        assert!(
+            reached.len() <= 20,
+            "a screenful reached {} pieces of {}",
+            reached.len(),
+            view.pieces.len()
+        );
+        assert_eq!(
+            view.made(),
+            0,
+            "a view nobody has looked at has made nothing"
+        );
     }
 
     /// The point of §24.2: what a frame copies is the size of the screen, not of the map.

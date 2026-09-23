@@ -1008,9 +1008,12 @@ Two things to read off that table.
   carries a whole-number sub-layer beside its sort key, and ties are settled by it, so the fine
   order holds however far out the world goes. A test checks both halves — that the old nudge
   really does die out there, and that the sub-layer does not. The interface settles some of its
-  own ties by the same hundredths, at orders of a thousand million where even a whole unit is
-  already lost; those are decoration, they rest on nothing but the order things are handed over
-  in, and the sub-layer is there for them when they are next touched.
+  own ties the same way. Where it does so by a character's world y — a speech bubble, the health
+  bar over someone's head — the hundredths were gone a kilometre from the origin and those now
+  use the sub-layer too. The parts drawn in a corner of the screen each have a place of their own
+  (`over::` in the player), far enough apart that a part's own pieces settle themselves between
+  two of them: they used to share one number and settle by the order they were drawn in, which
+  held only because nothing could be added to a number that large.
 - **Only the top row needs `Spot`.** Chunk streaming, made land, spatial queries and area-of-
   interest networking are the same at every size. `Spot` is a coordinate type behind which the
   rest is unchanged, so building the middle row first does not have to be undone to reach the top
@@ -1151,12 +1154,23 @@ everything the world holds:
   pointer each where nothing does.
 - So a map may now be **20 000 tiles a side** (the old cap was 4096), and the size of a world is
   no longer a question about what a grid of tiles costs.
-- **Measured**, on this machine, in a release build: a world 16 km across — 256 million tiles, a
-  quarter of a million a side — starts in about a second and a half and holds **10 MB**. Six
-  hundred frames of it cost 5.3 seconds against 5.1 for the first game's meadow, which is 7 500
-  tiles: **a world thirty-four thousand times the size, four per cent slower a frame**. Shape it
-  and it costs what the shaping costs — 400 hills of some quarter of a million raised tiles came
-  to 400 MB, which is the map's own content and what the rest of §24.4 is for.
+- **A piece of a map is made when the camera reaches it**, and let go once five hundred others
+  have been made since. Making a map used to walk every tile in it and keep a sprite for each: a
+  quarter of a million shaped tiles came to 400 MB before the game had drawn a frame. A view now
+  keeps only what it takes to make a piece — which props and ways out belong to which piece, and
+  the pictures to draw them with — and walks the sixteen tiles a side of a piece when it is
+  needed. The map-wide ground sprite is looked at every time rather than listed against every
+  piece it crosses, which would have been a million entries at 16 km.
+- **Measured**, on this machine, in a release build, with each run checked to have drawn its
+  frame: a world 16 km across — 256 million tiles, a quarter of a million a side — takes
+  **231 MB** with nothing shaped in it and **238 MB** with 400 hills of some quarter of a million
+  raised tiles, against **255 MB** for the first game's meadow of 7 500 tiles. Four hundred frames
+  cost 3.4, 3.2 and 3.5 seconds. So shaping a quarter of a million tiles costs seven megabytes
+  more than shaping none, and a world thirty-four thousand times the size of meadow costs less
+  than meadow does — because what is held is what is being looked at, and meadow carries the
+  game's own art.
+- The numbers above are what the engine costs, not what a game does: this test world has almost
+  no art in it. What they compare is the same engine against two world sizes.
 - A **chunk** is 64×64 tiles — 1024 px at 16 px to the tile. Sixteen kilometres is 250 chunks a
   side, a hundred is 1563. A chunk holds its tiles' heights, the props standing on them, and what
   lives there. The size of a chunk is a budget, not a world limit.

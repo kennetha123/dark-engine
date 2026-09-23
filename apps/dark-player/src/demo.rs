@@ -327,6 +327,8 @@ impl DemoScene {
             looks,
             sheets: self.characters,
             maps: views,
+            map_sheets: self.sheets,
+            map_textures: textures,
             white,
             debug: false,
             frame_sprites: Vec::new(),
@@ -497,6 +499,23 @@ const WINDOW_HEIGHT: f32 = 84.0;
 const WINDOW_MARGIN: f32 = 8.0;
 const WINDOW_PAD: f32 = 6.0;
 
+/// Where each part of the interface over the world sits, back to front. They are far enough
+/// apart that a part's own pieces (a bar's trail and fill, a gauge's ink and filling) can settle
+/// themselves between two of them, and far enough from the world that nothing standing in it can
+/// reach them (docs/PLAN.md §24.0).
+mod over {
+    /// The day and the hour, top right.
+    pub const CLOCK: f32 = 3.00e9;
+    /// The local player's health, top left.
+    pub const HEALTH: f32 = 3.01e9;
+    /// What the body needs, under the health.
+    pub const BODY: f32 = 3.02e9;
+    /// Who is travelling with the player, and how they are faring.
+    pub const PARTY: f32 = 3.03e9;
+    /// The language, shown for a moment after it changes.
+    pub const LANGUAGE: f32 = 3.04e9;
+}
+
 /// How a look draws, by `LookId`.
 #[derive(Clone)]
 struct LookView {
@@ -533,6 +552,10 @@ pub struct DemoView {
     looks: Vec<LookView>,
     sheets: CharacterSheets,
     maps: Vec<MapView>,
+    /// The pictures a map's own things are drawn with, kept because a piece of a map is made
+    /// when the camera reaches it (docs/PLAN.md §24.4).
+    map_sheets: HashMap<String, LoadedSheet>,
+    map_textures: HashMap<String, TextureId>,
     white: TextureId,
     debug: bool,
     frame_sprites: Vec<Sprite>,
@@ -680,7 +703,16 @@ impl DemoView {
         let camera = focus_point.clamp(half, (size - half).max(half)) + self.fx.shake();
         self.camera = camera;
         let (seen_min, seen_max) = (camera - half, camera + half);
-        self.maps[map_view].seen(seen_min, seen_max, &mut self.frame_sprites);
+        {
+            // Only while the map's pieces are being asked for: what they are made from is kept
+            // on the view, and everything else here wants the view itself.
+            let scenery = dark_view::Scenery {
+                map: maps.get(map),
+                sheets: &self.map_sheets,
+                textures: &self.map_textures,
+            };
+            self.maps[map_view].seen(&scenery, seen_min, seen_max, &mut self.frame_sprites);
+        }
 
         for c in characters {
             // What the character stands on places its blob shadow, and a prop underfoot must draw
@@ -762,7 +794,13 @@ impl DemoView {
             }
         }
         if self.debug {
+            let scenery = dark_view::Scenery {
+                map: maps.get(map),
+                sheets: &self.map_sheets,
+                textures: &self.map_textures,
+            };
             self.maps[map_view].seen_overlay(
+                &scenery,
                 seen_min,
                 seen_max,
                 &mut self.frame_sprites,
@@ -1191,7 +1229,7 @@ impl DemoView {
                 clock.size + pad * 2.0,
                 [0.0, 0.0, 0.0, 0.6],
                 None,
-                3e9,
+                over::CLOCK,
                 0,
             );
             self.frame_sprites.extend(TextSystem::sprites(
@@ -1200,7 +1238,7 @@ impl DemoView {
                 at,
                 PAPER,
                 layer::UI,
-                3e9 + 1.0,
+                over::CLOCK,
             ));
         }
         // The local player's health, top left.
@@ -1213,7 +1251,7 @@ impl DemoView {
                 max,
                 hostile: false,
             };
-            self.bar(view_min + Vec2::new(8.0, 8.0), 80.0, bar, 3e9, 0);
+            self.bar(view_min + Vec2::new(8.0, 8.0), 80.0, bar, over::HEALTH, 0);
         }
         // Choices sit above the dialogue window.
         if !choices.is_empty() {
@@ -1282,12 +1320,12 @@ impl DemoView {
         let mut pen = view_min + Vec2::new(view_size.x - 8.0, 24.0);
         for (name, bar) in &party {
             let at = Vec2::new(pen.x - name.size.x.max(PARTY_BAR), pen.y);
-            self.shadowed(name, texture, at, PAPER, 3e9);
+            self.shadowed(name, texture, at, PAPER, over::PARTY);
             self.bar(
                 at + Vec2::new(0.0, name.size.y - 2.0),
                 PARTY_BAR,
                 *bar,
-                3e9,
+                over::PARTY,
                 2,
             );
             pen.y += name.size.y + 6.0;
@@ -1307,7 +1345,7 @@ impl DemoView {
                 banner.size + pad * 2.0,
                 [0.0, 0.0, 0.0, 0.6],
                 None,
-                3e9,
+                over::LANGUAGE,
                 0,
             );
             self.frame_sprites.extend(TextSystem::sprites(
@@ -1316,7 +1354,7 @@ impl DemoView {
                 at,
                 PAPER,
                 layer::UI,
-                3e9 + 1.0,
+                over::LANGUAGE,
             ));
         }
     }
@@ -1455,7 +1493,7 @@ impl DemoView {
         texture: TextureId,
         view_min: Vec2,
     ) {
-        let order = 3e9;
+        let order = over::BODY;
         let top = view_min + Vec2::new(8.0, 16.0);
         for (i, need) in Need::ALL.into_iter().enumerate() {
             let at = top + Vec2::new(i as f32 * (GAUGE.x + 2.0), 0.0);

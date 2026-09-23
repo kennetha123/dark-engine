@@ -266,10 +266,16 @@ impl Viewport {
         // costs here is the size of the panel and not the size of the map.
         let seen = origin + Vec2::new(size.0 as f32, size.1 as f32);
         let mut sprites: Vec<Sprite> = Vec::new();
-        if let Some(view) = &self.view {
-            view.seen(origin, seen, &mut sprites);
+        if let (Some(view), Some(map)) = (&mut self.view, &self.map) {
+            // A piece of the map is made when the panel reaches it (docs/PLAN.md §24.4).
+            let scenery = dark_view::Scenery {
+                map,
+                sheets: &self.sheets,
+                textures: &self.textures,
+            };
+            view.seen(&scenery, origin, seen, &mut sprites);
             if overlay {
-                view.seen_overlay(origin, seen, &mut sprites, |mut s| {
+                view.seen_overlay(&scenery, origin, seen, &mut sprites, |mut s| {
                     s.layer = layer::DEBUG;
                     s
                 });

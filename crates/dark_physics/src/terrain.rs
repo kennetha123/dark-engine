@@ -73,8 +73,9 @@ impl Terrain {
         (patch, within)
     }
 
-    /// How many patches have been shaped. For tests and logs.
-    pub fn shaped(&self) -> usize {
+    /// How many patches have been shaped, which is what a terrain costs. For the tests.
+    #[cfg(test)]
+    pub(crate) fn shaped(&self) -> usize {
         self.patches.iter().filter(|p| p.is_some()).count()
     }
 
@@ -189,6 +190,40 @@ mod tests {
         assert_eq!(land.shaped(), 4, "one hill and three patches of wall");
         assert_eq!(land.cell(4_099, 4_000), Some(Cell::Wall));
         assert_eq!(land.cell(4_100, 4_000), Some(Cell::Floor));
+    }
+
+    /// Levelling a patch that was shaped must go through, however cheap levelling unshaped
+    /// ground is. Getting this wrong leaves a hill standing where a designer flattened it.
+    #[test]
+    fn a_shaped_patch_can_be_levelled_again() {
+        let mut land = Terrain::new(100, 100, 16.0, 16.0);
+        land.fill(10, 10, 4, 4, Cell::Level(3));
+        assert_eq!(land.cell(11, 11), Some(Cell::Level(3)));
+        land.fill(10, 10, 4, 4, Cell::Floor);
+        assert_eq!(land.cell(11, 11), Some(Cell::Floor), "levelled again");
+        assert_eq!(
+            land.shaped(),
+            1,
+            "the patch is kept, since it may be shaped again"
+        );
+    }
+
+    /// A map whose side is exactly a patch, and one a tile over it.
+    #[test]
+    fn the_last_patch_may_be_full_or_a_sliver() {
+        for (cols, rows) in [(64, 64), (65, 64), (64, 65), (127, 129)] {
+            let mut land = Terrain::new(cols, rows, 16.0, 16.0);
+            let (far_col, far_row) = (i64::from(cols) - 1, i64::from(rows) - 1);
+            land.fill(cols - 1, rows - 1, 1, 1, Cell::Wall);
+            assert_eq!(
+                land.cell(far_col, far_row),
+                Some(Cell::Wall),
+                "the far corner of a {cols}x{rows} map"
+            );
+            assert_eq!(land.cell(far_col + 1, far_row), None, "past the edge");
+            assert_eq!(land.cell(far_col, far_row + 1), None, "below the edge");
+            assert_eq!(land.cell(0, 0), Some(Cell::Floor), "the near corner");
+        }
     }
 
     /// Shaped or not, the land answers as a plain grid of tiles would.

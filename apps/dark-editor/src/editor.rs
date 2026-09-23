@@ -205,6 +205,12 @@ pub struct Editor {
 /// Where a playtest with more than one player is hosted.
 const PLAYTEST_PORT: &str = "7777";
 
+/// The largest map the editor will make or resize to, in tiles a side. The engine carries far
+/// more (`SceneDef::MAX_TILES_PER_SIDE`), but painting one tile here rebuilds the whole grid of
+/// them, so a map this size is already a slow brush. A world larger than this is made from a
+/// seed rather than painted (docs/PLAN.md §24.4, §24.5).
+const PAINTABLE_TILES: u32 = 4096;
+
 /// How tall the minimap is, in points. Enough to read a map's shape without crowding out the
 /// prop palette below it.
 const MINIMAP_HEIGHT: f32 = 130.0;
@@ -1419,7 +1425,7 @@ impl Editor {
                 new.name.make_ascii_lowercase();
                 ui.horizontal(|ui| {
                     ui.label("Size in tiles:");
-                    let most = SceneDef::MAX_TILES_PER_SIDE;
+                    let most = PAINTABLE_TILES;
                     ui.add(DragValue::new(&mut new.cols).range(8..=most));
                     ui.label("by");
                     ui.add(DragValue::new(&mut new.rows).range(8..=most));
@@ -2074,7 +2080,7 @@ impl Form<'_> {
         // Values outside the range are left as they are until someone changes them.
         fn tiles(value: &mut u32) -> DragValue<'_> {
             DragValue::new(value)
-                .range(8..=SceneDef::MAX_TILES_PER_SIDE)
+                .range(8..=PAINTABLE_TILES)
                 .clamp_existing_to_range(false)
         }
         ui.horizontal(|ui| {
