@@ -17,6 +17,7 @@ use glam::Vec2;
 
 use crate::catalog::{Catalog, scene_name, sheet_name};
 use crate::database::{Database, Elsewhere};
+use crate::minimap::{self, Fit};
 use crate::scene_ops::{self as ops, History, Thing};
 use crate::sheets::SheetEditor;
 use crate::story::StoryEditor;
@@ -203,6 +204,10 @@ pub struct Editor {
 
 /// Where a playtest with more than one player is hosted.
 const PLAYTEST_PORT: &str = "7777";
+
+/// How tall the minimap is, in points. Enough to read a map's shape without crowding out the
+/// prop palette below it.
+const MINIMAP_HEIGHT: f32 = 130.0;
 
 impl Editor {
     pub fn new(
@@ -1084,6 +1089,8 @@ impl Editor {
             });
         }
         ui.separator();
+        self.minimap(ui);
+        ui.separator();
         ui.heading("Palette");
         sheet_combo(ui, "palette", &mut self.palette_sheet, &self.catalog.props);
         let sheet = self.palette_sheet.clone();
@@ -1137,6 +1144,108 @@ impl Editor {
             self.prop = Some((sheet, frame));
             self.tool = Tool::Prop;
         }
+    }
+
+    /// The whole map in a small box, with the part being worked on outlined: on a map larger
+    /// than a few screens it is the only way to tell where the view is (docs/PLAN.md §24).
+    /// A click or a drag inside it looks there.
+    fn minimap(&mut self, ui: &mut Ui) {
+        // Nothing to show before a map is open: the panel keeps its room for the palette.
+        let Some(scene) = &self.scene else {
+            return;
+        };
+        let def = &scene.def;
+        ui.heading("Minimap");
+        let (rect, response) = ui.allocate_exact_size(
+            vec2(ui.available_width(), MINIMAP_HEIGHT),
+            Sense::click_and_drag(),
+        );
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 2.0, Color32::from_rgb(12, 12, 14));
+        let fit = Fit::new(rect.shrink(4.0), Vec2::from(def.size));
+        // The ground, then the land raised above it: a shape a designer recognises at a glance.
+        painter.rect_filled(fit.shown, 0.0, Color32::from_rgb(38, 46, 38));
+        let tile = self.tile as f32;
+        for fill in &def.terrain.fill {
+            let (col, row, cols, rows) = fill.tiles;
+            let at = (
+                col as f32 * tile,
+                row as f32 * tile,
+                cols as f32 * tile,
+                rows as f32 * tile,
+            );
+            let ink = match fill.cell {
+                Cell::Wall => Color32::from_rgb(90, 80, 74),
+                Cell::Floor => Color32::from_rgb(38, 46, 38),
+                Cell::Level(n) => {
+                    let lift = 28 + 22 * u32::from(n).min(5) as u8;
+                    Color32::from_rgb(52 + lift, 58 + lift / 2, 44 + lift / 3)
+                }
+            };
+            painter.rect_filled(fit.rect(at), 0.0, ink);
+        }
+        // The props a designer placed by hand, faintly: landmarks, not the scattered undergrowth.
+        for prop in &def.props {
+            painter.circle_filled(
+                fit.to_screen(Vec2::from(prop.position)),
+                1.0,
+                Color32::from_rgb(120, 116, 104),
+            );
+        }
+        for inn in &def.inns {
+            painter.rect_filled(fit.rect(inn.area), 0.0, Color32::from_rgb(110, 170, 255));
+        }
+        for exit in &def.exits {
+            painter.rect_filled(fit.rect(exit.area), 0.0, Color32::from_rgb(255, 220, 60));
+        }
+        let dot = |at: (f32, f32), ink: Color32| {
+            painter.circle_filled(fit.to_screen(Vec2::from(at)), 1.5, ink);
+        };
+        for npc in &def.npcs {
+            dot(npc.position, Color32::WHITE);
+        }
+        for enemy in &def.enemies {
+            dot(enemy.position, Color32::from_rgb(255, 110, 100));
+        }
+        if let Some(player) = &def.player {
+            dot(player.spawn, Color32::from_rgb(120, 230, 120));
+        }
+        // What the map view is looking at. On a large map that is a sliver, so it is drawn with
+        // the same least size as everything else here: an outline too thin to see is no use to
+        // the one person who needs it.
+        let seen = Vec2::new(self.wanted.0 as f32, self.wanted.1 as f32);
+        let corner = self.view.center - seen / 2.0;
+        let looking = fit.rect((corner.x, corner.y, seen.x, seen.y));
+        painter.rect_stroke(
+            looking,
+            0.0,
+            Stroke::new(1.0, Color32::WHITE),
+            StrokeKind::Inside,
+        );
+        painter.rect_stroke(
+            fit.shown,
+            0.0,
+            Stroke::new(1.0, Color32::from_white_alpha(50)),
+            StrokeKind::Outside,
+        );
+        // Dragging inside it carries the view along; the map itself is not edited from here, and
+        // the other buttons are left alone, as they are on the map itself.
+        if let Some(at) = response.interact_pointer_pos()
+            && (response.dragged_by(PointerButton::Primary) || response.clicked())
+        {
+            self.look_at(fit.to_world(at));
+        }
+    }
+
+    /// Looks at a place on the map. The middle of the view stays on the map, so the edge of one
+    /// can be worked on with the edge down the middle of the screen, and panning can no longer
+    /// wander off into nothing and leave a designer hunting for their own map.
+    fn look_at(&mut self, at: Vec2) {
+        let size = self
+            .scene
+            .as_ref()
+            .map_or(Vec2::ZERO, |scene| Vec2::from(scene.def.size));
+        self.view.center = minimap::keep_inside(at, size).round();
     }
 
     /// The whole image of `sheet`, for egui to draw pieces of.
@@ -1411,8 +1520,7 @@ impl Editor {
                 zoom
             };
             if next != zoom {
-                self.view.center =
-                    (at + (self.view.center - at) * zoom as f32 / next as f32).round();
+                self.look_at(at + (self.view.center - at) * zoom as f32 / next as f32);
                 self.view.zoom = next;
             }
         }
@@ -1422,7 +1530,7 @@ impl Editor {
             || (pans_right && response.dragged_by(PointerButton::Secondary))
         {
             let delta = response.drag_delta() / mapping.scale;
-            self.view.center -= Vec2::new(delta.x, delta.y);
+            self.look_at(self.view.center - Vec2::new(delta.x, delta.y));
             self.drag = Some(Drag::Pan);
             return;
         }

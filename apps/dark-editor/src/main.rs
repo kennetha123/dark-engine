@@ -10,6 +10,7 @@
 mod catalog;
 mod database;
 mod editor;
+mod minimap;
 mod scene_ops;
 mod script;
 mod sheets;

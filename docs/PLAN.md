@@ -204,10 +204,14 @@ docs/            this plan
 | M7 ✅ | Narrative + save | Storylets, dialogue, relationships/marriage, endings, full world save (done; see §17) |
 | M8 ✅ | Editor MVP | Maps + height, database, roles/factions, calendar, storylets, hitbox/enemy editors, multi-client playtest, manual slice overrides (done; see §18) |
 | M9 | Polish + ship | Steam lobby/relay, lighting, particles, Luau, localization, export |
+| M10 | Open world | Chunk streaming, made land, visible-set drawing, spatial sim, world authoring (see §24) |
 
 ## 8. Risks
 
 - **World simulation scope** is the biggest risk. M3 is headless and text-only on purpose.
+- **Open world (§24):** the engine draws and simulates whole maps today, so a large world needs
+  culling, spatial queries and streaming before it needs more land. Staged so each piece pays off
+  on the maps that already exist.
 - **Host CPU:** up to 4 full-detail regions + off-screen sim + life needs for many NPCs. Budget per tick from M3.
 - **FMOD / Spine licensing:** confirm the studio's FMOD tier; one Spine license per animator.
 - **Linux:** test Wayland and X11 early; ship `libfmod.so` with rpath.
@@ -744,9 +748,14 @@ docs/            this plan
   far apart; Shuffle; solid; on which ground), a prop's footprint part by part (round or a
   box, from its foot, low enough to jump over or not), and "Pick it there…" opens the map an
   exit leads to, where a click sets where it arrives (written to the exit's map at once).
+- Stage 6, finding your way (§24.1): a minimap under the map list shows the whole map at once —
+  the raised land, exits, inns, villagers, enemies and the player's start — with the part being
+  worked on outlined; a click or a drag in it looks there, and panning the map view is kept to
+  the map with half a screenful of slack.
 - Known gaps: text edits are not undone (Ctrl+Z in a field undoes typing); ids cannot be
   renamed once made; the editor's own interface is in English only; a sheet saved again leaves
-  its old picture on the GPU until the editor closes (the renderer frees no textures).
+  its old picture on the GPU until the editor closes (the renderer frees no textures); the map
+  view still does not zoom out past 1:1, which waits on §24.2.
 
 ## 19. Packaging a build (M9, first piece)
 
@@ -964,3 +973,177 @@ how many are in it out of how many it holds, `1/4` until it is `4/4` and closed.
   can be typed on the screen, because the player app reads keys, not text; the port is fixed at
   7777, so two games cannot be opened on one machine; the name in the list is the project's, not
   the host's own, and no password or invitation guards a game — anyone on the network can join.
+
+## 24. The open world: chunks and streaming (designed; §24.1 built)
+
+The world is one continuous outdoors the player walks across without a loading screen, as large
+as 100 km on a side. Interiors stay as they are: a house, a cave or a dungeon is a scene behind
+a door (§10), loaded in a moment, and the rules below are about the outdoors only.
+
+**The numbers this has to survive.** The adventurer project is 16 px to the tile and a tile is
+about a metre, so 100 km is 100 000 tiles, 1 600 000 px, and 100 km square is **ten thousand
+million tiles**. Two bytes a tile would be 20 GB. So the first decision decides the rest:
+
+- **The land is not stored. It is worked out.** Ground, height, woods, rivers and roads come from
+  the world seed, the same answer on every machine, worked out for the piece being walked on and
+  let go behind. What a designer makes by hand, and what players change, is stored — and that is
+  small, because it is only the places that have someone's hand in them.
+- **Nothing that costs time may grow with the world.** Every frame and every tick is paid for by
+  what is near the players, never by how much world exists. This is the rule the rest of §24
+  serves, and each piece below names the thing that breaks it today.
+
+### 24.1 Seeing where you are (built)
+
+Before anything streams, a designer has to be able to find their way. The editor's map view shows
+a screenful and never zooms out past 1:1, so on a map of any size one is lost immediately.
+
+- A **minimap** in the maps panel: the whole map fitted into a small box, whatever its size — the
+  raised land, the exits, the inns, the villagers, the enemies and the player's start — with the
+  part being worked on outlined. Clicking or dragging in it looks there.
+- The view is now **kept on the map**: its middle stays on the map, so the very edge of one can
+  be worked on with that edge down the middle of the screen, and panning or zooming can no longer
+  wander off into nothing and leave a designer hunting for their own map.
+- The fitting is `apps/dark-editor/src/minimap.rs`, apart from the interface and tested without a
+  window as `scene_ops` is: a map of 100 km fits its box, a door 44 px wide is still drawn, and a
+  click in the box leaves the view looking at the place that was clicked — the click, the clamp,
+  the rounding and the view's own mapping are each harmless alone and meet there. Hand-placed
+  props are marked; scattered undergrowth is not, or the map would be nothing but dots.
+- Zooming out below 1:1 waits for §24.2: the map view renders at `viewport ÷ zoom` world pixels
+  and draws every sprite in the map, so zooming out today would make the slowest thing slower.
+
+### 24.2 Drawing only what is on the screen
+
+The renderer is handed every sprite of the whole map, every frame, and sorts them all
+(`apps/dark-player/src/demo.rs`, `crates/dark_render/src/sprite.rs`); `dark_view::MapView` builds
+one flat list per map at load. Nothing is culled anywhere. At meadow's 7 500 tiles this is
+invisible; at a thousand times that it is the whole frame.
+
+- `MapView` becomes a **grid of chunk-sized pieces**, each with its own sprite list and bounds.
+- The view copies the pieces that meet the camera rectangle — which the renderer already works
+  out, as `origin` and `size`, and then uses to reject nothing.
+- The same for the collision overlay, and for the editor's map view, which copies the whole map
+  every frame too.
+- The **silhouette pass** is sized the same way and is worse than the sort: it tests every plain
+  sprite in the frame against every character, both ways round, and it ranks them through a
+  16-bit float mask that is only exact to 2048. That is a correctness cliff, not a slow frame —
+  past it, silhouettes are wrong. Culling is what keeps the frame under it.
+- This is worth doing before any streaming: it makes a frame cost the size of the screen rather
+  than the size of the map, and it is what lets the editor zoom out. Lighting and particles (M9)
+  want it first as well; a light per map-sized sprite list is the same bill again.
+
+### 24.3 Room for the simulation
+
+The host walks every body in every loaded map each tick, and several systems are quadratic in
+everything the world holds:
+
+- **Colliders** are a linear scan per query (`dark_physics`), and one body's tick makes tens of
+  them. Props scale with area, so the scan grows with the world. It becomes a **grid keyed on the
+  tiles that already exist** — the terrain lookup beside it is already O(1). §10 has called this
+  out as a known gap since M2.
+- **Paths** are A* over the whole tile grid, exploring all of it when there is no way through
+  (`dark_world::nav`). They become chunk-local, with a **budget of nodes** and a coarse graph of
+  the ways between chunks; past the budget the walker gives up, as a routine already does.
+  The grid comes **before** the path budget: a path asks whether a tile is walkable, which asks
+  the colliders, so the two costs multiply today.
+- **Crowds, blows and snapshots** each build a list of everyone in the world and then filter it
+  by map (`crowd`, `combat`, `replication`). The crowd is the quadratic one — everyone against
+  everyone; the blows are every attacker against everyone; the snapshots are every player against
+  everyone, every third tick. They become queries **by chunk** — which means they wait for §24.4,
+  because the key they filter on today is `MapId` and that is the thing §24.4 replaces.
+- **People far from every player** need the same treatment the abstract world simulation gives
+  places nobody is in (`Region::detailed`). That is an analogy, not code to reuse: `dark_sim`'s
+  regions are named places joined by travel times, with **no coordinates at all**, so distance in
+  chunks is a new index over them. §24.5's stamps are where a chunk learns which region it is in.
+
+### 24.4 The ground itself
+
+- A **chunk** is 64×64 tiles — 1024 px at 16 px to the tile. A hundred kilometres is 1563 chunks
+  a side. A chunk holds its tiles' heights, the props standing on them, and what lives there.
+- A chunk is **made, not read**: `(world seed, chunk)` gives the same chunk on every machine,
+  worked out in whole numbers so a host and a client cannot disagree. An authored chunk is a patch
+  laid over what was made; a chunk a player has changed is a smaller patch again, in the save.
+- Chunks are made on **worker threads**, in a ring ahead of each player (five by five resident,
+  the middle nine simulated), and let go behind. Count it honestly: crossing one chunk of the ring
+  makes **five** new ones, a chunk is 1024 px, and a player walks at 80 px a second and runs at
+  150. That is about 23 chunks a minute walking, 44 running, and up to four players going four
+  ways — call it **200 a minute**, so a chunk has **tens of milliseconds**, not seconds. That is
+  the generator's budget, and it is why generation is a job and not a load.
+- What a resident chunk costs has to be **measured, not assumed**. The heights are 8 KB and the
+  colliders a few more; the sprites are the part that varies, because a wooded hillside emits one
+  for every raised tile, every rim and every prop, and that is what today's `MapView` already does
+  for whole maps. The ring's size follows the measurement, not the other way about.
+- **Where a thing is** becomes `Spot { chunk, at }` — which chunk, and where in it. A client
+  rebases on its own player's chunk; the host cannot, because its four players may be 50 km apart,
+  so it rebases **per body** on that body's own chunk, and the collider grid is keyed by chunk
+  rather than by one shared origin. Either way no coordinate an `f32` touches is bigger than a few
+  thousand pixels.
+- Why that matters, at 1 600 000 px: an `f32` there is only exact to **an eighth of a pixel**, in
+  a game drawn at 16 px to the tile. Positions quantise, movement judders, and the bisection that
+  ends a blocked move against a wall stops resolving. The sort keys go too: a shadow is drawn
+  behind its owner's feet by taking a hundredth of a pixel off its sort key, and an `f32` cannot
+  hold that nudge past **262 144 px — 16 km**. (The interface already nudges sort keys at 3e9,
+  where a whole unit is lost; that only works because the sort is stable. It is decoration there;
+  it is the ground under the player's feet here.)
+- **The save** stops being one file of everything and becomes the world's own state (§17) plus the
+  chunks that differ from what the seed makes. §17's save is flat lists of characters, structures,
+  drops and people with no place-key; the list that grows with the world is the people, and what
+  bounds it — how many are remembered, and where an absent person is kept — has to be decided with
+  §24.3's distant people, not after them.
+- **Textures have to be let go**, which nothing in the renderer can do today (§18's own gaps say
+  so): a world crossing biomes loads sheets for ever otherwise. Letting a chunk go must let its
+  art go, which means a texture handle that can be freed and re-used without the ones after it
+  shifting. Spine rigs are loaded up front the same way and need the same budget.
+- **The packager** (§19) collects what to ship by reading every scene's sheets. Made land names no
+  sheets in any scene, so what the generator can choose has to be declared somewhere the packager
+  reads, or a built game ships without its ground.
+- `MAX_TILES_PER_SIDE` (4096) and `MapId` stay as they are: they are the interiors' limits, and
+  the outdoors is no longer a scene.
+
+### 24.5 Making a world by hand
+
+- The editor gains a **world view**: the whole world as the seed makes it, zoomed out to biomes
+  and roads, with the authored places marked. §24.1's minimap is the small version of the same
+  thing.
+- A designer works on a **place** rather than a map: a town, a camp, a ruin. It is authored in the
+  map view as today, and stamped onto the world at a spot, its edges blended into what the seed
+  made. Stamps are stored, so the world is the seed plus a list of places.
+- Going from a stamp to the world view and back is how a designer moves about 100 km.
+
+### 24.6 Playing in it together
+
+- The host sends each player **what is near them**, not everything in the map they are in: an area
+  of interest by distance, with chunks acknowledged once and only changes after that.
+- The wire changes with it: a snapshot carries a body's absolute position today, and it comes to
+  carry a `Spot`. That is a protocol version, and the beacon (§23) says which version it is.
+- **Sound** is placed in absolute world pixels, listener and emitters alike. It rebases with the
+  drawing, or the two disagree.
+- A client keeps the chunks around itself, made from the same seed as the host's, so joining a
+  game does not ship a world over the wire.
+
+### Milestones
+
+M10 is this section, and it splits by what needs chunks and what does not.
+
+- **First, on the maps that exist today**, changing no file format: §24.2 (drawing only what is
+  seen), then §24.3's collider grid, then its path budget. Each of these is a fault the engine
+  already has; meadow is simply small enough to hide them.
+- **Then the world itself**: §24.4 (chunks, made land, `Spot`), and with it the rest of §24.3 —
+  crowds, blows, snapshots and distant people, all of which are keyed on chunks that do not exist
+  until §24.4 does.
+- **Then** §24.5 (authoring) and §24.6 (company).
+
+### Known gaps and risks
+
+- A hundred kilometres of *made* land is not a hundred kilometres of *worth walking to*. This says
+  where the tiles come from, not what is out there; that is the game's problem, and §21 (people's
+  days and lives) is the start of the answer.
+- Made land has to agree exactly on every machine, or players fall through different rocks.
+  Whole-number generation is the plan, and it has to be tested against itself on both platforms.
+  Agreeing on the rocks is only half of it: the physics that slides a body along them is `f32`
+  throughout, and a client predicts with it. That is true today and harder at 1 600 000 px.
+- Streaming and the world simulation meet at a seam: a villager whose chunk is not resident must
+  still eat, sleep and be where they should be when it is.
+- The crowd, the blows and the snapshots are quadratic today. They want fixing before the world
+  grows, not after, or the first large world is blamed for a fault that is already there.
+- None of this helps one enormous room: the budget is what is near a player, and a thousand
+  enemies standing together is still a thousand enemies.
