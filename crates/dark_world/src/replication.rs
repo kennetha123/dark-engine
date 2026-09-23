@@ -68,6 +68,8 @@ pub struct Snapshot {
     pub characters: Vec<CharacterSnapshot>,
     /// Tents and campfires in this map.
     pub structures: Vec<StructureSnapshot>,
+    /// Items lying on the ground in this map.
+    pub drops: Vec<crate::drops::DropSnapshot>,
     /// The client's own body and pack; nobody else's.
     pub life: Option<LifeView>,
     /// The others in the client's party.
@@ -242,15 +244,19 @@ fn read_inputs(mut host: ResMut<NetHost>, mut queues: Query<(&PlayerAvatar, &mut
             if let Some((seq, dropped)) = queue.pending.pop_first() {
                 queue.acked = seq;
                 if let Some(mut next) = queue.pending.first_entry() {
-                    // `latch` takes the newer input's slot and choice; here `dropped` is the
-                    // older one.
-                    let (item, choice) = (next.get().item, next.get().choice);
-                    next.get_mut().latch(dropped);
-                    if item != 0 {
-                        next.get_mut().item = item;
-                    }
-                    if choice != 0 {
-                        next.get_mut().choice = choice;
+                    // `latch` takes the newer input's slots and choice; here `dropped` is the
+                    // older one, so the newer's are put back.
+                    let newer = *next.get();
+                    let kept = next.get_mut();
+                    kept.latch(dropped);
+                    for (field, newer) in [
+                        (&mut kept.item, newer.item),
+                        (&mut kept.drop, newer.drop),
+                        (&mut kept.choice, newer.choice),
+                    ] {
+                        if newer != 0 {
+                            *field = newer;
+                        }
                     }
                 }
             }
@@ -357,6 +363,21 @@ struct Personal<'w, 's> {
     sent_ties: Local<'s, std::collections::HashMap<PlayerId, crate::story::Ties>>,
 }
 
+/// What stands in the maps themselves, sent to whoever is in that map.
+#[derive(bevy_ecs::system::SystemParam)]
+struct Scenery<'w, 's> {
+    structures: Query<'w, 's, (&'static NetId, &'static MapId, &'static Placed)>,
+    drops: Query<
+        'w,
+        's,
+        (
+            &'static NetId,
+            &'static MapId,
+            &'static crate::drops::Dropped,
+        ),
+    >,
+}
+
 fn send_snapshots(
     tick: Res<SimTick>,
     clock: Res<WorldClock>,
@@ -364,7 +385,7 @@ fn send_snapshots(
     mut personal: Personal,
     avatars: Query<Recipient>,
     characters: Query<Replicated, Without<crate::Dormant>>,
-    structures: Query<(&NetId, &MapId, &Placed)>,
+    scenery: Scenery,
 ) {
     if !tick.0.is_multiple_of(SNAPSHOT_INTERVAL) {
         return;
@@ -400,13 +421,26 @@ fn send_snapshots(
                     },
                 )
                 .collect(),
-            structures: structures
+            structures: scenery
+                .structures
                 .iter()
                 .filter(|(_, m, _)| *m == map)
                 .map(|(id, _, p)| StructureSnapshot {
                     id: *id,
                     structure: p.structure,
                     at: p.at,
+                })
+                .collect(),
+            drops: scenery
+                .drops
+                .iter()
+                .filter(|(_, m, _)| *m == map)
+                .map(|(id, _, d)| crate::drops::DropSnapshot {
+                    id: *id,
+                    item: d.item.clone(),
+                    count: d.count,
+                    at: (d.at.x, d.at.y),
+                    elevation: d.elevation,
                 })
                 .collect(),
             life: life

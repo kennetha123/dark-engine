@@ -475,9 +475,19 @@ docs/            this plan
 - Inns: scenes list `inns` (an area and a bed). There are no interiors yet, so the area by the
   door is the rooms: sleeping there is indoors, and enemies leave inn sleepers alone. A player who
   quits or whose grace window runs out is put to bed at the nearest inn (§4.2).
-- Replication: snapshots carry the tents and fires in the recipient's map and the recipient's own
-  body and pack (nobody else's). The HUD shows six need gauges (fuller is worse), the air's
-  temperature tinted by how it feels, statuses, and the hotbar with the worn item outlined.
+- Dropping and picking up (`dark_world::drops`): Ctrl and a hotbar number lays one of that slot
+  down, in front of the character when that is clear, open ground level with its feet (the same
+  test a tent must pass: no prop, wall, ledge or doorway), else at its feet. Not while jumping,
+  fighting, asleep or held. The last of a worn item comes off as it is dropped, and more of the
+  same dropped within 10 px joins the pile already there rather than making another.
+  A drop goes to whoever comes within 17 px of it and within 12 px of its height — except the
+  one who laid it down, until they step out of its reach, so dropping something where you stand
+  does not hand it straight back. Only characters with a pack (players, so far) pick things up;
+  what is left lying is saved with the world (`SavedDrop`, read as empty in older saves).
+- Replication: snapshots carry the tents, fires and dropped items in the recipient's map and the
+  recipient's own body and pack (nobody else's). The HUD shows six need gauges (fuller is worse),
+  the air's temperature tinted by how it feels, statuses, and the hotbar with the worn item
+  outlined. A drop is drawn on the ground as its hotbar icon.
 - Adventurer: bread, water, ale, a wool cloak (worn), a tent, firewood, a warming charm and soap;
   spring climates (the grove is cold at night without the cloak); the Meadowbrook inn is the
   Town01 house; the tent and campfire are placeholder art drawn by
@@ -485,8 +495,9 @@ docs/            this plan
 - Scattered props now also keep 12 px out of hand-placed props' footprints (a house).
 - Known gaps: NPCs have no bodies or schedules yet (the model is shared, only players get one);
   no weather or seasons (climate by hour only); no social reaction to soiling or drunkenness;
-  items cannot be found, bought or dropped (storylets can give them); no interiors; relieving
-  yourself anywhere is fine.
+  items cannot be found or bought (storylets give them, and they can now be dropped and picked
+  up); a drop lies where it fell for ever, and nobody but a player takes any notice of it; there
+  is no gamepad button for dropping; no interiors; relieving yourself anywhere is fine.
 
 ## 15. Factions, parties and loyalty (as built in M5)
 

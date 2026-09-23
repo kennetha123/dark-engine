@@ -232,10 +232,15 @@ fn party_pilot(from: u64, to: u64, seen: &[DrawCharacter]) -> TickInput {
 /// drinks four ales (3), then staggers north.
 fn camp_pilot(from: u64, to: u64) -> TickInput {
     const USES: &[(u64, u8)] = &[(45, 5), (55, 6), (70, 3), (80, 3), (90, 3), (100, 3)];
-    let item = USES
-        .iter()
-        .find(|(t, _)| (from..to).contains(t))
-        .map_or(0, |(_, slot)| *slot);
+    /// Lays the bread down by the fire, so the picture shows a dropped item too.
+    const DROPS: &[(u64, u8)] = &[(110, 1)];
+    let pressed = |presses: &[(u64, u8)]| {
+        presses
+            .iter()
+            .find(|(t, _)| (from..to).contains(t))
+            .map_or(0, |(_, slot)| *slot)
+    };
+    let item = pressed(USES);
     let movement = match to {
         0..40 => Vec2::X,
         40..45 => Vec2::Y * 0.01,
@@ -247,6 +252,7 @@ fn camp_pilot(from: u64, to: u64) -> TickInput {
     TickInput {
         movement,
         item,
+        drop: pressed(DROPS),
         ..TickInput::default()
     }
 }
@@ -285,11 +291,16 @@ fn autopilot(from: u64, to: u64) -> TickInput {
 }
 
 impl Player {
-    /// A number key: answers a conversation while choices show, else uses the hotbar.
+    /// A number key: answers a conversation while choices show, else uses the hotbar. Held with
+    /// Ctrl it lays one of that slot down instead (never an answer: a conversation is talking,
+    /// not rummaging).
     fn number(&mut self, n: u8) {
+        let ctrl =
+            self.keys.contains(&KeyCode::ControlLeft) || self.keys.contains(&KeyCode::ControlRight);
         match self.view.as_ref().and_then(|v| v.choice_for(n)) {
             // A key past the last choice does nothing while choosing.
             Some(choice) => self.presses.choice = choice.unwrap_or(0),
+            None if ctrl => self.presses.drop = n,
             None => self.presses.item = n,
         }
     }
@@ -473,7 +484,7 @@ impl Game for Player {
         self.seen = match (&mut self.mode, &mut self.view) {
             (Mode::Host(app), Some(view)) => match host_characters(app) {
                 Some((map, characters)) => {
-                    let (life, structures, party, story) = host_life(app, map);
+                    let (life, structures, drops, party, story) = host_life(app, map);
                     let clock = &app.world.resource::<WorldClock>().0;
                     let frame = Frame {
                         maps: app.world.resource::<dark_world::Maps>(),
@@ -482,6 +493,7 @@ impl Game for Player {
                         time: Some((clock.day(), clock.hour() as f32)),
                         life: life.as_ref(),
                         structures: &structures,
+                        drops: &drops,
                         party: &party,
                         story: &story,
                         menu: self.menu.then(|| {
@@ -511,6 +523,7 @@ impl Game for Player {
                         time: session.clock(),
                         life: session.life(),
                         structures: session.structures(),
+                        drops: session.drops(),
                         party: session.party(),
                         story: &story,
                         // The host's world goes on.

@@ -495,6 +495,7 @@ fn hostile_input_messages_are_ignored() {
         relieve: true,
         recruit: true,
         item: 200,
+        drop: 200,
         choice: 250,
     };
     let hostile = [
@@ -692,6 +693,49 @@ fn one_character_cannot_walk_through_another_and_the_one_standing_still_stays() 
         net.me(0).ground.distance(a.position) < 2.0,
         "prediction is {} px off",
         net.me(0).ground.distance(a.position)
+    );
+}
+
+#[test]
+fn an_item_dropped_lies_where_it_fell_until_someone_walks_over_it() {
+    let mut net = Net::new(1, None);
+    net.connect();
+    let me = net.me(0).id;
+    let carried = |net: &mut Net| net.host_life(me).inventory.count("ale");
+    let had = carried(&mut net);
+    assert!(had > 0, "a new character starts with ale");
+
+    // Drop one: it lies in front of the character, and cannot be taken back at once.
+    net.press(TickInput {
+        drop: 1,
+        ..TickInput::default()
+    });
+    assert_eq!(carried(&mut net), had - 1, "one ale left the pack");
+    let lying = net.clients[0].drops().to_vec();
+    assert_eq!(lying.len(), 1, "one ale on the ground");
+    assert_eq!(lying[0].item, "ale");
+    // Standing over your own drop does not hand it back, however long you stand there.
+    net.run(120, &[Vec2::ZERO]);
+    assert_eq!(carried(&mut net), had - 1, "taken back by standing still");
+    assert_eq!(net.clients[0].drops().len(), 1, "still lying there");
+
+    // Another of the same joins the pile rather than making a second drop.
+    net.press(TickInput {
+        drop: 1,
+        ..TickInput::default()
+    });
+    let lying = net.clients[0].drops().to_vec();
+    assert_eq!(lying.len(), 1, "one pile, not two drops");
+    assert_eq!(lying[0].count, 2, "two ales in it");
+
+    // Walk away and back: whoever walks over it takes the lot.
+    net.run(40, &[Vec2::NEG_X]);
+    assert_eq!(carried(&mut net), had - 2, "still on the ground");
+    net.run(60, &[Vec2::X]);
+    assert_eq!(carried(&mut net), had, "both picked up on the way back");
+    assert!(
+        net.clients[0].drops().is_empty(),
+        "and gone from the ground"
     );
 }
 

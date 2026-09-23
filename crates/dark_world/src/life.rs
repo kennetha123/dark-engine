@@ -190,7 +190,14 @@ impl Plugin for LifePlugin {
         })
         .add_systems(
             FixedUpdate,
-            (give_life, act)
+            // Dropping before picking up, so a drop is seen the tick it is laid down (whether it
+            // can be taken back is `Dropped::laid_by`, not the order).
+            (
+                give_life,
+                act,
+                crate::drops::drop_items,
+                crate::drops::pick_up_items,
+            )
                 .chain()
                 .after(control_characters)
                 .in_set(Control),

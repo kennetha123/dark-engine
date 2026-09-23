@@ -140,6 +140,14 @@ impl ClientSession {
         }
     }
 
+    /// Items lying on the ground in the local player's map, from the newest snapshot.
+    pub fn drops(&self) -> &[crate::drops::DropSnapshot] {
+        match (self.snapshots.back(), self.map()) {
+            (Some(s), Some(map)) if s.map == map => &s.drops,
+            _ => &[],
+        }
+    }
+
     /// The local player's conversation choices, fades and the year's ending, from the newest
     /// snapshot.
     pub fn story(&self) -> crate::StoryView {

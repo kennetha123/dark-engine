@@ -38,6 +38,9 @@ pub struct WorldSave {
     pub characters: Vec<SavedCharacter>,
     #[serde(default)]
     pub structures: Vec<SavedStructure>,
+    /// Items left lying on the ground.
+    #[serde(default)]
+    pub drops: Vec<SavedDrop>,
     #[serde(default)]
     pub people: Vec<SavedPerson>,
     /// Flags, affinity, marriages, storylets told.
@@ -68,6 +71,16 @@ pub struct SavedStructure {
     pub owner: Option<PlayerId>,
 }
 
+/// An item lying in the world (`dark_world::drops`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedDrop {
+    pub map: String,
+    pub at: Vec2,
+    pub elevation: f32,
+    pub item: String,
+    pub count: u16,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SavedPerson {
     /// The world actor's id.
@@ -86,6 +99,7 @@ impl WorldSave {
             sim,
             characters: Vec::new(),
             structures: Vec::new(),
+            drops: Vec::new(),
             people: Vec::new(),
             story: dark_story::Story::default(),
         }
@@ -161,6 +175,17 @@ impl WorldSave {
                 owner: p.owner,
             })
             .collect();
+        let drops = world
+            .query::<(&MapId, &crate::drops::Dropped)>()
+            .iter(world)
+            .map(|(map, d)| SavedDrop {
+                map: name(map),
+                at: d.at,
+                elevation: d.elevation,
+                item: d.item.clone(),
+                count: d.count,
+            })
+            .collect();
         let mut people: Vec<SavedPerson> = world
             .query::<(&Person, &MapId, &BodyState, &CharacterState)>()
             .iter(world)
@@ -182,6 +207,7 @@ impl WorldSave {
             sim,
             characters,
             structures,
+            drops,
             people,
             story,
         }
@@ -250,6 +276,24 @@ impl WorldSave {
                     elevation: s.elevation,
                     item: s.item.clone(),
                     owner: s.owner,
+                },
+                map,
+                id,
+            ));
+        }
+        for d in &self.drops {
+            let Some(map) = map_of(world, &d.map) else {
+                continue;
+            };
+            let id = world.resource_mut::<NextNetId>().allocate();
+            world.spawn((
+                crate::drops::Dropped {
+                    item: d.item.clone(),
+                    count: d.count,
+                    at: d.at,
+                    elevation: d.elevation,
+                    // Lying there since before the save: anyone may pick it up.
+                    laid_by: None,
                 },
                 map,
                 id,

@@ -43,7 +43,7 @@ In the game: WASD/arrows walk, Shift runs, Space jumps, J attacks (again to comb
 E talks to an NPC in reach (number keys answer when a conversation offers choices; on its last
 line E ends it; walking away ends it any time) or packs up your tent, Z sleeps (when every player online sleeps,
 the night passes), 1–8 use the hotbar (food, drink, the cloak on or off, tent, firewood, charm,
-soap), R relieves yourself, Q asks whoever is in reach to join you (again near your follower sends
+soap), Ctrl+1–8 lay one down (walk over it to pick it up again), R relieves yourself, Q asks whoever is in reach to join you (again near your follower sends
 it away; with nobody near you leave your party), F1
 toggles the collision overlay (`--overlay` starts with it on), F2 switches language (`--lang ja`
 starts in Japanese), Esc opens the menu (standing and people's feelings; the world waits while

@@ -69,6 +69,8 @@ pub struct Frame<'a> {
     pub life: Option<&'a LifeView>,
     /// Tents and campfires in `map`.
     pub structures: &'a [StructureSnapshot],
+    /// Items lying on the ground in `map`.
+    pub drops: &'a [dark_world::DropSnapshot],
     /// The others in the local player's party.
     pub party: &'a [NetId],
     /// The local player's conversation choices, fades and the year's ending.
@@ -395,12 +397,14 @@ pub fn host_life(
 ) -> (
     Option<LifeView>,
     Vec<StructureSnapshot>,
+    Vec<dark_world::DropSnapshot>,
     Vec<NetId>,
     dark_world::StoryView,
 ) {
     let me = app.world.resource::<NetHost>().0.local_player();
     let life = me.and_then(|me| dark_world::life_of(&mut app.world, me));
     let structures = dark_world::structures_in(&mut app.world, map);
+    let drops = dark_world::drops_in(&mut app.world, map);
     let avatar = me.and_then(|me| {
         let mut q = app
             .world
@@ -414,7 +418,7 @@ pub fn host_life(
     let story = me
         .map(|me| dark_world::story_view(&mut app.world, me))
         .unwrap_or_default();
-    (life, structures, party, story)
+    (life, structures, drops, party, story)
 }
 
 /// Bubbles and prompts sit this far above a character's feet: about head height for the 64 px
@@ -618,6 +622,7 @@ impl DemoView {
         self.frame_sprites.clear();
         self.frame_meshes.clear();
         self.draw_structures(frame.structures, collision);
+        self.draw_drops(frame.drops);
         let map_view = map.0 as usize;
         self.frame_sprites
             .extend_from_slice(&self.maps[map_view].statics);
@@ -1252,6 +1257,27 @@ impl DemoView {
                 frame.pivot,
             );
             sprite.sort_y = s.at.y;
+            self.frame_sprites.push(sprite);
+        }
+    }
+
+    /// Items lying on the ground: the icon the hotbar uses, laid where it fell. An item with no
+    /// icon (nothing draws it) is invisible, as it is in the pack.
+    fn draw_drops(&mut self, drops: &[dark_world::DropSnapshot]) {
+        for drop in drops {
+            let Some(&icon) = self.icons.get(&drop.item) else {
+                continue;
+            };
+            let at = Vec2::new(drop.at.0, drop.at.1);
+            let mut sprite = Sprite::new(
+                icon,
+                Rect::new(0, 0, ICON_SIZE, ICON_SIZE),
+                at - Vec2::new(0.0, drop.elevation),
+                // Standing on its own middle, so it lies on the ground it was dropped on.
+                Vec2::splat(ICON_SIZE as f32 / 2.0),
+            );
+            // Sorted by the icon's lowest pixel, as everything else is by its feet.
+            sprite.sort_y = at.y + ICON_SIZE as f32 / 2.0;
             self.frame_sprites.push(sprite);
         }
     }

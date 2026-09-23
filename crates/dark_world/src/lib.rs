@@ -15,6 +15,7 @@ mod characters;
 mod client;
 mod combat;
 mod crowd;
+mod drops;
 mod life;
 mod maps;
 mod nav;
@@ -32,6 +33,7 @@ pub use characters::{
 };
 pub use client::{ClientSession, DrawCharacter, INTERPOLATION_DELAY};
 pub use combat::{CORPSE_TICKS, CombatPlugin, Dormant, Fight, Hostile, PLAYER_RESPAWN_TICKS, Post};
+pub use drops::{DropSnapshot, Dropped, drops_in};
 pub use life::{
     FIRE_REACH, Life, LifePlugin, LifeRules, LifeView, NightPass, Placed, StructureSnapshot,
     TENT_REACH, life_of, structures_in,
@@ -41,7 +43,7 @@ pub use replication::{
     CharacterSnapshot, ClientInputs, INPUT_REDUNDANCY, LocalInput, NetReceive, NetSend,
     ReplicationPlugin, SNAPSHOT_INTERVAL, Snapshot,
 };
-pub use save::{SAVE_VERSION, SavedCharacter, SavedPerson, SavedStructure, WorldSave};
+pub use save::{SAVE_VERSION, SavedCharacter, SavedDrop, SavedPerson, SavedStructure, WorldSave};
 pub use story::{Conversing, Faded, StoryPlugin, StoryState, StoryView, story_view};
 pub use talk::{
     HELD_TICKS, LEAVE_RANGE, Npc, SPEECH_TICKS, Speech, TALK_RANGE, TalkPlugin, talk_target,
