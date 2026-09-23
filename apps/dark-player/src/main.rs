@@ -27,7 +27,7 @@
 //! Controls: WASD / arrows to walk, Shift to run, Space to jump, J to attack (again to combo),
 //! K to dodge, E to talk (number keys answer when a conversation offers choices), Z to sleep (when every player online sleeps, the night passes), F1 for
 //! the collision overlay, F2 to switch language, Esc for the menu (the world waits while nobody
-//! else is online).
+//! else is online). A gamepad works alongside the keyboard; `pad.rs` lists its buttons.
 //! `--clients` passes `--project`, `--scene`, `--net-sim`, `--lang` and `--autopilot` on to the clients.
 
 // A built game opens no console window on Windows; a development build keeps one for the log.
@@ -36,6 +36,7 @@
 
 mod demo;
 mod fx;
+mod pad;
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -80,8 +81,11 @@ struct Player {
     scene: Option<DemoScene>,
     view: Option<DemoView>,
     keys: HashSet<KeyCode>,
-    /// Presses since the last frame.
+    /// Presses since the last frame, from the keyboard and the pad alike.
     presses: TickInput,
+    pads: pad::Pads,
+    /// The window has the keyboard. A gamepad belongs to no window, so it is read only here.
+    focused: bool,
     autopilot: bool,
     /// Fight whatever enemy is nearest instead of taking the keyboard.
     fight: bool,
@@ -111,8 +115,9 @@ impl Player {
         (self.elapsed.as_secs_f64() * f64::from(DEFAULT_TICK_RATE)) as u64
     }
 
-    /// This frame's input: held movement and run, and the presses since the last frame.
-    fn input(&mut self, dt: Duration) -> TickInput {
+    /// This frame's input: held movement and run from the keyboard or the pad (whichever is
+    /// asking for something), and the presses since the last frame, which both fill.
+    fn input(&mut self, dt: Duration, pad: pad::Held) -> TickInput {
         if self.fight {
             let before = self.elapsed_ticks();
             self.elapsed += dt;
@@ -136,18 +141,24 @@ impl Player {
         }
         let held = |keys: &[KeyCode]| keys.iter().any(|k| self.keys.contains(k));
         let axis = |neg: &[KeyCode], pos: &[KeyCode]| f32::from(held(pos)) - f32::from(held(neg));
-        TickInput {
-            movement: Vec2::new(
-                axis(
-                    &[KeyCode::KeyA, KeyCode::ArrowLeft],
-                    &[KeyCode::KeyD, KeyCode::ArrowRight],
-                ),
-                axis(
-                    &[KeyCode::KeyW, KeyCode::ArrowUp],
-                    &[KeyCode::KeyS, KeyCode::ArrowDown],
-                ),
+        let keys = Vec2::new(
+            axis(
+                &[KeyCode::KeyA, KeyCode::ArrowLeft],
+                &[KeyCode::KeyD, KeyCode::ArrowRight],
             ),
-            run: held(&[KeyCode::ShiftLeft, KeyCode::ShiftRight]),
+            axis(
+                &[KeyCode::KeyW, KeyCode::ArrowUp],
+                &[KeyCode::KeyS, KeyCode::ArrowDown],
+            ),
+        );
+        TickInput {
+            // The keyboard leads while a key is down; otherwise the stick does.
+            movement: if keys == Vec2::ZERO {
+                pad.movement
+            } else {
+                keys
+            },
+            run: held(&[KeyCode::ShiftLeft, KeyCode::ShiftRight]) || pad.run,
             ..self.presses.take_presses()
         }
     }
@@ -359,10 +370,13 @@ impl Game for Player {
         }
     }
 
-    fn focus_lost(&mut self) {
-        // Releases are not reported while unfocused; drop everything, including latched presses.
-        self.keys.clear();
-        self.presses = TickInput::default();
+    fn focus(&mut self, focused: bool) {
+        self.focused = focused;
+        if !focused {
+            // Releases are not reported while unfocused; drop everything, latched presses too.
+            self.keys.clear();
+            self.presses = TickInput::default();
+        }
     }
 
     fn frame(&mut self, dt: Duration) -> Flow {
@@ -374,13 +388,21 @@ impl Game for Player {
         } else {
             dt
         };
+        // The pad fills the same presses the keyboard does; Start opens the menu as Esc does.
+        let pad = self.pads.poll(&mut self.presses, self.focused);
+        if pad.menu {
+            self.menu = !self.menu;
+        }
+        for &slot in &pad.numbers {
+            self.number(slot);
+        }
         // Behind the menu the character stands still, presses made there are dropped, and the
         // autopilots wait.
         let input = if self.menu {
             self.presses = TickInput::default();
             TickInput::default()
         } else {
-            self.input(dt)
+            self.input(dt, pad)
         };
         self.frames += 1;
         let log_now = self.autopilot && self.frames.is_multiple_of(30);
@@ -918,6 +940,8 @@ fn main() -> ExitCode {
         view: None,
         keys: HashSet::new(),
         presses: TickInput::default(),
+        pads: pad::Pads::new(),
+        focused: true,
         lang: args.lang.clone(),
         autopilot: args.autopilot,
         fight: args.fight,

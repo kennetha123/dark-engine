@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SIM_CRATES=(dark_core dark_time dark_net dark_world dark_sprite dark_assets dark_physics dark_sim dark_combat dark_life dark_story dark-host)
-FORBIDDEN='^(winit|wgpu|pollster|dark_platform|dark_render|dark_audio|dark_spine|dark_view|libfmod|rusty_spine|egui|egui-wgpu|egui-winit|rfd|cosmic-text|swash) '
+FORBIDDEN='^(winit|wgpu|gilrs|pollster|dark_platform|dark_render|dark_audio|dark_spine|dark_view|libfmod|rusty_spine|egui|egui-wgpu|egui-winit|rfd|cosmic-text|swash) '
 
 status=0
 for crate in "${SIM_CRATES[@]}"; do

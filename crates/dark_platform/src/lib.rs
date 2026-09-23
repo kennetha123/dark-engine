@@ -46,8 +46,9 @@ pub trait Game {
     fn frame(&mut self, dt: Duration) -> Flow;
     /// A physical key changed state. Auto-repeat is filtered out.
     fn key(&mut self, _key: KeyCode, _pressed: bool) {}
-    /// The window lost focus; held keys will not report their release.
-    fn focus_lost(&mut self) {}
+    /// The window gained or lost focus. Unfocused, held keys never report their release, and a
+    /// gamepad (which no window owns) must be left alone.
+    fn focus(&mut self, _focused: bool) {}
     /// The window is closing. Last chance for a graceful network quit.
     fn exiting(&mut self);
 }
@@ -116,7 +117,7 @@ impl<G: Game> ApplicationHandler for Runner<G> {
                     self.game.key(code, event.state.is_pressed());
                 }
             }
-            WindowEvent::Focused(false) => self.game.focus_lost(),
+            WindowEvent::Focused(focused) => self.game.focus(focused),
             _ => {}
         }
     }

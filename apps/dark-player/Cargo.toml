@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 dark_core.workspace = true
+gilrs.workspace = true
 image.workspace = true
 glam.workspace = true
 dark_sprite.workspace = true

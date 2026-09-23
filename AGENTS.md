@@ -47,7 +47,10 @@ soap), R relieves yourself, Q asks whoever is in reach to join you (again near y
 it away; with nobody near you leave your party), F1
 toggles the collision overlay (`--overlay` starts with it on), F2 switches language (`--lang ja`
 starts in Japanese), Esc opens the menu (standing and people's feelings; the world waits while
-nobody else is online; `--menu` starts with it open). Hosts take `--save <file>` (carry the whole world on; it is saved at each new
+nobody else is online; `--menu` starts with it open). A gamepad works alongside the keyboard:
+left stick walks, left trigger runs, A jumps, X attacks, B dodges, Y talks, right shoulder asks
+someone along, Back sleeps, Start opens the menu, the d-pad is the hotbar (with the left shoulder
+for 5–8) and answers conversations. Hosts take `--save <file>` (carry the whole world on; it is saved at each new
 day and on quitting, Ctrl+C for `dark-host`; without `--player` the save's host plays on as
 themselves) and `--world-seed <n>`. The story is the project's `story.ron`.
 

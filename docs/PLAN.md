@@ -409,7 +409,8 @@ docs/            this plan
 - `--autopilot-fight` fights the nearest enemy (combos, dodges wind-ups) for screenshots.
 - Per-frame boxes: a sheet's `boxes` (drawn in the editor's Sheets tab, §18) give each frame of
   a clip its own hit and hurt circles; a clip with any uses them instead of the moveset's circle.
-- Known gaps: no air attacks, projectiles, AoE, aiming or lock-on; no gamepad, so no rumble; no flow fields
+- Known gaps: no air attacks, projectiles, AoE, aiming or lock-on; no rumble (the pad is read,
+  never driven — see §20); no flow fields
   (A* per enemy is fine at this count); no boss phases; enemy tells rely on startup length and
   the wind-up sound, there are no tell animations; being hit is not predicted (the victim sees it
   a round trip late, like any host decision); players have no lag compensation for their hits;
@@ -731,3 +732,38 @@ commands in AGENTS.md go through `cargo run`, which waits.
   the world is kept only with `--save`, which is a command line, not a menu; playing together
   is typed the same way (§5's Steam lobby is the M9 answer), over the internet it still needs
   the host's UDP port open, and connections are not yet authenticated.
+
+## 20. Gamepads (M4's gap, filled)
+
+`gilrs` in `dark-player` only (the simulation never learns where input came from: a pad fills the
+same `TickInput` the keyboard fills, and both work at once — a key held leads, else the stick).
+Pads are plugged and unplugged while the game runs. A pad plays once a button on it is pressed,
+and the one pressed last is the one playing: a device nobody has touched — a wheel, a flight
+stick, a pad resting off-centre — never steers, and plugging one in does not take control.
+Unfocused, the pad does nothing: it belongs to no window, so the game reads it only while it is
+the window being played.
+
+| | |
+|---|---|
+| Left stick | Walk (the tilt is how fast, up to walking pace) |
+| Left trigger, or the stick pressed in | Run |
+| A / South | Jump |
+| X / West | Attack (again to combo) |
+| B / East | Dodge |
+| Y / North | Talk, answer, pack up the tent |
+| Right shoulder | Ask someone along |
+| Right stick pressed in | Relieve yourself |
+| Back / Select | Sleep |
+| Start | The menu (as Esc) |
+| D-pad up/right/down/left | Hotbar 1–4, or 5–8 with the left shoulder held; answers a conversation as the number keys do |
+
+- The d-pad does not walk. It would turn the character as the slot it chose was used — planting
+  a tent behind them — and answering with it would walk them out of the conversation.
+- A stick nearer the middle than 0.25 is the stick resting, not a wish; past that the tilt is
+  spread over the whole range again, so the slowest walk is a slow walk and not a quarter pace.
+- On Linux pads are read through udev, so a build there needs `libudev-dev`; the headless host
+  needs none of it (it has no input at all), and CI installs it for the workspace build. `gilrs`
+  is in the sim-dependency guard's forbidden list: input is presentation.
+- Known gaps: no rumble; the buttons cannot be changed; a pad the machine has no mapping for
+  reports nothing the game understands, so it does not play (it says so in the log); menus are
+  not walked with the d-pad (the menu only shows, it has nothing to choose).
