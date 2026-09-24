@@ -69,6 +69,31 @@ impl Strings {
     }
 
     /// Text typed since the last save.
+    /// Every key the project has text for, hand-written or written here. A writer works through
+    /// this list; everyone else meets it one villager at a time.
+    pub fn keys(&self) -> std::collections::BTreeSet<String> {
+        let mut keys: std::collections::BTreeSet<String> =
+            self.shown.keys().into_iter().map(str::to_owned).collect();
+        for table in self.written.values() {
+            keys.extend(table.keys().cloned());
+        }
+        keys
+    }
+
+    /// Whether `language` has any text of its own for `key` — hand-written or written here.
+    /// Text that falls back to another language is *not* text: it is the other language showing
+    /// through, which is what a writer wants to find.
+    pub fn says(&mut self, key: &str, language: &str) -> bool {
+        if self.has_written(key, language) {
+            return true;
+        }
+        let current = self.shown.language().to_owned();
+        self.shown.set_language(language);
+        let has = self.shown.has(key);
+        self.shown.set_language(&current);
+        has
+    }
+
     pub fn dirty(&self) -> bool {
         self.dirty
     }

@@ -152,8 +152,13 @@ enum Workspace {
     Maps,
     Database,
     Story,
+    Text,
     Sheets,
 }
+
+/// One language's words for a line: which language, what it says, and whether that language says
+/// it itself rather than falling back to another.
+type Said = (String, String, bool);
 
 struct NewMap {
     name: String,
@@ -209,6 +214,9 @@ pub struct Editor {
     play_hour: Option<u32>,
     /// A map the designer has asked to delete, until they say yes or no.
     deleting: Option<String>,
+    /// What a writer is looking for in the text, and whether to show only what is unwritten.
+    text_search: String,
+    text_missing_only: bool,
     /// How many play a playtest, each in a window of their own.
     players: u8,
     /// Picking, on the map an exit leads to, where it arrives: the exit's map and number.
@@ -307,6 +315,8 @@ impl Editor {
             players: 1,
             play_hour: None,
             deleting: None,
+            text_search: String::new(),
+            text_missing_only: false,
             picking: None,
             project,
         };
@@ -405,6 +415,7 @@ impl Editor {
                     &elsewhere,
                 );
             }
+            Workspace::Text => self.text_workspace(ui),
             Workspace::Sheets => {
                 self.sheets.ui(ui, &self.project);
                 // A sheet just made reaches the maps at once.
@@ -688,6 +699,7 @@ impl Editor {
             Workspace::Maps => self.undo(),
             Workspace::Database => self.database.undo_step(),
             Workspace::Story => self.story.undo_step(),
+            Workspace::Text => {}
             Workspace::Sheets => self.sheets.undo_step(&self.project),
         }
     }
@@ -697,6 +709,8 @@ impl Editor {
             Workspace::Maps => self.redo(),
             Workspace::Database => self.database.redo_step(),
             Workspace::Story => self.story.redo_step(),
+            // Text has no steps of its own: a line is written where it stands.
+            Workspace::Text => {}
             Workspace::Sheets => self.sheets.redo_step(&self.project),
         }
     }
@@ -773,6 +787,85 @@ impl Editor {
             });
         if close {
             self.deleting = None;
+        }
+    }
+
+    /// Every line in the game, in every language: what a writer works through.
+    ///
+    /// Elsewhere text is reached through whoever says it — a villager, a node of a conversation —
+    /// which is the right way to write a scene and the wrong way to finish a language. Here the
+    /// words are the thing: search them, see which are not written in a language yet, and write
+    /// them without hunting for who says them.
+    fn text_workspace(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Text");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.text_search)
+                    .hint_text("search the words or the key")
+                    .desired_width(260.0),
+            );
+            ui.checkbox(&mut self.text_missing_only, "Only what is not written yet")
+                .on_hover_text("Lines some language has no words for");
+        });
+        let languages = self.strings.languages.clone();
+        let keys: Vec<String> = self.strings.keys().into_iter().collect();
+        let looking = self.text_search.to_lowercase();
+        // Worked out before drawing, so the rows do not shift while they are read.
+        let rows: Vec<(String, Vec<Said>)> = keys
+            .into_iter()
+            .map(|key| {
+                let said: Vec<Said> = languages
+                    .iter()
+                    .map(|code| {
+                        let says = self.strings.says(&key, code);
+                        (code.clone(), self.strings.text(&key, code), says)
+                    })
+                    .collect();
+                (key, said)
+            })
+            .filter(|(key, said)| {
+                let missing = said.iter().any(|(.., says)| !says);
+                if self.text_missing_only && !missing {
+                    return false;
+                }
+                looking.is_empty()
+                    || key.to_lowercase().contains(&looking)
+                    || said
+                        .iter()
+                        .any(|(_, text, _)| text.to_lowercase().contains(&looking))
+            })
+            .collect();
+        ui.weak(format!("{} lines", rows.len()));
+        ui.separator();
+        let mut written: Vec<(String, String, String)> = Vec::new();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for (key, said) in &rows {
+                ui.horizontal(|ui| {
+                    ui.strong(key);
+                });
+                for (code, text, says) in said {
+                    ui.horizontal(|ui| {
+                        if *says {
+                            ui.weak(code);
+                        } else {
+                            // Not written in this language: it falls back to another, which a
+                            // player sees as the wrong language rather than as nothing.
+                            ui.colored_label(Color32::from_rgb(255, 190, 90), code);
+                        }
+                        let mut line = text.clone();
+                        let field = egui::TextEdit::singleline(&mut line)
+                            .desired_width(ui.available_width() - 8.0)
+                            .id_salt(("text", key, code));
+                        if ui.add(field).changed() {
+                            written.push((key.clone(), code.clone(), line));
+                        }
+                    });
+                }
+                ui.add_space(4.0);
+            }
+        });
+        for (key, code, line) in written {
+            self.strings.set(&key, &code, &line);
         }
     }
 
@@ -988,6 +1081,12 @@ impl Editor {
                     "Conversations with the people of the world, and the year's endings",
                 ),
                 (
+                    Workspace::Text,
+                    "Text",
+                    "Every line in the game, in every language: search it, and find what is \
+                     not written yet",
+                ),
+                (
                     Workspace::Sheets,
                     "Sheets",
                     "How pictures are cut into frames and clips, and where attacks hit",
@@ -1011,6 +1110,7 @@ impl Editor {
                 Workspace::Maps => (self.history.can_undo(), self.history.can_redo()),
                 Workspace::Database => (self.database.can_undo(), self.database.can_redo()),
                 Workspace::Story => (self.story.can_undo(), self.story.can_redo()),
+                Workspace::Text => (false, false),
                 Workspace::Sheets => (self.sheets.can_undo(), self.sheets.can_redo()),
             };
             if ui

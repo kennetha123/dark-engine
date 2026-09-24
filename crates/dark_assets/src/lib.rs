@@ -1434,6 +1434,15 @@ impl Localization {
         }
     }
 
+    /// Every key any language has text for, in order and without repeats. What a writer is
+    /// shown when they want the words themselves rather than the villager who says them.
+    pub fn keys(&self) -> std::collections::BTreeSet<&str> {
+        self.tables
+            .iter()
+            .flat_map(|(_, table)| table.keys().map(String::as_str))
+            .collect()
+    }
+
     /// Whether the current language itself has text for `key` (no fallback).
     pub fn has(&self, key: &str) -> bool {
         self.tables
