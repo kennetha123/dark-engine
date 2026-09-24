@@ -164,6 +164,8 @@ struct NewMap {
     name: String,
     cols: u32,
     rows: u32,
+    /// Made from a seed rather than drawn (docs/PLAN.md §24.4): a country rather than a map.
+    made: bool,
     /// The name field has been given the keyboard.
     focused: bool,
 }
@@ -220,6 +222,8 @@ pub struct Editor {
     /// How many tiles across the terrain brush paints, and whether it floods instead.
     brush_wide: u32,
     bucket: bool,
+    /// Whether the map being made is made from a seed, until it is made.
+    new_map_made: bool,
     /// How many play a playtest, each in a window of their own.
     players: u8,
     /// Picking, on the map an exit leads to, where it arrives: the exit's map and number.
@@ -322,6 +326,7 @@ impl Editor {
             text_missing_only: false,
             brush_wide: 1,
             bucket: false,
+            new_map_made: false,
             picking: None,
             project,
         };
@@ -957,7 +962,16 @@ impl Editor {
             );
             return;
         };
-        let def = ops::blank_scene(&ground, cols, rows, self.tile);
+        let mut def = ops::blank_scene(&ground, cols, rows, self.tile);
+        if self.new_map_made {
+            // A country, made from a number nobody has used yet: two maps of one seed would be
+            // one country twice over (docs/PLAN.md §24.4).
+            def.land = Some(dark_assets::LandDef {
+                seed: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(20_260_923, |since| since.as_secs()),
+            });
+        }
         if let Err(err) = self.project.save_scene(&path, &def) {
             self.status = (format!("Cannot create {name}: {err}"), true);
             return;
@@ -966,7 +980,11 @@ impl Editor {
         self.catalog.scenes.sort();
         self.open(path);
         self.status = (
-            format!("Made {name}. Add an exit from another map to reach it."),
+            if self.new_map_made {
+                format!("Made {name}, a country of its own. Stamp places on it, or walk it.")
+            } else {
+                format!("Made {name}. Add an exit from another map to reach it.")
+            },
             false,
         );
     }
@@ -1383,6 +1401,7 @@ impl Editor {
                 name: String::new(),
                 cols: 40,
                 rows: 30,
+                made: false,
                 focused: false,
             });
         }
@@ -1715,19 +1734,42 @@ impl Editor {
                 new.name
                     .retain(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
                 new.name.make_ascii_lowercase();
+                if ui
+                    .checkbox(&mut new.made, "A world made from a seed")
+                    .on_hover_text(
+                        "Hills, plains and water worked out as players walk, so a map may be \
+                         kilometres across. Towns are stamped on it as places.",
+                    )
+                    .changed()
+                {
+                    // A country is counted in kilometres; a drawn map in paces.
+                    (new.cols, new.rows) = if new.made { (2_000, 2_000) } else { (40, 30) };
+                }
                 ui.horizontal(|ui| {
                     ui.label("Size in tiles:");
-                    let most = PAINTABLE_TILES;
+                    let most = if new.made {
+                        dark_assets::SceneDef::MAX_TILES_PER_SIDE
+                    } else {
+                        PAINTABLE_TILES
+                    };
                     ui.add(DragValue::new(&mut new.cols).range(8..=most));
                     ui.label("by");
                     ui.add(DragValue::new(&mut new.rows).range(8..=most));
+                    if new.made {
+                        let tile = self.tile as f32;
+                        ui.weak(format!(
+                            "{:.1} × {:.1} km",
+                            new.cols as f32 * tile / 1_000.0,
+                            new.rows as f32 * tile / 1_000.0
+                        ));
+                    }
                 });
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(!new.name.is_empty(), egui::Button::new("Create"))
                         .clicked()
                     {
-                        create = Some((new.name.clone(), new.cols, new.rows));
+                        create = Some((new.name.clone(), new.cols, new.rows, new.made));
                     }
                     if ui.button("Cancel").clicked() {
                         cancel = true;
@@ -1737,8 +1779,9 @@ impl Editor {
             if cancel {
                 self.new_map = None;
             }
-            if let Some((name, cols, rows)) = create {
+            if let Some((name, cols, rows, made)) = create {
                 self.new_map = None;
+                self.new_map_made = made;
                 if self.scene.as_ref().is_some_and(|s| s.dirty) {
                     self.pending = Some(Pending::NewMap { name, cols, rows });
                 } else {
