@@ -15,22 +15,34 @@ use dark_core::{App, FixedUpdate, Plugin};
 use dark_net::SessionState;
 use dark_sim::{RegionId, WorldDef, WorldEvent, WorldSim, YEAR_HOURS};
 use dark_time::{ClockEvent, Presence, everyone_asleep};
+use glam::Vec2;
 
 use crate::characters::{Asleep, CharacterState, PlayerAvatar};
 use crate::life::{NightPass, NightPassed, minute_of};
 use crate::save::{self, WorldSave};
-use crate::{MapId, Maps, NetHost, WorldClock};
+use crate::{BodyState, MapId, Maps, NetHost, WorldClock};
 
 /// After physics (players have moved) and before snapshots (they show the new time).
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct WorldStep;
 
+/// Which region a map is, and which regions the places stamped on it are.
+struct MapRegions {
+    /// What the map itself is, where it is not one of its places.
+    map: Option<RegionId>,
+    /// The places stamped on it that name a region, in the order they were stamped: a place
+    /// inside another comes after it, so the last one holding a spot is the smallest.
+    places: Vec<(dark_assets::Stamped, RegionId)>,
+}
+
 /// The world simulation and what the host needs to run it.
 #[derive(Resource)]
 pub struct WorldState {
     pub sim: WorldSim,
-    /// Region of each map, by `MapId`.
-    regions: Vec<Option<RegionId>>,
+    /// Region of each map, by `MapId`, and of the places stamped on it. A made world is one map
+    /// with many towns on it, so where somebody stands decides which region they are in
+    /// (docs/PLAN.md §24.5).
+    regions: Vec<MapRegions>,
     /// Where to save at each new day.
     save: Option<PathBuf>,
     saved_day: u32,
@@ -43,8 +55,16 @@ pub struct WorldState {
 }
 
 impl WorldState {
-    pub fn region_of(&self, map: MapId) -> Option<RegionId> {
-        self.regions.get(usize::from(map.0)).copied().flatten()
+    /// The region somebody standing at `at` in `map` is in: the place they are standing in, if
+    /// they are standing in one, else whatever the map itself is.
+    pub fn region_at(&self, map: MapId, at: Vec2) -> Option<RegionId> {
+        let here = self.regions.get(usize::from(map.0))?;
+        here.places
+            .iter()
+            .rev()
+            .find(|(place, _)| place.holds((at.x, at.y)))
+            .map(|(_, region)| *region)
+            .or(here.map)
     }
 
     /// What the world simulation reported this tick.
@@ -111,12 +131,29 @@ impl Plugin for WorldSimPlugin {
             .maps
             .iter()
             .map(|map| {
-                let region = map.def.region.as_deref()?;
-                let id = sim.world().region(region);
-                if id.is_none() {
-                    tracing::warn!("{}: region {region} is not in the world", map.name);
+                let named = |region: Option<&str>, what: &str| {
+                    let region = region?;
+                    let id = sim.world().region(region);
+                    if id.is_none() {
+                        tracing::warn!("{}: {what} {region} is not in the world", map.name);
+                    }
+                    id
+                };
+                MapRegions {
+                    map: named(map.def.region.as_deref(), "region"),
+                    // Each place stamped on it that says which region it is: a made world is one
+                    // map with many towns on it (§24.5).
+                    places: map
+                        .def
+                        .stamped
+                        .iter()
+                        .filter_map(|place| {
+                            let region =
+                                named(place.region.as_deref(), "a stamped place's region")?;
+                            Some((place.clone(), region))
+                        })
+                        .collect(),
                 }
-                id
             })
             .collect();
         // A world carried on from a save brings its time with it.
@@ -200,8 +237,11 @@ fn sleep_consensus(
 
 /// A player new to the world gets their actor the tick they arrive, not at the next hour, so
 /// their standing is known (and shown) from the start.
-fn meet_the_world(mut world: ResMut<WorldState>, players: Query<(&PlayerAvatar, &MapId)>) {
-    for (avatar, map) in &players {
+fn meet_the_world(
+    mut world: ResMut<WorldState>,
+    players: Query<(&PlayerAvatar, &MapId, &BodyState)>,
+) {
+    for (avatar, map, body) in &players {
         let key = avatar.0.0.as_u128();
         if !world
             .sim
@@ -210,7 +250,7 @@ fn meet_the_world(mut world: ResMut<WorldState>, players: Query<(&PlayerAvatar, 
             .iter()
             .any(|a| a.player == Some(key))
         {
-            crate::party::player_actor(&mut world, avatar.0, *map);
+            crate::party::player_actor(&mut world, avatar.0, *map, body.0.position);
         }
     }
 }
@@ -218,7 +258,7 @@ fn meet_the_world(mut world: ResMut<WorldState>, players: Query<(&PlayerAvatar, 
 pub(crate) fn advance_world(
     clock: Res<WorldClock>,
     mut world: ResMut<WorldState>,
-    players: Query<(&PlayerAvatar, &MapId, Has<Asleep>)>,
+    players: Query<(&PlayerAvatar, &MapId, &BodyState, Has<Asleep>)>,
 ) {
     let target = if clock.0.is_year_over() {
         YEAR_HOURS
@@ -229,8 +269,10 @@ pub(crate) fn advance_world(
         // Where players are before the hours run. Those online decide where the full
         // simulation runs; an offline player's character sleeps where it is and runs nothing.
         let (mut detailed, mut online) = (Vec::new(), Vec::new());
-        for (avatar, map, offline) in &players {
-            let Some(region) = world.region_of(*map) else {
+        for (avatar, map, body, offline) in &players {
+            // Where they are standing, not only which map they are on: a made world is one map
+            // with many towns on it, and a player in one of them is in that town's region.
+            let Some(region) = world.region_at(*map, body.0.position) else {
                 continue;
             };
             let actor = world.sim.player_actor(avatar.0.0.as_u128(), region);
@@ -289,6 +331,99 @@ pub fn save_now(world: &mut World) -> Option<Result<PathBuf, String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A made world is one map with many towns stamped on it, so which region somebody is in is
+    /// decided by **where they stand**, not by which map they are on.
+    ///
+    /// Everything the world simulation does hangs on this: which rumours reach a player, how
+    /// dangerous the ground is, where heroes walk, which inn they sleep at. A world of one map
+    /// would otherwise be one region from end to end, and the whole simulation would flatten with
+    /// it (docs/PLAN.md §24.5).
+    #[test]
+    fn a_town_stamped_on_the_world_is_its_own_region() {
+        use dark_assets::Project;
+
+        let dir = std::env::temp_dir().join(format!("dark_world_regions_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scenes")).unwrap();
+        std::fs::write(
+            dir.join("project.ron"),
+            r#"(name: "t", tile_size: 16, resolution: (320, 180))"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("world.ron"), crate::net_tests::TEST_WORLD).unwrap();
+        // A keep, stamped on a world whose wilds are the capital's.
+        std::fs::write(
+            dir.join("scenes/keep.ron"),
+            r#"(size: (800, 800), region: "keep", ground: (sheet: "g", frame: 0))"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("scenes/world.ron"),
+            r#"(
+                size: (32000, 32000),
+                region: "capital",
+                land: (seed: 20260923),
+                ground: (sheet: "g", frame: 0),
+                player: (sheet: "p", spawn: (9000, 9000)),
+                places: [(scene: "scenes/keep.ron", at: (12000, 12000))],
+            )"#,
+        )
+        .unwrap();
+        let project = Project::open(dir.clone()).unwrap();
+        let maps = Maps::load(&project, "scenes/world.ron").unwrap();
+        let saved = load_world(&project, None, 1).unwrap().expect("a world");
+
+        // The regions as the host works them out at load.
+        let sim = saved.sim;
+        let map = &maps.maps[0];
+        let named = |region: Option<&str>| region.and_then(|region| sim.world().region(region));
+        let state = WorldState {
+            regions: vec![MapRegions {
+                map: named(map.def.region.as_deref()),
+                places: map
+                    .def
+                    .stamped
+                    .iter()
+                    .filter_map(|place| Some((place.clone(), named(place.region.as_deref())?)))
+                    .collect(),
+            }],
+            sim,
+            save: None,
+            saved_day: 0,
+            names: Localization::default(),
+            recent: Vec::new(),
+            saved_host: None,
+        };
+        let capital = state.sim.world().region("capital").expect("the capital");
+        let keep = state.sim.world().region("keep").expect("the keep");
+        assert_ne!(capital, keep);
+
+        // Standing in the keep is being in the keep; a step outside it is the open country.
+        let here = MapId(0);
+        assert_eq!(
+            state.region_at(here, Vec2::new(12_400.0, 12_400.0)),
+            Some(keep),
+            "inside the stamped keep"
+        );
+        assert_eq!(
+            state.region_at(here, Vec2::new(12_000.0, 12_000.0)),
+            Some(keep),
+            "its own corner counts as inside"
+        );
+        for outside in [
+            Vec2::new(11_999.0, 12_400.0),
+            Vec2::new(12_800.0, 12_400.0),
+            Vec2::new(9_000.0, 9_000.0),
+        ] {
+            assert_eq!(
+                state.region_at(here, outside),
+                Some(capital),
+                "{outside} is outside the keep, so it is the world's own region"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_saved_world_is_carried_on_and_a_new_one_starts_from_world_ron() {

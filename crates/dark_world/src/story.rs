@@ -252,7 +252,8 @@ fn converse(
         if conversing || unable || control.hold || !control.input.interact {
             continue;
         }
-        let Some(player) = crate::party::player_actor(&mut world, avatar.0, *map) else {
+        let Some(player) = crate::party::player_actor(&mut world, avatar.0, *map, body.0.position)
+        else {
             continue;
         };
         // A sleeper is left to sleep, storylet or no storylet (§21). Their state is read

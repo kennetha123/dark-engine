@@ -719,11 +719,32 @@ pub struct SceneDef {
     /// a list of the places somebody built on it.
     #[serde(default)]
     pub places: Vec<PlaceDef>,
-    /// What each stamped place covers, in this map's pixels, once they have been laid in. Worked
-    /// out by [`SceneDef::stamp_places`], never written in a scene file: the ground under a place
-    /// is flattened to it, and nothing is grown on it.
+    /// The places stamped on this map, once they have been laid in. Worked out by
+    /// [`SceneDef::stamp_places`], never written in a scene file: the ground under a place is
+    /// levelled to it, nothing is grown on it, and standing in it is standing in its region.
     #[serde(skip)]
-    pub stamped: Vec<((f32, f32), (f32, f32))>,
+    pub stamped: Vec<Stamped>,
+}
+
+/// A place once it has been laid into the map it is stamped on: where it covers, and which part
+/// of the world it is.
+///
+/// A made world is one map (docs/PLAN.md §24.4), so without this the world simulation would have
+/// the whole country as one region — every town the same place, one danger, one set of rumours.
+/// A place brings its own `region`, and standing in it is standing there.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Stamped {
+    /// Its corners in the map it is stamped on, in pixels.
+    pub min: (f32, f32),
+    pub max: (f32, f32),
+    /// The world region it is (`world.ron`), if it says.
+    pub region: Option<String>,
+}
+
+impl Stamped {
+    pub fn holds(&self, (x, y): (f32, f32)) -> bool {
+        x >= self.min.0 && x < self.max.0 && y >= self.min.1 && y < self.max.1
+    }
 }
 
 /// A scene stamped onto another at a spot: everything in it — its ground, what stands on it, who
@@ -990,15 +1011,20 @@ impl SceneDef {
             // is left exactly as it was written.
             ..exit.clone()
         }));
-        // What it covers here, and what its own places covered inside it.
+        // What it covers here, and what its own places covered inside it. A quarter is pushed
+        // after the town it is in, so whoever asks which place a spot is in and takes the last
+        // answer gets the smallest one.
+        self.stamped.push(Stamped {
+            min: at,
+            max: (at.0 + place.size.0, at.1 + place.size.1),
+            region: place.region.clone(),
+        });
         self.stamped
-            .push((at, (at.0 + place.size.0, at.1 + place.size.1)));
-        self.stamped.extend(
-            place
-                .stamped
-                .iter()
-                .map(|(min, max)| (moved(*min), moved(*max))),
-        );
+            .extend(place.stamped.iter().map(|inside| Stamped {
+                min: moved(inside.min),
+                max: moved(inside.max),
+                region: inside.region.clone(),
+            }));
         Ok(())
     }
 

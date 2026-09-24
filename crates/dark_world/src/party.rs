@@ -115,14 +115,16 @@ impl Plugin for PartyPlugin {
     }
 }
 
-/// The world actor playing `player`, if their map is in a region (made the first time), placed
-/// in that region now (the world simulation otherwise hears where players are once an hour).
+/// The world actor playing `player`, if where they stand is in a region (made the first time),
+/// placed in that region now (the world simulation otherwise hears where players are once an
+/// hour).
 pub(crate) fn player_actor(
     world: &mut WorldState,
     player: PlayerId,
     map: MapId,
+    at: Vec2,
 ) -> Option<ActorId> {
-    let region = world.region_of(map)?;
+    let region = world.region_at(map, at)?;
     let actor = world.sim.player_actor(player.0.as_u128(), region);
     world.sim.move_player(actor, region);
     Some(actor)
@@ -191,7 +193,7 @@ fn socialize(
             continue;
         }
         commands.entity(me).insert(RecruitWait(RECRUIT_TICKS));
-        let Some(actor) = player_actor(world, avatar.0, *map) else {
+        let Some(actor) = player_actor(world, avatar.0, *map, body.0.position) else {
             continue;
         };
         let feet = (body.0.position, body.0.elevation);
@@ -255,7 +257,8 @@ fn socialize(
             && let Ok((_, other_avatar, other_id, ..)) = askers.get(other)
         {
             if invited.is_some_and(|i| i.by == other) {
-                let Some(inviter) = player_actor(world, other_avatar.0, *map) else {
+                let Some(inviter) = player_actor(world, other_avatar.0, *map, body.0.position)
+                else {
                     continue;
                 };
                 let line = match world.sim.join_players(inviter, actor) {
@@ -399,7 +402,7 @@ fn credit(
     mut world: Option<ResMut<WorldState>>,
     fallen: Query<Fallen, Without<Counted>>,
     counted: Query<(Entity, &CharacterState), With<Counted>>,
-    players: Query<(&NetId, &PlayerAvatar, &MapId)>,
+    players: Query<(&NetId, &PlayerAvatar, &MapId, &BodyState)>,
     companions: Query<(&Person, &MapId, &BodyState), With<Companion>>,
 ) {
     // Up again (a player, an enemy back at its post): its next death counts.
@@ -427,13 +430,13 @@ fn credit(
             continue;
         }
         // Whoever landed the killing blow, if a player.
-        let Some((_, killer, killer_map)) = players
+        let Some((_, killer, killer_map, killer_body)) = players
             .iter()
             .find(|(id, ..)| Some(id.0) == state.fighter.hit_by)
         else {
             continue;
         };
-        let Some(actor) = player_actor(world, killer.0, *killer_map) else {
+        let Some(actor) = player_actor(world, killer.0, *killer_map, killer_body.0.position) else {
             continue;
         };
         world.sim.slain_enemy(actor);

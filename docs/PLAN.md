@@ -1352,6 +1352,11 @@ everything the world holds:
   knows them. Each of those is refused with a word about what is wrong, not dropped in silence.
 - What a place does not bring is a player start, a seed, scatter groups or a ground sheet: those
   belong to the world it is stamped on. A world is the seed plus a list of places, as promised.
+- **A place brings its own region**, and standing in it is standing there (`world.ron`, §12). This
+  is the seam between the map the player walks and the world the simulation runs: a made world is
+  one map, so without it a country would be one region from end to end — one danger, one set of
+  rumours, one inn, every town the same place. Which region somebody is in is now decided by where
+  they stand: the smallest stamped place holding them, else the map's own region.
 - **Its edges are blended into the land.** The ground under a place is levelled to whatever the
   land makes of its middle — water included, so a camp is never half in a lake — and for four
   tiles beyond it each ring may differ by one more step than the ring before, so the ground walks

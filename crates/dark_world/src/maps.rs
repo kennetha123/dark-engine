@@ -449,8 +449,8 @@ fn build_map(
     // A place stamped on made land is levelled into it before anything else is put down: a town
     // on a hillside would be a town of cliffs (docs/PLAN.md §24.5).
     if let Some(land) = def.land.map(|land| dark_land::Land::new(land.seed)) {
-        for (min, max) in &def.stamped {
-            level_place(&mut terrain, &land, *min, *max);
+        for place in &def.stamped {
+            level_place(&mut terrain, &land, place.min, place.max);
         }
         // And what the places themselves drew goes back on top of the ground levelled for them:
         // the levelling is about the land, and a hut's floor is not. `Floor` is left out of that
