@@ -1379,12 +1379,32 @@ impl Editor {
     }
 
     fn status_bar(&mut self, ui: &mut Ui) {
+        // What went wrong, in full. A refusal from the game names a map, a thing and a place, and
+        // a line that runs off the end of the window is a line nobody can act on — so an error
+        // wraps to as many lines as it needs, above the bar.
+        let (text, error) = self.status.clone();
+        if error && !text.is_empty() {
+            let red = Color32::from_rgb(255, 110, 100);
+            egui::Frame::new()
+                .fill(Color32::from_rgb(40, 18, 18))
+                .inner_margin(egui::Margin::symmetric(6, 4))
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(red, "⚠");
+                        ui.colored_label(red, &text);
+                    });
+                    // Files the project could not read at all, which are the same trouble by
+                    // another door.
+                    for problem in self.catalog.problems.iter().take(6) {
+                        ui.colored_label(red.gamma_multiply(0.8), problem);
+                    }
+                });
+        }
         ui.horizontal(|ui| {
-            let (text, error) = &self.status;
-            if *error {
-                ui.colored_label(Color32::from_rgb(255, 110, 100), text);
+            if error {
+                ui.colored_label(Color32::from_rgb(255, 110, 100), "Something is wrong ⬆");
             } else {
-                ui.label(text);
+                ui.label(&text);
             }
             if self.workspace != Workspace::Maps {
                 return;

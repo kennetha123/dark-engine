@@ -736,7 +736,9 @@ docs/            this plan
 - Saving writes the scene as RON (terrain painted tile by tile is packed back into rectangles);
   comments in a hand-written scene are not kept. After saving, the editor loads the maps as the
   game will and reports anything the game would refuse (a spawn inside a wall, say) in the
-  status line. Opening another map, making a new one or closing with changes unsaved asks
+  status line — a refusal wraps to as many lines as it needs above the bar, because one that runs
+  off the end of the window is one nobody can act on, and files the project could not read at all
+  are listed there too. Opening another map, making a new one or closing with changes unsaved asks
   first (Save, Don't save, which drops the typed text too, or Cancel). Play saves, checks the
   game loads the map (and says why not), then starts `dark-player` (built next to the editor)
   on this map from its player start, in the language being written. Showing a field never
