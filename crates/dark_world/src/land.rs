@@ -143,6 +143,14 @@ impl crate::maps::Map {
     }
 }
 
+/// Lets go of the made land a view is not looking at.
+///
+/// The game keeps the land around the people walking on it; an editor keeps the land around what
+/// it is *looking* at, which is the same question asked from the other side (docs/PLAN.md §24.4).
+pub fn forget_far_from_view(map: &mut crate::maps::Map, looking_at: Vec2) {
+    map.forget_far_from(&[looking_at]);
+}
+
 /// Shapes the patches within [`AHEAD`] of a place — the ground alone.
 ///
 /// The game never calls this: it calls [`crate::maps::Map::make_around`], which makes the land

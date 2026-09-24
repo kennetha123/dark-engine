@@ -707,7 +707,9 @@ docs/            this plan
 - **Places** stamped on a map (§24.5) are chosen and clicked down, dragged, and removed like
   anything else; what they bring — ground, props, villagers — is drawn where it lands, and their
   doors and inns faintly, because they belong to the place rather than to this map.
-- **A villager's day** (§21.1) is written here: an hour, a place, and whether they sleep there.
+- **A villager's day** (§21.1) is written here: an hour, a place, and whether they sleep there,
+  drawn on the map as rings joined in the order they walk them, so a day is read at a glance
+  rather than from a column of numbers.
   Play starts the game at an hour of the designer's choosing, since a day is only worth watching
   at the hour it happens.
 - **Which map the game starts on** is written into `project.ron` by "Start here", and only that

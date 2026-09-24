@@ -306,6 +306,11 @@ impl Viewport {
                 }
                 row += patch;
             }
+            // And lets go of what it is not looking at, on the terms the game uses: panning
+            // across a country would otherwise hold every patch of it until the map was closed
+            // (docs/PLAN.md §24.4).
+            let middle = (origin + seen) / 2.0;
+            dark_world::forget_far_from_view(map, middle);
         }
         if let (Some(view), Some(map)) = (&mut self.view, &self.map) {
             // A piece of the map is made when the panel reaches it (docs/PLAN.md §24.4).

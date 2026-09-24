@@ -142,7 +142,13 @@ struct OpenScene {
 #[derive(Clone)]
 enum Pending {
     Open(String),
-    NewMap { name: String, cols: u32, rows: u32 },
+    NewMap {
+        name: String,
+        cols: u32,
+        rows: u32,
+        /// Made from a seed rather than drawn.
+        made: bool,
+    },
     Quit,
 }
 
@@ -590,6 +596,10 @@ impl Editor {
                 Ok(()) => {
                     scene.dirty = false;
                     saved = format!("Saved {}.", scene_name(&scene.path));
+                    // How big this map is, for wherever it is stamped as a place: a town resized
+                    // here must not leave its outline behind on the world it stands on (§24.5).
+                    let (path, size) = (scene.path.clone(), scene.def.size);
+                    self.catalog.sizes.insert(path, size);
                 }
                 Err(err) => failed.push(format!("the map is not saved: {err}")),
             }
@@ -1840,7 +1850,15 @@ impl Editor {
                 if go {
                     match pending {
                         Pending::Open(path) => self.open(path),
-                        Pending::NewMap { name, cols, rows } => self.create_map(&name, cols, rows),
+                        Pending::NewMap {
+                            name,
+                            cols,
+                            rows,
+                            made,
+                        } => {
+                            self.new_map_made = made;
+                            self.create_map(&name, cols, rows);
+                        }
                         Pending::Quit => self.quit = true,
                     }
                 }
@@ -1912,10 +1930,15 @@ impl Editor {
             }
             if let Some((name, cols, rows, made)) = create {
                 self.new_map = None;
-                self.new_map_made = made;
                 if self.scene.as_ref().is_some_and(|s| s.dirty) {
-                    self.pending = Some(Pending::NewMap { name, cols, rows });
+                    self.pending = Some(Pending::NewMap {
+                        name,
+                        cols,
+                        rows,
+                        made,
+                    });
                 } else {
+                    self.new_map_made = made;
                     self.create_map(&name, cols, rows);
                 }
             }
@@ -2086,7 +2109,9 @@ impl Editor {
                     self.stale |= changed;
                     self.drag = Some(Drag::Paint {
                         last: at,
-                        recorded: recorded || changed,
+                        // A flood is one act however long the button is held, even when the first
+                        // click landed on ground that was already what it should be.
+                        recorded: recorded || changed || bucket,
                     });
                 } else if matches!(self.drag, Some(Drag::Paint { .. })) {
                     self.finish_drag(Some(at));
@@ -2411,6 +2436,39 @@ impl Editor {
                 5.0,
                 Stroke::new(1.5, blue),
             );
+        }
+        // Where the chosen villager's day takes them, in the order it takes them: the entries
+        // are written as numbers in the panel, and a day is about places (docs/PLAN.md §21.1).
+        if let Some(Thing::Npc(nth)) = self.selected
+            && let Some(npc) = def.npcs.get(nth)
+            && !npc.day.is_empty()
+        {
+            let amber = Color32::from_rgb(255, 200, 90);
+            let mut day: Vec<&dark_assets::DayEntry> = npc.day.iter().collect();
+            day.sort_by(|a, b| a.from.total_cmp(&b.from));
+            let mut walked: Vec<egui::Pos2> = day
+                .iter()
+                .map(|entry| m.to_screen(Vec2::from(entry.at)))
+                .collect();
+            // Their post is where the day begins and ends: they stand there until the first hour.
+            walked.insert(0, m.to_screen(Vec2::from(npc.position)));
+            walked.push(walked[0]);
+            for pair in walked.windows(2) {
+                painter.line_segment(
+                    [pair[0], pair[1]],
+                    Stroke::new(1.0, amber.gamma_multiply(0.7)),
+                );
+            }
+            for entry in &day {
+                let at = m.to_screen(Vec2::from(entry.at));
+                painter.circle_stroke(at, 5.0, Stroke::new(1.5, amber));
+                let hour = if entry.sleep {
+                    format!("{:02}:00 asleep", entry.from as u32)
+                } else {
+                    format!("{:02}:00", entry.from as u32)
+                };
+                label(at - vec2(0.0, 6.0), &hour, amber);
+            }
         }
         let head = |at: (f32, f32)| {
             let at = Vec2::from(at);
@@ -2777,8 +2835,12 @@ impl Form<'_> {
                 .track(ui.checkbox(&mut made, "Made from a seed"))
                 .changed()
             {
-                // A seed nobody chose is still a country; this one is the day this was built.
-                def.land = made.then_some(dark_assets::LandDef { seed: 20_260_923 });
+                // A seed nobody has used, so two worlds made this way are two countries.
+                def.land = made.then_some(dark_assets::LandDef {
+                    seed: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(20_260_923, |since| since.as_secs()),
+                });
             }
             if let Some(land) = &mut def.land {
                 ui.label("Seed");
@@ -2822,6 +2884,22 @@ impl Form<'_> {
             egui::CollapsingHeader::new(title)
                 .id_salt(("scatter", g))
                 .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Sheet");
+                        let before = group.sheet.clone();
+                        sheet_combo(
+                            ui,
+                            ("scatter sheet", g),
+                            &mut group.sheet,
+                            &self.catalog.props,
+                        );
+                        if group.sheet != before {
+                            // The frames were numbers into the old sheet and mean nothing in the
+                            // new one, so the group starts again from its first picture.
+                            group.frames.clear();
+                            self.changed = Some(egui::Id::new(("scatter sheet", g)));
+                        }
+                    });
                     ui.horizontal(|ui| {
                         ui.label("Pictures");
                         let mut drop = None;
