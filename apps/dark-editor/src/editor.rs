@@ -217,6 +217,9 @@ pub struct Editor {
     /// What a writer is looking for in the text, and whether to show only what is unwritten.
     text_search: String,
     text_missing_only: bool,
+    /// How many tiles across the terrain brush paints, and whether it floods instead.
+    brush_wide: u32,
+    bucket: bool,
     /// How many play a playtest, each in a window of their own.
     players: u8,
     /// Picking, on the map an exit leads to, where it arrives: the exit's map and number.
@@ -317,6 +320,8 @@ impl Editor {
             deleting: None,
             text_search: String::new(),
             text_missing_only: false,
+            brush_wide: 1,
+            bucket: false,
             picking: None,
             project,
         };
@@ -1218,6 +1223,17 @@ impl Editor {
                     for (brush, label) in Brush::ALL {
                         ui.selectable_value(&mut self.brush, brush, label);
                     }
+                    ui.separator();
+                    ui.label("Wide");
+                    ui.add(
+                        DragValue::new(&mut self.brush_wide)
+                            .speed(0.2)
+                            .range(1..=16),
+                    )
+                    .on_hover_text("How many tiles across the brush paints");
+                    ui.checkbox(&mut self.bucket, "Fill").on_hover_text(
+                        "Click to flood every tile alike and touching the one you click",
+                    );
                 }
                 Tool::Prop => {
                     ui.checkbox(&mut self.prop_solid, "Solid")
@@ -1877,10 +1893,16 @@ impl Editor {
                         Cell::Floor
                     };
                     let mut changed = false;
+                    let (wide, bucket) = (self.brush_wide, self.bucket);
                     if let Some(scene) = &mut self.scene {
                         // One undo step per stroke, and none for a stroke that changed nothing.
                         let before = (!recorded).then(|| scene.def.clone());
-                        changed = ops::paint_line(&mut scene.def, self.tile, from, at, cell);
+                        changed = if bucket {
+                            // A flood is one act however long the pointer is held down.
+                            !recorded && ops::fill_from(&mut scene.def, self.tile, at, cell) > 0
+                        } else {
+                            ops::paint_line_wide(&mut scene.def, self.tile, from, at, cell, wide)
+                        };
                         if changed && let Some(before) = before {
                             self.history.record(&before);
                             scene.dirty = true;

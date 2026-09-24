@@ -299,14 +299,96 @@ pub fn terrain_grid(scene: &SceneDef, tile: u32) -> (u32, u32, Vec<Cell>) {
     (cols, rows, cells)
 }
 
-/// Paints `cell` on the tile under `at`. True if it changed anything.
-pub fn paint(scene: &mut SceneDef, tile: u32, at: Vec2, cell: Cell) -> bool {
+/// Paints a square of `wide` tiles, middled on the tile under `at`. One tile is a pencil; more is
+/// a brush, which is what painting a hillside wants.
+pub fn paint_wide(scene: &mut SceneDef, tile: u32, at: Vec2, cell: Cell, wide: u32) -> bool {
+    let wide = wide.max(1) as i64;
+    let half = (wide - 1) / 2;
+    let (col, row) = (
+        (at.x / tile as f32).floor() as i64,
+        (at.y / tile as f32).floor() as i64,
+    );
+    let mut changed = false;
+    for down in 0..wide {
+        for across in 0..wide {
+            let (c, r) = (col + across - half, row + down - half);
+            if c < 0 || r < 0 {
+                continue;
+            }
+            changed |= paint_one(scene, tile, c as u32, r as u32, cell);
+        }
+    }
+    changed
+}
+
+/// Floods every tile alike and touching the one under `at` — the bucket. What "alike" means is
+/// what that tile is now, so filling a lake fills the lake and stops at its shore.
+///
+/// A map is at most a few million tiles and a fill can reach all of them, so this walks rather
+/// than recurses, and says how many it painted.
+pub fn fill_from(scene: &mut SceneDef, tile: u32, at: Vec2, cell: Cell) -> usize {
     let (cols, rows, cells) = terrain_grid(scene, tile);
-    let (col, row) = ((at.x / tile as f32).floor(), (at.y / tile as f32).floor());
-    if col < 0.0 || row < 0.0 || col as u32 >= cols || row as u32 >= rows {
+    let (col, row) = (
+        (at.x / tile as f32).floor() as i64,
+        (at.y / tile as f32).floor() as i64,
+    );
+    if col < 0 || row < 0 || col as u32 >= cols || row as u32 >= rows {
+        return 0;
+    }
+    let was = cells[(row as u32 * cols + col as u32) as usize];
+    if was == cell {
+        return 0;
+    }
+    let mut cells = cells;
+    let mut queue = vec![(col as u32, row as u32)];
+    let mut painted = 0;
+    while let Some((col, row)) = queue.pop() {
+        let nth = (row * cols + col) as usize;
+        if cells[nth] != was {
+            continue;
+        }
+        cells[nth] = cell;
+        painted += 1;
+        for (across, down) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)] {
+            let (c, r) = (col as i64 + across, row as i64 + down);
+            if c >= 0 && r >= 0 && (c as u32) < cols && (r as u32) < rows {
+                queue.push((c as u32, r as u32));
+            }
+        }
+    }
+    // Written as one drawing of the whole map rather than as a fill a tile: a flood covers
+    // thousands of them, and the scene file would be a list of every one.
+    if painted > 0 {
+        scene.terrain.fill.clear();
+        let mut runs: Vec<FillDef> = Vec::new();
+        for row in 0..rows {
+            let mut col = 0;
+            while col < cols {
+                let here = cells[(row * cols + col) as usize];
+                let mut wide = 1;
+                while col + wide < cols && cells[(row * cols + col + wide) as usize] == here {
+                    wide += 1;
+                }
+                if here != Cell::Floor {
+                    runs.push(FillDef {
+                        tiles: (col, row, wide, 1),
+                        cell: here,
+                    });
+                }
+                col += wide;
+            }
+        }
+        scene.terrain.fill = runs;
+    }
+    painted
+}
+
+/// Paints one tile, if it is not already what it should be.
+fn paint_one(scene: &mut SceneDef, tile: u32, col: u32, row: u32, cell: Cell) -> bool {
+    let (cols, rows, cells) = terrain_grid(scene, tile);
+    if col >= cols || row >= rows {
         return false;
     }
-    let (col, row) = (col as u32, row as u32);
     if cells[(row * cols + col) as usize] == cell {
         return false;
     }
@@ -318,13 +400,26 @@ pub fn paint(scene: &mut SceneDef, tile: u32, at: Vec2, cell: Cell) -> bool {
 }
 
 /// Paints `cell` on every tile the line from `from` to `to` crosses (a pointer moving fast
-/// between frames leaves no gaps). True if it changed anything.
-pub fn paint_line(scene: &mut SceneDef, tile: u32, from: Vec2, to: Vec2, cell: Cell) -> bool {
+/// between frames leaves no gaps), with a brush `wide` tiles across. True if it changed anything.
+pub fn paint_line_wide(
+    scene: &mut SceneDef,
+    tile: u32,
+    from: Vec2,
+    to: Vec2,
+    cell: Cell,
+    wide: u32,
+) -> bool {
     let step = tile as f32 / 2.0;
     let steps = (from.distance(to) / step).ceil().max(1.0) as u32;
     let mut changed = false;
     for i in 0..=steps {
-        changed |= paint(scene, tile, from.lerp(to, i as f32 / steps as f32), cell);
+        changed |= paint_wide(
+            scene,
+            tile,
+            from.lerp(to, i as f32 / steps as f32),
+            cell,
+            wide,
+        );
     }
     changed
 }
@@ -461,26 +556,28 @@ mod tests {
         let mut s = scene();
         for col in 2..6 {
             for row in 1..4 {
-                paint(
+                paint_wide(
                     &mut s,
                     16,
                     Vec2::new(col as f32 * 16.0 + 3.0, row as f32 * 16.0 + 3.0),
                     Cell::Level(1),
+                    1,
                 );
             }
         }
-        assert!(paint(
+        assert!(paint_wide(
             &mut s,
             16,
             Vec2::new(8.0 * 16.0, 5.0 * 16.0),
-            Cell::Wall
+            Cell::Wall,
+            1
         ));
         assert!(
-            !paint(&mut s, 16, Vec2::new(8.0 * 16.0, 5.0 * 16.0), Cell::Wall),
+            !paint_wide(&mut s, 16, Vec2::new(8.0 * 16.0, 5.0 * 16.0), Cell::Wall, 1),
             "no change"
         );
         assert!(
-            !paint(&mut s, 16, Vec2::new(-5.0, 5.0), Cell::Wall),
+            !paint_wide(&mut s, 16, Vec2::new(-5.0, 5.0), Cell::Wall, 1),
             "off the map"
         );
         let before = terrain_grid(&s, 16);
@@ -489,20 +586,64 @@ mod tests {
         assert_eq!(terrain_grid(&s, 16), before, "the same ground");
         assert_eq!(s.terrain.fill.len(), 2, "one block and one wall");
         // Painting floor back over it clears it.
-        paint(&mut s, 16, Vec2::new(8.0 * 16.0, 5.0 * 16.0), Cell::Floor);
+        paint_wide(
+            &mut s,
+            16,
+            Vec2::new(8.0 * 16.0, 5.0 * 16.0),
+            Cell::Floor,
+            1,
+        );
         compact_terrain(&mut s, 16);
         assert_eq!(s.terrain.fill.len(), 1);
+    }
+
+    /// The bucket floods what is alike and touching, and stops at whatever is not: a lake fills
+    /// to its shore, and the far side of the shore is left alone.
+    #[test]
+    fn the_bucket_fills_what_is_alike_and_stops_at_what_is_not() {
+        let mut s = scene();
+        let tile = 16;
+        let (cols, rows, _) = terrain_grid(&s, tile);
+        assert_eq!((cols, rows), (10, 8), "the scene these tests use");
+        // A wall down the middle, dividing the map in two.
+        for row in 0..rows {
+            paint_wide(
+                &mut s,
+                tile,
+                Vec2::new(5.0 * 16.0 + 8.0, row as f32 * 16.0 + 8.0),
+                Cell::Wall,
+                1,
+            );
+        }
+        let painted = fill_from(&mut s, tile, Vec2::new(8.0, 8.0), Cell::Level(2));
+        let (cols, rows, cells) = terrain_grid(&s, tile);
+        let at = |col: u32, row: u32| cells[(row * cols + col) as usize];
+        assert_eq!(
+            painted as u32,
+            5 * rows,
+            "the five columns west of the wall, every row"
+        );
+        assert_eq!(at(0, 0), Cell::Level(2), "the side that was filled");
+        assert_eq!(at(4, rows - 1), Cell::Level(2), "and the far corner of it");
+        assert_eq!(at(5, 3), Cell::Wall, "the wall itself is untouched");
+        assert_eq!(at(6, 3), Cell::Floor, "and so is the other side");
+        // Filling what is already that is nothing at all.
+        assert_eq!(
+            fill_from(&mut s, tile, Vec2::new(8.0, 8.0), Cell::Level(2)),
+            0
+        );
     }
 
     #[test]
     fn a_fast_stroke_paints_every_tile_it_crosses() {
         let mut s = scene();
-        assert!(paint_line(
+        assert!(paint_line_wide(
             &mut s,
             16,
             Vec2::new(8.0, 8.0),
             Vec2::new(152.0, 8.0),
-            Cell::Wall
+            Cell::Wall,
+            1,
         ));
         let (cols, _, cells) = terrain_grid(&s, 16);
         assert!((0..10).all(|c| cells[c as usize] == Cell::Wall));
@@ -511,12 +652,13 @@ mod tests {
             Cell::Floor,
             "the row below is untouched"
         );
-        assert!(!paint_line(
+        assert!(!paint_line_wide(
             &mut s,
             16,
             Vec2::new(8.0, 8.0),
             Vec2::new(152.0, 8.0),
-            Cell::Wall
+            Cell::Wall,
+            1,
         ));
     }
 
