@@ -207,6 +207,8 @@ pub struct Editor {
     pub quit: bool,
     /// Which hour a playtest starts at, for watching a villager's day. Dawn when unset.
     play_hour: Option<u32>,
+    /// A map the designer has asked to delete, until they say yes or no.
+    deleting: Option<String>,
     /// How many play a playtest, each in a window of their own.
     players: u8,
     /// Picking, on the map an exit leads to, where it arrives: the exit's map and number.
@@ -304,6 +306,7 @@ impl Editor {
             quit: false,
             players: 1,
             play_hour: None,
+            deleting: None,
             picking: None,
             project,
         };
@@ -709,6 +712,70 @@ impl Editor {
     }
 
     /// Saves, then starts the game on this map (from its player start, if it has one).
+    /// Asks before removing a map, and says what still points at it: a map walked into from
+    /// somewhere else, or stamped on somewhere else as a place, leaves the game unable to load
+    /// once it is gone.
+    fn confirm_delete(&mut self, ui: &mut Ui, path: &str) {
+        let pointing: Vec<String> = self
+            .catalog
+            .scenes
+            .iter()
+            .filter(|other| *other != path)
+            .filter(|other| {
+                self.project.load_scene(other).is_ok_and(|def| {
+                    def.exits.iter().any(|exit| exit.to == path)
+                        || def.places.iter().any(|place| place.scene == path)
+                })
+            })
+            .cloned()
+            .collect();
+        let mut close = false;
+        egui::Window::new(format!("Delete {}?", scene_name(path)))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                if pointing.is_empty() {
+                    ui.label("Nothing else points at this map.");
+                } else {
+                    ui.colored_label(
+                        Color32::from_rgb(255, 110, 100),
+                        "These maps lead to it or stamp it, and the game will not load without it:",
+                    );
+                    for other in &pointing {
+                        ui.weak(format!("  {}", scene_name(other)));
+                    }
+                }
+                ui.label("The file is removed from the project. This cannot be undone.");
+                ui.horizontal(|ui| {
+                    if ui.button("Delete").clicked() {
+                        match std::fs::remove_file(self.project.path(path)) {
+                            Ok(()) => {
+                                self.status = (format!("{} is gone.", scene_name(path)), false);
+                                self.scene = None;
+                                self.selected = None;
+                                self.viewport.map = None;
+                                self.catalog = Catalog::load(&self.project, &mut self.viewport);
+                                if let Some(first) = self.catalog.scenes.first().cloned() {
+                                    self.request_open(first);
+                                }
+                            }
+                            Err(err) => {
+                                self.status = (format!("Cannot delete it: {err}"), true);
+                            }
+                        }
+                        close = true;
+                    }
+                    if ui.button("Keep it").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if close {
+            self.deleting = None;
+        }
+    }
+
     fn play(&mut self) {
         if self.unsaved() && !self.save() {
             return;
@@ -1159,6 +1226,41 @@ impl Editor {
             });
         if let Some(path) = open {
             self.request_open(path);
+        }
+        ui.horizontal(|ui| {
+            // Which map the game starts on, written into project.ron.
+            let here = self.scene.as_ref().map(|s| s.path.clone());
+            let starts = self.project.settings.start_scene.clone();
+            let is_start = here.is_some() && here == starts;
+            let can = here.is_some() && !is_start;
+            if ui
+                .add_enabled(can, egui::Button::new("Start here"))
+                .on_hover_text("The game begins on this map (project.ron)")
+                .on_disabled_hover_text(if is_start {
+                    "The game already begins here"
+                } else {
+                    "Open a map first"
+                })
+                .clicked()
+                && let Some(path) = here
+            {
+                match self.project.set_start_scene(&path) {
+                    Ok(()) => {
+                        self.status = (format!("The game begins on {}.", scene_name(&path)), false)
+                    }
+                    Err(err) => self.status = (format!("Cannot say so: {err}"), true),
+                }
+            }
+            if ui
+                .add_enabled(self.scene.is_some(), egui::Button::new("Delete map…"))
+                .on_hover_text("Remove this map from the project")
+                .clicked()
+            {
+                self.deleting = self.scene.as_ref().map(|s| s.path.clone());
+            }
+        });
+        if let Some(path) = self.deleting.clone() {
+            self.confirm_delete(ui, &path);
         }
         if ui.button("New map…").clicked() {
             self.new_map = Some(NewMap {

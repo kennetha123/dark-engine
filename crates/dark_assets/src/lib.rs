@@ -1256,6 +1256,47 @@ impl Project {
     }
 
     /// Writes `def` to scene file `path` (the editor's save). Comments in the file are not kept.
+    /// Says in `project.ron` which scene the game starts in.
+    ///
+    /// The file is edited where it stands rather than written afresh: a project file is written
+    /// by hand and carries a person's comments, and an editor that throws those away for the sake
+    /// of one field is an editor people stop using. Only the `start_scene` line is touched — the
+    /// one that is there, or a new one after `name`.
+    pub fn set_start_scene(&mut self, scene: &str) -> Result<(), AssetError> {
+        let path = self.path(Self::FILE);
+        let text = std::fs::read_to_string(&path).map_err(|source| AssetError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let scene = scene.replace('\\', "/");
+        let said = format!("    start_scene: \"{scene}\",");
+        let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+        match lines
+            .iter()
+            .position(|line| line.trim_start().starts_with("start_scene:"))
+        {
+            Some(nth) => lines[nth] = said,
+            // After the name, which every project file opens with; failing that, after the `(`.
+            None => {
+                let after = lines
+                    .iter()
+                    .position(|line| line.trim_start().starts_with("name:"))
+                    .or_else(|| lines.iter().position(|line| line.trim() == "("))
+                    .map_or(0, |nth| nth + 1);
+                lines.insert(after, said);
+            }
+        }
+        let text = lines.join("\n") + "\n";
+        std::fs::write(&path, &text).map_err(|source| AssetError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        // The settings this project carries are what the file now says, so the editor does not
+        // have to be started again for the change to count.
+        self.settings = read_ron(&path)?;
+        Ok(())
+    }
+
     pub fn save_scene(&self, path: impl AsRef<Path>, def: &SceneDef) -> Result<(), AssetError> {
         let path = self.path(path);
         let config = ron::ser::PrettyConfig::default()
@@ -1604,6 +1645,58 @@ mod tests {
         write("combat.ron", r#"(kinds: {})"#);
         write("life.ron", r#"(items: {})"#);
         dir.to_path_buf()
+    }
+
+    /// Which scene the game starts in is written into `project.ron` without losing what is
+    /// written around it.
+    ///
+    /// A project file is written by hand and full of a person's comments. An editor that saved
+    /// this field by writing the file afresh would throw them away, so it edits the one line.
+    #[test]
+    fn the_starting_scene_is_written_without_losing_the_comments() {
+        let dir = std::env::temp_dir().join(format!("dark_assets_start_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scenes")).unwrap();
+        let file = dir.join("project.ron");
+        std::fs::write(
+            &file,
+            "// The first game's project.\n(\n    name: \"t\",\n    // Drawn on a 16 px grid.\n    tile_size: 16,\n    resolution: (320, 180),\n)\n",
+        )
+        .unwrap();
+        let mut project = Project::open(dir.clone()).unwrap();
+        assert_eq!(project.settings.start_scene, None);
+
+        project.set_start_scene("scenes/meadow.ron").unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("// The first game's project."), "{text}");
+        assert!(text.contains("// Drawn on a 16 px grid."), "{text}");
+        assert!(
+            text.contains(r#"start_scene: "scenes/meadow.ron","#),
+            "{text}"
+        );
+        assert_eq!(
+            project.settings.start_scene.as_deref(),
+            Some("scenes/meadow.ron"),
+            "and the project knows it without being opened again"
+        );
+        // Said twice, it is still said once, and a Windows path is written the way maps name it.
+        project.set_start_scene("scenes\\keep.ron").unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(text.matches("start_scene:").count(), 1, "{text}");
+        assert!(
+            text.contains(r#"start_scene: "scenes/keep.ron","#),
+            "{text}"
+        );
+        assert_eq!(
+            Project::open(dir.clone())
+                .unwrap()
+                .settings
+                .start_scene
+                .as_deref(),
+            Some("scenes/keep.ron"),
+            "and the game reads it"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// What a fingerprint must notice, and — just as much — what it must not.
