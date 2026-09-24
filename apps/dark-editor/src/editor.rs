@@ -214,8 +214,9 @@ pub struct Editor {
     pub quit: bool,
     /// Which hour a playtest starts at, for watching a villager's day. Dawn when unset.
     play_hour: Option<u32>,
-    /// A map the designer has asked to delete, until they say yes or no.
+    /// A map the designer has asked to delete, until they say yes or no, and what points at it.
     deleting: Option<String>,
+    pointing_at: Option<Vec<String>>,
     /// What a writer is looking for in the text, and whether to show only what is unwritten.
     text_search: String,
     text_missing_only: bool,
@@ -322,6 +323,7 @@ impl Editor {
             players: 1,
             play_hour: None,
             deleting: None,
+            pointing_at: None,
             text_search: String::new(),
             text_missing_only: false,
             brush_wide: 1,
@@ -740,19 +742,37 @@ impl Editor {
     /// somewhere else, or stamped on somewhere else as a place, leaves the game unable to load
     /// once it is gone.
     fn confirm_delete(&mut self, ui: &mut Ui, path: &str) {
-        let pointing: Vec<String> = self
-            .catalog
-            .scenes
-            .iter()
-            .filter(|other| *other != path)
-            .filter(|other| {
-                self.project.load_scene(other).is_ok_and(|def| {
-                    def.exits.iter().any(|exit| exit.to == path)
-                        || def.places.iter().any(|place| place.scene == path)
+        // Worked out once, when the question is first asked: this reads every scene in the
+        // project, and the question stays on the screen until it is answered.
+        if self.pointing_at.is_none() {
+            let named = |scene: &str| scene.replace('\\', "/").trim_start_matches("./").to_owned();
+            let here = named(path);
+            let mut pointing: Vec<String> = self
+                .catalog
+                .scenes
+                .iter()
+                .filter(|other| named(other) != here)
+                .filter(|other| {
+                    self.project.load_scene(other).is_ok_and(|def| {
+                        def.exits.iter().any(|exit| named(&exit.to) == here)
+                            || def.places.iter().any(|place| named(&place.scene) == here)
+                    })
                 })
-            })
-            .cloned()
-            .collect();
+                .cloned()
+                .collect();
+            // And the project itself, which says where the game begins.
+            if self
+                .project
+                .settings
+                .start_scene
+                .as_deref()
+                .is_some_and(|start| named(start) == here)
+            {
+                pointing.push("project.ron: the game begins here".to_owned());
+            }
+            self.pointing_at = Some(pointing);
+        }
+        let pointing = self.pointing_at.clone().unwrap_or_default();
         let mut close = false;
         egui::Window::new(format!("Delete {}?", scene_name(path)))
             .collapsible(false)
@@ -797,6 +817,7 @@ impl Editor {
             });
         if close {
             self.deleting = None;
+            self.pointing_at = None;
         }
     }
 
@@ -1249,9 +1270,20 @@ impl Editor {
                             .range(1..=16),
                     )
                     .on_hover_text("How many tiles across the brush paints");
-                    ui.checkbox(&mut self.bucket, "Fill").on_hover_text(
-                        "Click to flood every tile alike and touching the one you click",
-                    );
+                    let drawn = self.scene.as_ref().is_some_and(|s| s.def.land.is_none());
+                    if !drawn {
+                        self.bucket = false;
+                    }
+                    ui.add_enabled_ui(drawn, |ui| {
+                        ui.checkbox(&mut self.bucket, "Fill")
+                            .on_hover_text(
+                                "Click to flood every tile alike and touching the one you click",
+                            )
+                            .on_disabled_hover_text(
+                                "This world's ground comes from its seed, so there is nothing \
+                                 alike to flood. Draw on it with the brush.",
+                            );
+                    });
                 }
                 Tool::Prop => {
                     ui.checkbox(&mut self.prop_solid, "Solid")
@@ -2837,7 +2869,14 @@ impl Form<'_> {
                     ComboBox::from_id_salt("place scene")
                         .selected_text(scene_name(&place.scene))
                         .show_ui(ui, |ui| {
-                            for scene in &self.catalog.scenes {
+                            // Every scene but this one: a map stamped on itself is a map stamped
+                            // on itself for ever.
+                            for scene in self
+                                .catalog
+                                .scenes
+                                .iter()
+                                .filter(|scene| scene.as_str() != self.scene)
+                            {
                                 ui.selectable_value(
                                     &mut place.scene,
                                     scene.clone(),

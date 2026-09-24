@@ -257,8 +257,14 @@ fn socialize(
             && let Ok((_, other_avatar, other_id, ..)) = askers.get(other)
         {
             if invited.is_some_and(|i| i.by == other) {
-                let Some(inviter) = player_actor(world, other_avatar.0, *map, body.0.position)
-                else {
+                // Where the *inviter* stands, not where the one accepting does: this puts their
+                // world actor in a region, and two people a few tiles apart can be in two
+                // (§24.5). Taking the wrong body moved the inviter into the other's town.
+                let Ok((_, _, _, _, inviter_body, ..)) = askers.get(other) else {
+                    continue;
+                };
+                let at = inviter_body.0.position;
+                let Some(inviter) = player_actor(world, other_avatar.0, *map, at) else {
                     continue;
                 };
                 let line = match world.sim.join_players(inviter, actor) {

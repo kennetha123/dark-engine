@@ -144,8 +144,8 @@ impl Plugin for HostPlugin {
         app.insert_resource(NetHost(self.host))
             .insert_resource(WorldClock({
                 let mut clock = GameClock::new(self.clock);
-                if self.clock.start_hour > 0 {
-                    clock.set_time(clock.day(), self.clock.start_hour.min(23));
+                if let Some(hour) = self.clock.start_hour {
+                    clock.set_time(clock.day(), hour);
                 }
                 clock
             }))

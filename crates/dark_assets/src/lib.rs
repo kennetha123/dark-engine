@@ -745,6 +745,12 @@ impl Stamped {
     pub fn holds(&self, (x, y): (f32, f32)) -> bool {
         x >= self.min.0 && x < self.max.0 && y >= self.min.1 && y < self.max.1
     }
+
+    /// How much ground it covers. Where places overlap, the smallest one holding a spot is the
+    /// one somebody standing there is in: a quarter is in its town, not the other way about.
+    pub fn covers(&self) -> f32 {
+        (self.max.0 - self.min.0).max(0.0) * (self.max.1 - self.min.1).max(0.0)
+    }
 }
 
 /// A scene stamped onto another at a spot: everything in it — its ground, what stands on it, who
@@ -1268,32 +1274,67 @@ impl Project {
             path: path.clone(),
             source,
         })?;
+        let refuse = |why: String| AssetError::Invalid {
+            path: path.clone(),
+            message: format!(
+                "cannot say where the game starts here: {why}. Write `start_scene: \"...\"` in {} by hand.",
+                Self::FILE
+            ),
+        };
         let scene = scene.replace('\\', "/");
         let said = format!("    start_scene: \"{scene}\",");
+        // Whatever this file's lines end with, they end with it afterwards: changing one field
+        // must not rewrite every line of somebody's file.
+        let ending = if text.contains("\r\n") { "\r\n" } else { "\n" };
         let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
-        match lines
-            .iter()
-            .position(|line| line.trim_start().starts_with("start_scene:"))
-        {
+        // The field where it already stands, if it is written on one line and is not inside a
+        // comment. Anything else is somebody's own hand, and is left to them.
+        let said_at = lines.iter().position(|line| {
+            let line = line.trim_start();
+            line.starts_with("start_scene:") && !line.starts_with("//")
+        });
+        match said_at {
+            Some(nth) if !lines[nth].trim_end().ends_with(',') => {
+                return Err(refuse(
+                    "its `start_scene` is written across more than one line".into(),
+                ));
+            }
             Some(nth) => lines[nth] = said,
-            // After the name, which every project file opens with; failing that, after the `(`.
             None => {
+                // After the name, which every project file opens with.
                 let after = lines
                     .iter()
                     .position(|line| line.trim_start().starts_with("name:"))
-                    .or_else(|| lines.iter().position(|line| line.trim() == "("))
-                    .map_or(0, |nth| nth + 1);
-                lines.insert(after, said);
+                    .or_else(|| lines.iter().position(|line| line.trim() == "("));
+                let Some(after) = after else {
+                    return Err(refuse(
+                        "it is written on one line, with nowhere to put the field".into(),
+                    ));
+                };
+                lines.insert(after + 1, said);
             }
         }
-        let text = lines.join("\n") + "\n";
+        let text = lines.join(ending) + ending;
+        // Read before it is written: a project file that no longer parses is a game that will
+        // not start, and an editor must not leave one behind.
+        // Read exactly as the game reads it, `implicit_some` and all, or a field written the way
+        // every project writes it would look like a file that no longer parses.
+        let settings: ProjectSettings = ron::Options::default()
+            .with_default_extension(ron::extensions::Extensions::IMPLICIT_SOME)
+            .from_str(&text)
+            .map_err(|err| refuse(format!("the file would no longer read ({err})")))?;
+        if settings.start_scene.as_deref() != Some(scene.as_str()) {
+            return Err(refuse(
+                "the field it would write is not the one the game would read".into(),
+            ));
+        }
         std::fs::write(&path, &text).map_err(|source| AssetError::Io {
             path: path.clone(),
             source,
         })?;
         // The settings this project carries are what the file now says, so the editor does not
         // have to be started again for the change to count.
-        self.settings = read_ron(&path)?;
+        self.settings = settings;
         Ok(())
     }
 
@@ -1705,6 +1746,53 @@ mod tests {
             Some("scenes/keep.ron"),
             "and the game reads it"
         );
+
+        // A file whose lines end the way Windows ends them keeps them: changing one field must
+        // not rewrite every line of somebody's file.
+        let windows = "// A project.\r\n(\r\n    name: \"t\",\r\n    tile_size: 16,\r\n    resolution: (320, 180),\r\n)\r\n";
+        std::fs::write(&file, windows).unwrap();
+        let mut project = Project::open(dir.clone()).unwrap();
+        project.set_start_scene("scenes/meadow.ron").unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(
+            text.matches("\r\n").count(),
+            text.lines().count(),
+            "every line still ends as it did: {text:?}"
+        );
+        assert!(text.contains("start_scene:"), "{text:?}");
+
+        // Anything it cannot edit safely is refused, and the file is left exactly as it was: a
+        // project that no longer reads is a game that will not start.
+        for (what, written) in [
+            (
+                "one line",
+                r#"(name: "t", tile_size: 16, resolution: (320, 180))"#,
+            ),
+            (
+                "across two lines",
+                "(
+    name: \"t\",
+    start_scene:
+        \"scenes/a.ron\",
+    tile_size: 16,
+    resolution: (320, 180),
+)
+",
+            ),
+        ] {
+            std::fs::write(&file, written).unwrap();
+            let mut project = Project::open(dir.clone()).unwrap();
+            assert!(
+                project.set_start_scene("scenes/meadow.ron").is_err(),
+                "{what} should have been refused"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&file).unwrap(),
+                written,
+                "{what}: the file was changed anyway"
+            );
+        }
+
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

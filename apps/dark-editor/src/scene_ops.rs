@@ -301,22 +301,55 @@ pub fn terrain_grid(scene: &SceneDef, tile: u32) -> (u32, u32, Vec<Cell>) {
 
 /// Paints a square of `wide` tiles, middled on the tile under `at`. One tile is a pencil; more is
 /// a brush, which is what painting a hillside wants.
+#[cfg(test)]
 pub fn paint_wide(scene: &mut SceneDef, tile: u32, at: Vec2, cell: Cell, wide: u32) -> bool {
+    paint_tiles(scene, tile, square(tile, at, wide), cell)
+}
+
+/// The tiles of a square `wide` across, middled on the tile under `at`. An even width leans one
+/// tile down and right, because a square of an even number of tiles has no middle tile.
+fn square(tile: u32, at: Vec2, wide: u32) -> impl Iterator<Item = (i64, i64)> {
     let wide = wide.max(1) as i64;
     let half = (wide - 1) / 2;
     let (col, row) = (
         (at.x / tile as f32).floor() as i64,
         (at.y / tile as f32).floor() as i64,
     );
+    (0..wide)
+        .flat_map(move |down| (0..wide).map(move |across| (col + across - half, row + down - half)))
+}
+
+/// Paints `cell` on every tile named, in one pass.
+///
+/// The grid of what the map is now is worked out **once**: resolving it walks every fill the
+/// scene holds and allocates a cell for every tile in the map, so a brush that did it per tile
+/// would cost the whole map for each tile it painted — sixteen across, and a large map stops the
+/// editor dead.
+fn paint_tiles(
+    scene: &mut SceneDef,
+    tile: u32,
+    tiles: impl Iterator<Item = (i64, i64)>,
+    cell: Cell,
+) -> bool {
+    let (cols, rows, mut grid) = terrain_grid(scene, tile);
     let mut changed = false;
-    for down in 0..wide {
-        for across in 0..wide {
-            let (c, r) = (col + across - half, row + down - half);
-            if c < 0 || r < 0 {
-                continue;
-            }
-            changed |= paint_one(scene, tile, c as u32, r as u32, cell);
+    for (col, row) in tiles {
+        if col < 0 || row < 0 || col as u32 >= cols || row as u32 >= rows {
+            continue;
         }
+        let (col, row) = (col as u32, row as u32);
+        let nth = (row * cols + col) as usize;
+        // What the map already is, as this pass has left it: a stroke that crosses itself paints
+        // a tile once.
+        if grid[nth] == cell {
+            continue;
+        }
+        grid[nth] = cell;
+        scene.terrain.fill.push(FillDef {
+            tiles: (col, row, 1, 1),
+            cell,
+        });
+        changed = true;
     }
     changed
 }
@@ -324,9 +357,15 @@ pub fn paint_wide(scene: &mut SceneDef, tile: u32, at: Vec2, cell: Cell, wide: u
 /// Floods every tile alike and touching the one under `at` — the bucket. What "alike" means is
 /// what that tile is now, so filling a lake fills the lake and stops at its shore.
 ///
-/// A map is at most a few million tiles and a fill can reach all of them, so this walks rather
-/// than recurses, and says how many it painted.
+/// **Only for a map drawn by hand.** On a map made from a seed the ground is worked out as
+/// players walk it and is nowhere in the scene's fills, so every tile would read alike and one
+/// click would drown the whole country in one cell — killing the seed and everything that grows
+/// on it (docs/PLAN.md §24.4). Whoever calls this refuses it there; this says so too, and does
+/// nothing.
 pub fn fill_from(scene: &mut SceneDef, tile: u32, at: Vec2, cell: Cell) -> usize {
+    if scene.land.is_some() {
+        return 0;
+    }
     let (cols, rows, cells) = terrain_grid(scene, tile);
     let (col, row) = (
         (at.x / tile as f32).floor() as i64,
@@ -351,7 +390,14 @@ pub fn fill_from(scene: &mut SceneDef, tile: u32, at: Vec2, cell: Cell) -> usize
         painted += 1;
         for (across, down) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)] {
             let (c, r) = (col as i64 + across, row as i64 + down);
-            if c >= 0 && r >= 0 && (c as u32) < cols && (r as u32) < rows {
+            // Tested before it is queued, not after: a queue of everything four times over is
+            // gigabytes on a large map.
+            if c >= 0
+                && r >= 0
+                && (c as u32) < cols
+                && (r as u32) < rows
+                && cells[(r as u32 * cols + c as u32) as usize] == was
+            {
                 queue.push((c as u32, r as u32));
             }
         }
@@ -359,7 +405,6 @@ pub fn fill_from(scene: &mut SceneDef, tile: u32, at: Vec2, cell: Cell) -> usize
     // Written as one drawing of the whole map rather than as a fill a tile: a flood covers
     // thousands of them, and the scene file would be a list of every one.
     if painted > 0 {
-        scene.terrain.fill.clear();
         let mut runs: Vec<FillDef> = Vec::new();
         for row in 0..rows {
             let mut col = 0;
@@ -383,22 +428,6 @@ pub fn fill_from(scene: &mut SceneDef, tile: u32, at: Vec2, cell: Cell) -> usize
     painted
 }
 
-/// Paints one tile, if it is not already what it should be.
-fn paint_one(scene: &mut SceneDef, tile: u32, col: u32, row: u32, cell: Cell) -> bool {
-    let (cols, rows, cells) = terrain_grid(scene, tile);
-    if col >= cols || row >= rows {
-        return false;
-    }
-    if cells[(row * cols + col) as usize] == cell {
-        return false;
-    }
-    scene.terrain.fill.push(FillDef {
-        tiles: (col, row, 1, 1),
-        cell,
-    });
-    true
-}
-
 /// Paints `cell` on every tile the line from `from` to `to` crosses (a pointer moving fast
 /// between frames leaves no gaps), with a brush `wide` tiles across. True if it changed anything.
 pub fn paint_line_wide(
@@ -411,17 +440,10 @@ pub fn paint_line_wide(
 ) -> bool {
     let step = tile as f32 / 2.0;
     let steps = (from.distance(to) / step).ceil().max(1.0) as u32;
-    let mut changed = false;
-    for i in 0..=steps {
-        changed |= paint_wide(
-            scene,
-            tile,
-            from.lerp(to, i as f32 / steps as f32),
-            cell,
-            wide,
-        );
-    }
-    changed
+    let tiles: std::collections::BTreeSet<(i64, i64)> = (0..=steps)
+        .flat_map(|i| square(tile, from.lerp(to, i as f32 / steps as f32), wide))
+        .collect();
+    paint_tiles(scene, tile, tiles.into_iter(), cell)
 }
 
 /// Rewrites the terrain's fills as few rectangles as a simple sweep finds (the same grid):
@@ -632,6 +654,56 @@ mod tests {
             fill_from(&mut s, tile, Vec2::new(8.0, 8.0), Cell::Level(2)),
             0
         );
+    }
+
+    /// The bucket does nothing at all on a world made from a seed.
+    ///
+    /// That ground is worked out as players walk it and is nowhere in the scene's fills, so
+    /// every tile of a country reads alike: one click would have drawn a single cell over the
+    /// whole of it, killing the seed and everything that grows on it (docs/PLAN.md §24.4).
+    #[test]
+    fn the_bucket_leaves_a_made_world_alone() {
+        let mut s = scene();
+        s.land = Some(dark_assets::LandDef { seed: 7 });
+        let before = s.terrain.fill.len();
+        assert_eq!(fill_from(&mut s, 16, Vec2::new(8.0, 8.0), Cell::Wall), 0);
+        assert_eq!(s.terrain.fill.len(), before, "the scene is untouched");
+        // A brush still draws on it, a tile at a time, which is how a made world is drawn on.
+        assert!(paint_line_wide(
+            &mut s,
+            16,
+            Vec2::new(8.0, 8.0),
+            Vec2::new(40.0, 8.0),
+            Cell::Wall,
+            1
+        ));
+    }
+
+    /// A brush wider than one tile paints a square of them, and a stroke paints each tile once.
+    #[test]
+    fn a_wide_brush_paints_a_square_and_no_tile_twice() {
+        let mut s = scene();
+        let tile = 16;
+        assert!(paint_line_wide(
+            &mut s,
+            tile,
+            Vec2::new(3.0 * 16.0 + 8.0, 3.0 * 16.0 + 8.0),
+            Vec2::new(6.0 * 16.0 + 8.0, 3.0 * 16.0 + 8.0),
+            Cell::Level(1),
+            3
+        ));
+        let (cols, _, cells) = terrain_grid(&s, tile);
+        let at = |col: u32, row: u32| cells[(row * cols + col) as usize];
+        // Three rows tall, from where it started to where it ended.
+        for row in 2..=4 {
+            for col in 2..=7 {
+                assert_eq!(at(col, row), Cell::Level(1), "({col}, {row})");
+            }
+        }
+        assert_eq!(at(3, 1), Cell::Floor, "above the brush");
+        assert_eq!(at(1, 3), Cell::Floor, "behind its start");
+        // Every tile written once, not once per step of the stroke.
+        assert_eq!(s.terrain.fill.len(), 3 * 6, "{:?}", s.terrain.fill.len());
     }
 
     #[test]

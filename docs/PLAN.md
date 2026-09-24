@@ -689,13 +689,34 @@ docs/            this plan
   nothing is written by hand and nothing needs programming. It opens a project folder (asked
   for with a native dialog, or `--project`).
 - The window, RPG Maker-style, in fixed panels: tools and Save / Undo / Redo / Play along the
-  top; the project's maps (and New map) with a palette of every prop sheet's pictures on the
-  left; the map in the middle; what is selected (or the map's own properties) on the right; a
-  status line below. Tools: Select (click, drag to move, Delete), Terrain (paint ground, hills
-  1–3 and walls; the right button paints plain ground), Props (click a palette picture, then
-  the map; solid or not), Villager, Enemy (a kind from `combat.ron`), Exit and Inn (drag a
-  box), Player start, Erase. The mouse wheel zooms (1×–6×); middle or right drag pans. Ctrl+S,
-  Ctrl+Z, Ctrl+Y.
+  top; the project's maps (with New map, Start here and Delete map) and a palette of every prop
+  sheet's pictures on the left; the map in the middle; what is selected (or the map's own
+  properties) on the right; a status line below. Workspaces: **Maps**, **Database**, **Story**,
+  **Text** and **Sheets**.
+
+  Tools: Select (click, drag to move, Delete), Terrain (paint ground, hills 1–3 and walls; the
+  right button paints plain ground; a brush one to sixteen tiles wide, and a Fill that floods
+  what is alike — not offered on a made world, where the ground comes from a seed), Props (click
+  a palette picture, then the map; solid or not), Villager, Enemy (a kind from `combat.ron`),
+  Exit and Inn (drag a box), Player start, **Stamp a place** (§24.5), Erase. The mouse wheel
+  zooms (1×–6×); middle or right drag pans. Ctrl+S, Ctrl+Z, Ctrl+Y.
+- **A map may be a country.** Its properties say whether the ground is made from a seed and
+  which seed (§24.4), and a made map is held to what the engine carries rather than to what a
+  brush can paint — it says how many kilometres across it is. New map makes one straight away,
+  with a seed nobody has used. The land is made as the panel looks at it, a few patches a frame.
+- **Places** stamped on a map (§24.5) are chosen and clicked down, dragged, and removed like
+  anything else; what they bring — ground, props, villagers — is drawn where it lands, and their
+  doors and inns faintly, because they belong to the place rather than to this map.
+- **A villager's day** (§21.1) is written here: an hour, a place, and whether they sleep there.
+  Play starts the game at an hour of the designer's choosing, since a day is only worth watching
+  at the hour it happens.
+- **Which map the game starts on** is written into `project.ron` by "Start here", and only that
+  line of it: a project file is written by hand and carries comments. A map can be deleted, after
+  being told what leads to it, stamps it, or begins the game there.
+- **Text** is a workspace of its own: every line the project has, in every language, searched by
+  the words or the key, with a switch for what is not written yet. Elsewhere text is reached
+  through whoever says it, which is the right way to write a scene and the wrong way to finish a
+  language.
 - WYSIWYG: the map is built exactly as the game builds it (`dark_world::Map::preview`: terrain,
   scattered props, colliders), laid out by `dark_view::MapView` (the game's own code), and drawn
   by `dark_render` into an offscreen target that egui shows (read as plain bytes,
@@ -1261,12 +1282,13 @@ everything the world holds:
   see what a seed made.
 - Known gaps here: only the land's shape is made. What grows on it (trees, rocks, grass), where
   the roads and rivers run, and where anyone lives are still §24.5's work, so a made world is at
-  present a country with trees, rocks and grass on it (§24.5) but nobody living in it. The
-  clearing kept around a start is still worked out before a start in water is moved. The **editor** draws a
-  made map as the flat ground it is before anyone walks it, and shows a start where the scene puts
-  it rather than where the game will move it. A walk around
+  present a country with trees, rocks and grass on it (§24.5) but nobody living in it unless
+  somebody stamps a town on it. The clearing kept around a start is still worked out before a
+  start in water is moved, and the **editor** shows a start where the scene puts it rather than
+  where the game will move it. A walk around
   a large lake can also cost more than the 12 000 tiles a path is allowed (§24.3), and nothing in
-  the first game walks a made world yet. That two machines hold the same scenes, and so the same
+  the first game walks a made world yet. The **editor** never lets go of the land it has made, so
+  panning across a world of many kilometres holds all of it until the map is closed. That two machines hold the same scenes, and so the same
   seeds, is now checked where it belongs — in the handshake (§5) — and a player holding another
   world is turned away rather than left to walk on ground their host does not have.
 - An authored chunk is a patch laid over what was made; a chunk a player has changed is a smaller
@@ -1331,8 +1353,8 @@ everything the world holds:
   puts somebody — and a great tree is kept further off than a tuft of grass, because what must
   stay clear is the clearing *plus* the thing's own footprint. Otherwise a player begins the game
   inside a trunk.
-- Making the land and growing on it are **one call** (`Map::make_around`), and nothing else may
-  make land. A patch is only ever made once, so ground made by a pass that did not plant stays
+- Making the land and growing on it are **one door** (`Map::make_patch`, which `make_around` and
+  the editor's view both go through), and nothing else may make land. A patch is only ever made once, so ground made by a pass that did not plant stays
   bare for ever while the drawing shows a wood on it — a wood a body walks straight through.
   That is what happened at every spawn, and then again at every start the water moved, until the
   shore search was made to change nothing at all and the making was left to one door. A test

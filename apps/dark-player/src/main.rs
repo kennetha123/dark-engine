@@ -1266,11 +1266,13 @@ fn parse_args() -> Result<Args, String> {
             "--hour" => {
                 // Which hour the first day starts at: for watching a villager's day, or the
                 // light at dusk, without waiting for it (docs/PLAN.md §21.1).
-                args.clock.start_hour = value
-                    .parse()
-                    .ok()
-                    .filter(|h| *h < 24)
-                    .ok_or_else(|| bad("an hour of the day, 0 to 23"))?;
+                args.clock.start_hour = Some(
+                    value
+                        .parse()
+                        .ok()
+                        .filter(|h| *h < 24)
+                        .ok_or_else(|| bad("an hour of the day, 0 to 23"))?,
+                );
             }
             "--day-secs" => {
                 args.clock.day_length_secs = value

@@ -17,10 +17,10 @@ pub struct ClockConfig {
     pub day_length_secs: u32,
     /// In-game hour sleepers wake at.
     pub wake_hour: u32,
-    /// The hour the first day starts at. Dawn unless somebody says otherwise: a villager's day
-    /// (docs/PLAN.md §21.1) is only worth watching at the hour it happens, so a designer testing
-    /// one starts the game there.
-    pub start_hour: u32,
+    /// The hour the first day starts at, if somebody said. `None` starts at [`Self::wake_hour`],
+    /// as it always did; `Some(0)` is midnight, which is exactly when a designer wants to watch
+    /// somebody sleep (docs/PLAN.md §21.1).
+    pub start_hour: Option<u32>,
 }
 
 impl Default for ClockConfig {
@@ -29,7 +29,7 @@ impl Default for ClockConfig {
             tick_rate: 60,
             day_length_secs: 24 * 60,
             wake_hour: 6,
-            start_hour: 6,
+            start_hour: None,
         }
     }
 }
@@ -180,7 +180,7 @@ mod tests {
             tick_rate: 1,
             day_length_secs: 24,
             wake_hour: 6,
-            start_hour: 0,
+            start_hour: None,
         }
     }
 

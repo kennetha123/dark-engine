@@ -59,10 +59,13 @@ impl WorldState {
     /// they are standing in one, else whatever the map itself is.
     pub fn region_at(&self, map: MapId, at: Vec2) -> Option<RegionId> {
         let here = self.regions.get(usize::from(map.0))?;
+        // The smallest place holding this spot, not the last one written: a quarter stamped on a
+        // map before the town around it is still inside the town, and the editor picks the
+        // smallest too, so the two must agree (docs/PLAN.md §24.5).
         here.places
             .iter()
-            .rev()
-            .find(|(place, _)| place.holds((at.x, at.y)))
+            .filter(|(place, _)| place.holds((at.x, at.y)))
+            .min_by(|(a, _), (b, _)| a.covers().total_cmp(&b.covers()))
             .map(|(_, region)| *region)
             .or(here.map)
     }
@@ -139,8 +142,16 @@ impl Plugin for WorldSimPlugin {
                     }
                     id
                 };
+                let own = named(map.def.region.as_deref(), "region");
+                if own.is_none() && map.def.stamped.iter().any(|place| place.region.is_some()) {
+                    tracing::warn!(
+                        "{}: the places on this map are in regions but the map itself is not, so \
+                         anybody standing between them is nowhere in the world",
+                        map.name
+                    );
+                }
                 MapRegions {
-                    map: named(map.def.region.as_deref(), "region"),
+                    map: own,
                     // Each place stamped on it that says which region it is: a made world is one
                     // map with many towns on it (§24.5).
                     places: map
