@@ -22,6 +22,11 @@ pub struct View {
 
 pub const MAX_ZOOM: u32 = 6;
 
+/// How many patches of made land the editor makes in one frame. Enough that a panel fills in as
+/// fast as it can be looked at, few enough that a view of a whole country does not stop the
+/// window while it makes every patch in it (docs/PLAN.md §24.4).
+const PATCHES_A_FRAME: usize = 24;
+
 /// The viewport's mapping between the interface (points) and the world (pixels), for one frame.
 #[derive(Clone, Copy, Debug)]
 pub struct Mapping {
@@ -279,6 +284,29 @@ impl Viewport {
         // costs here is the size of the panel and not the size of the map.
         let seen = origin + Vec2::new(size.0 as f32, size.1 as f32);
         let mut sprites: Vec<Sprite> = Vec::new();
+        // A map made from a seed has no ground until somebody makes it. The game makes it around
+        // the players; an editor makes what it is *looking* at, so a designer sees the country
+        // rather than a green field (docs/PLAN.md §24.4, §24.5).
+        if let Some(map) = &mut self.map {
+            let patch = dark_physics::Terrain::PATCH as f32 * map.collision.terrain.tile();
+            let mut made = 0;
+            let mut row = origin.y - patch;
+            'looking: while row < seen.y + patch {
+                let mut col = origin.x - patch;
+                while col < seen.x + patch {
+                    if map.make_patch(Vec2::new(col.max(0.0), row.max(0.0))) {
+                        made += 1;
+                        // A few a frame: a view of a whole country would otherwise make every
+                        // patch in it at once, and the window would stop while it did.
+                        if made >= PATCHES_A_FRAME {
+                            break 'looking;
+                        }
+                    }
+                    col += patch;
+                }
+                row += patch;
+            }
+        }
         if let (Some(view), Some(map)) = (&mut self.view, &self.map) {
             // A piece of the map is made when the panel reaches it (docs/PLAN.md §24.4).
             let scenery = dark_view::Scenery {

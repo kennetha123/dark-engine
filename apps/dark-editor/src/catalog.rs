@@ -22,6 +22,8 @@ pub struct Catalog {
     /// The world's people (`world.ron`) an NPC can be.
     pub actors: Vec<String>,
     pub regions: Vec<String>,
+    /// How big each scene is, in pixels: what a place stamped on a map covers (§24.5).
+    pub sizes: std::collections::HashMap<String, (f32, f32)>,
     /// A player look from any scene, for maps that get their first player start.
     pub player: Option<PlayerDef>,
     /// Files that could not be read, to show once.
@@ -73,6 +75,11 @@ impl Catalog {
                 Err(err) => catalog.problems.push(err.to_string()),
             }
         }
+        catalog.sizes = catalog
+            .scenes
+            .iter()
+            .filter_map(|s| Some((s.clone(), project.load_scene(s).ok()?.size)))
+            .collect();
         catalog.player = catalog
             .scenes
             .iter()

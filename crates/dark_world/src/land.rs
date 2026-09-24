@@ -72,9 +72,10 @@ impl crate::maps::Map {
     /// The two go together on purpose. Ground that exists with nothing on it, waiting for a
     /// second pass to plant the trees, is ground a player can walk through a wood on.
     pub fn make_around(&mut self, at: Vec2) {
-        let Some(land) = self.land else {
+        if self.land.is_none() {
             return;
-        };
+        }
+        let tile = self.collision.terrain.tile();
         let patch = i64::from(Terrain::PATCH);
         let (col, row) = self.collision.terrain.tile_of(at);
         let (patch_col, patch_row) = (col.div_euclid(patch), row.div_euclid(patch));
@@ -84,21 +85,38 @@ impl crate::maps::Map {
                 if c < 0 || r < 0 {
                     continue;
                 }
-                let (Ok(uc), Ok(ur)) = (u32::try_from(c), u32::try_from(r)) else {
-                    continue;
-                };
-                if self.collision.terrain.is_made(uc, ur) {
-                    continue;
-                }
-                self.collision
-                    .terrain
-                    .shape(uc, ur, |col, row| land.cell(col, row));
-                let grown = self.grow_patch(c, r);
-                if !grown.is_empty() {
-                    self.grown.insert((c, r), grown);
-                }
+                self.make_patch(Vec2::new(c as f32, r as f32) * tile);
             }
         }
+    }
+
+    /// Makes one patch of land — the one holding `at` — and grows what stands on it, if it has
+    /// not been made already. Says whether it made anything.
+    ///
+    /// The game makes land around the people walking on it ([`Self::make_around`]); an editor
+    /// makes the land it is *looking* at, which is a different shape of question. Both come
+    /// through here, so neither can make ground without planting on it (§24.5).
+    pub fn make_patch(&mut self, at: Vec2) -> bool {
+        let Some(land) = self.land else {
+            return false;
+        };
+        let (col, row) = self.collision.terrain.tile_of(at);
+        let patch = i64::from(Terrain::PATCH);
+        let (c, r) = (col.div_euclid(patch) * patch, row.div_euclid(patch) * patch);
+        let (Ok(uc), Ok(ur)) = (u32::try_from(c), u32::try_from(r)) else {
+            return false;
+        };
+        if self.collision.terrain.is_made(uc, ur) {
+            return false;
+        }
+        self.collision
+            .terrain
+            .shape(uc, ur, |col, row| land.cell(col, row));
+        let grown = self.grow_patch(c, r);
+        if !grown.is_empty() {
+            self.grown.insert((c, r), grown);
+        }
+        true
     }
 
     /// Lets go of the made land none of `standing` is near, and of everything that grew on it, on

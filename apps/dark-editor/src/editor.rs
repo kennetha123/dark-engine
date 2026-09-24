@@ -34,11 +34,12 @@ pub enum Tool {
     Exit,
     Inn,
     Start,
+    Place,
     Erase,
 }
 
 impl Tool {
-    const ALL: [(Tool, &'static str, &'static str); 9] = [
+    const ALL: [(Tool, &'static str, &'static str); 10] = [
         (
             Tool::Select,
             "Select",
@@ -74,6 +75,12 @@ impl Tool {
             Tool::Start,
             "Player start",
             "Click where the player begins.",
+        ),
+        (
+            Tool::Place,
+            "Stamp a place",
+            "Click to stamp the chosen town, camp or ruin here. Everything in it becomes part \
+             of this map.",
         ),
         (Tool::Erase, "Erase", "Click something to remove it."),
     ];
@@ -178,6 +185,8 @@ pub struct Editor {
     prop_solid: bool,
     npc_sheet: String,
     enemy_kind: String,
+    /// The scene the place tool stamps.
+    place_scene: String,
     selected: Option<Thing>,
     drag: Option<Drag>,
     /// The inspector field being typed into, so one burst of typing is one undo step.
@@ -257,6 +266,7 @@ impl Editor {
             tile,
             palette_sheet: first(&catalog.props, "town_props"),
             npc_sheet: first(&catalog.characters, "villager"),
+            place_scene: String::new(),
             enemy_kind: catalog
                 .enemies
                 .first()
@@ -423,19 +433,34 @@ impl Editor {
             }
         }
         let def = &scene.def;
-        let mut figures: Vec<Figure> = Vec::new();
-        figures.extend(def.npcs.iter().map(|n| Figure {
-            sheet: &n.sheet,
-            at: n.position,
-            facing: n.facing,
-        }));
-        figures.extend(def.enemies.iter().filter_map(|e| {
-            Some(Figure {
-                sheet: self.catalog.enemy_sheet(&e.kind)?,
-                at: e.position,
-                facing: e.facing,
+        // What this map holds, and what the places stamped on it brought with them: the built
+        // map has both, and a stamped town's villagers must be seen even though they are not
+        // this scene's to move (docs/PLAN.md §24.5).
+        // Copied out rather than borrowed, because the viewport is drawn into just below and a
+        // stamped villager is only a few numbers.
+        let people: Vec<(String, (f32, f32), Facing)> = {
+            let built = self.viewport.map.as_ref().map_or(def, |map| &map.def);
+            built
+                .npcs
+                .iter()
+                .map(|n| (n.sheet.clone(), n.position, n.facing))
+                .chain(built.enemies.iter().filter_map(|e| {
+                    Some((
+                        self.catalog.enemy_sheet(&e.kind)?.to_owned(),
+                        e.position,
+                        e.facing,
+                    ))
+                }))
+                .collect()
+        };
+        let mut figures: Vec<Figure> = people
+            .iter()
+            .map(|(sheet, at, facing)| Figure {
+                sheet,
+                at: *at,
+                facing: *facing,
             })
-        }));
+            .collect();
         figures.extend(def.player.iter().map(|p| Figure {
             sheet: &p.sheet,
             at: p.spawn,
@@ -1023,6 +1048,31 @@ impl Editor {
                         &mut self.npc_sheet,
                         &self.catalog.characters,
                     );
+                }
+                Tool::Place => {
+                    ui.label("Stamping:");
+                    let here = self.scene.as_ref().map(|s| s.path.clone());
+                    ComboBox::from_id_salt("place scene")
+                        .selected_text(if self.place_scene.is_empty() {
+                            "(choose one)".to_owned()
+                        } else {
+                            scene_name(&self.place_scene).to_owned()
+                        })
+                        .show_ui(ui, |ui| {
+                            // Every scene but this one: a map cannot be stamped on itself.
+                            for scene in self
+                                .catalog
+                                .scenes
+                                .iter()
+                                .filter(|scene| Some(*scene) != here.as_ref())
+                            {
+                                ui.selectable_value(
+                                    &mut self.place_scene,
+                                    scene.clone(),
+                                    scene_name(scene),
+                                );
+                            }
+                        });
                 }
                 Tool::Enemy => {
                     ui.label("Kind:");
@@ -1628,7 +1678,7 @@ impl Editor {
                     self.drag = Some(Drag::Area { from });
                 }
             }
-            Tool::Prop | Tool::Npc | Tool::Enemy | Tool::Start | Tool::Erase => {
+            Tool::Prop | Tool::Npc | Tool::Enemy | Tool::Start | Tool::Place | Tool::Erase => {
                 if response.clicked() {
                     self.click(at);
                 }
@@ -1714,6 +1764,27 @@ impl Editor {
                 scene.def.props.push(prop);
                 Some(Thing::Prop(scene.def.props.len() - 1))
             }
+            Tool::Place => {
+                if self.place_scene.is_empty() {
+                    self.status = ("Choose which place to stamp first.".into(), false);
+                    return;
+                }
+                if self.place_scene == scene_path {
+                    self.status = ("A map cannot be stamped on itself.".into(), true);
+                    return;
+                }
+                // A place is put down on a whole tile: its ground is drawn in tiles, and the
+                // engine refuses anything else (§24.5).
+                let tile = self.tile as f32;
+                let at = Vec2::new((at.x / tile).floor() * tile, (at.y / tile).floor() * tile);
+                self.record();
+                let scene = self.scene.as_mut().expect("a scene is open");
+                scene.def.places.push(dark_assets::PlaceDef {
+                    scene: self.place_scene.clone(),
+                    at: (at.x, at.y),
+                });
+                Some(Thing::Place(scene.def.places.len() - 1))
+            }
             Tool::Npc => {
                 let used = self.scene.as_ref().map(|s| ops::keys_in(&s.def));
                 let key = self
@@ -1771,10 +1842,15 @@ impl Editor {
 
     fn pick(&self, at: Vec2) -> Option<Thing> {
         let scene = self.scene.as_ref()?;
-        ops::pick(&scene.def, at, |p| {
-            self.picture(&p.sheet, p.frame, p.position)
-                .map(|r| (r.min.x, r.min.y, r.width(), r.height()))
-        })
+        ops::pick(
+            &scene.def,
+            at,
+            |p| {
+                self.picture(&p.sheet, p.frame, p.position)
+                    .map(|r| (r.min.x, r.min.y, r.width(), r.height()))
+            },
+            |scene| self.catalog.sizes.get(scene).copied(),
+        )
     }
 
     /// Where a prop's picture is drawn, in world pixels.
@@ -1849,6 +1925,25 @@ impl Editor {
             Stroke::new(1.0, Color32::from_white_alpha(60)),
             StrokeKind::Outside,
         );
+        // Everything a stamped place brought, drawn faintly and named after it: it cannot be
+        // moved here — it is moved by moving the place, or by opening the place itself.
+        if let Some(built) = self.viewport.map.as_ref().map(|map| &map.def) {
+            let faint = Color32::from_white_alpha(70);
+            for exit in built.exits.iter().skip(def.exits.len()) {
+                let r = m.rect(exit.area);
+                painter.rect_stroke(r, 0.0, Stroke::new(1.0, faint), StrokeKind::Inside);
+                label(
+                    r.center_top(),
+                    &format!("to {}", scene_name(&exit.to)),
+                    faint,
+                );
+            }
+            for inn in built.inns.iter().skip(def.inns.len()) {
+                let r = m.rect(inn.area);
+                painter.rect_stroke(r, 0.0, Stroke::new(1.0, faint), StrokeKind::Inside);
+                label(r.center_top(), "Inn", faint);
+            }
+        }
         let yellow = Color32::from_rgb(255, 220, 60);
         for exit in &def.exits {
             let r = m.rect(exit.area);
@@ -1859,6 +1954,29 @@ impl Editor {
                 &format!("to {}", scene_name(&exit.to)),
                 yellow,
             );
+        }
+        // The towns, camps and ruins stamped on this map: where each covers, and what it is
+        // called (docs/PLAN.md §24.5). Drawn under the rest, since everything a place holds is
+        // drawn inside it.
+        let violet = Color32::from_rgb(200, 150, 255);
+        for (nth, place) in def.places.iter().enumerate() {
+            let Some(size) = self.catalog.sizes.get(&place.scene).copied() else {
+                continue;
+            };
+            let r = m.rect((place.at.0, place.at.1, size.0, size.1));
+            let chosen = self.selected == Some(Thing::Place(nth));
+            painter.rect_filled(
+                r,
+                0.0,
+                violet.gamma_multiply(if chosen { 0.22 } else { 0.10 }),
+            );
+            painter.rect_stroke(
+                r,
+                0.0,
+                Stroke::new(if chosen { 2.5 } else { 1.5 }, violet),
+                StrokeKind::Inside,
+            );
+            label(r.center_top(), scene_name(&place.scene), violet);
         }
         let blue = Color32::from_rgb(110, 170, 255);
         for inn in &def.inns {
@@ -2077,22 +2195,36 @@ impl Form<'_> {
             (def.size.0 / tile).ceil() as u32,
             (def.size.1 / tile).ceil() as u32,
         );
+        // A map painted by hand is held to what a brush can cover; one made from a seed is not
+        // painted at all, so it may be as large as the engine carries (§24.4).
+        let most = if def.land.is_some() {
+            dark_assets::SceneDef::MAX_TILES_PER_SIDE
+        } else {
+            PAINTABLE_TILES
+        };
         // Values outside the range are left as they are until someone changes them.
-        fn tiles(value: &mut u32) -> DragValue<'_> {
+        fn tiles(value: &mut u32, most: u32) -> DragValue<'_> {
             DragValue::new(value)
-                .range(8..=PAINTABLE_TILES)
+                .range(8..=most)
                 .clamp_existing_to_range(false)
         }
         ui.horizontal(|ui| {
             ui.label("Size in tiles");
-            if self.track(ui.add(tiles(&mut cols))).changed() {
+            if self.track(ui.add(tiles(&mut cols, most))).changed() {
                 def.size.0 = cols as f32 * tile;
             }
             ui.label("by");
-            if self.track(ui.add(tiles(&mut rows))).changed() {
+            if self.track(ui.add(tiles(&mut rows, most))).changed() {
                 def.size.1 = rows as f32 * tile;
             }
+            // What that is in the world, since a made map is counted in kilometres rather than
+            // in tiles: at 16 px to the tile and a tile to the metre.
+            let km = |tiles: u32| tiles as f32 * tile / 1_000.0;
+            if def.land.is_some() {
+                ui.weak(format!("{:.1} × {:.1} km", km(cols), km(rows)));
+            }
         });
+        self.land(ui, def);
         ui.horizontal(|ui| {
             ui.label("Region");
             let shown = def.region.clone().unwrap_or_else(|| "(none)".into());
@@ -2152,6 +2284,50 @@ impl Form<'_> {
         ));
         ui.separator();
         self.scatter(ui, def);
+    }
+
+    /// Whether this map's ground is made from a seed rather than drawn, and which seed
+    /// (docs/PLAN.md §24.4). A made map is a country: hills, plains and water, worked out as the
+    /// players walk, with what a designer draws laid on top of it.
+    fn land(&mut self, ui: &mut Ui, def: &mut SceneDef) {
+        let mut made = def.land.is_some();
+        ui.horizontal(|ui| {
+            if self
+                .track(ui.checkbox(&mut made, "Made from a seed"))
+                .changed()
+            {
+                // A seed nobody chose is still a country; this one is the day this was built.
+                def.land = made.then_some(dark_assets::LandDef { seed: 20_260_923 });
+            }
+            if let Some(land) = &mut def.land {
+                ui.label("Seed");
+                let mut seed = land.seed;
+                if self
+                    .track(ui.add(DragValue::new(&mut seed).speed(1.0)))
+                    .changed()
+                {
+                    land.seed = seed;
+                }
+                if self.track(ui.button("Another")).clicked() {
+                    // Stirred rather than counted up: neighbouring seeds make unlike countries.
+                    land.seed = land
+                        .seed
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                }
+            }
+        })
+        .response
+        .on_hover_text(
+            "The ground is worked out from this number as players walk, so a map may be \
+             kilometres across. What you draw is laid on top of it.",
+        );
+        if def.land.is_some() {
+            ui.weak(
+                "Hills, plains and water come from the seed. Draw over it where it matters, \
+                 and stamp towns on it below.",
+            );
+        }
     }
 
     /// Groups of props the game strews over the map (grass, flowers, trees): which pictures,
@@ -2300,6 +2476,52 @@ impl Form<'_> {
         // Keys the map names already: new text never shares one.
         let used = ops::keys_in(def);
         match thing {
+            Thing::Place(i) => {
+                let Some(place) = def.places.get_mut(i) else {
+                    return;
+                };
+                ui.label("A place stamped on this map");
+                ui.horizontal(|ui| {
+                    ui.label("Which");
+                    let before = place.scene.clone();
+                    ComboBox::from_id_salt("place scene")
+                        .selected_text(scene_name(&place.scene))
+                        .show_ui(ui, |ui| {
+                            for scene in &self.catalog.scenes {
+                                ui.selectable_value(
+                                    &mut place.scene,
+                                    scene.clone(),
+                                    scene_name(scene),
+                                );
+                            }
+                        });
+                    if place.scene != before {
+                        self.changed = Some(egui::Id::new(("place scene", i)));
+                    }
+                });
+                let tile = self.tile as f32;
+                let mut at = (place.at.0 / tile, place.at.1 / tile);
+                ui.horizontal(|ui| {
+                    ui.label("At tile");
+                    let mut moved = false;
+                    for value in [&mut at.0, &mut at.1] {
+                        moved |= self
+                            .track(ui.add(DragValue::new(value).speed(1.0)))
+                            .changed();
+                    }
+                    if moved {
+                        place.at = ((at.0).round() * tile, (at.1).round() * tile);
+                    }
+                });
+                if let Some((w, h)) = self.catalog.sizes.get(&place.scene) {
+                    ui.weak(format!(
+                        "{} × {} tiles of ground, people and doors, laid into this map.",
+                        (w / tile).ceil() as u32,
+                        (h / tile).ceil() as u32
+                    ));
+                }
+                ui.weak("The ground under it is levelled into the land, and nothing grows on it.");
+            }
             Thing::Prop(i) => {
                 let Some(p) = def.props.get_mut(i) else {
                     return;
@@ -2607,6 +2829,7 @@ fn thing_label(thing: Thing) -> &'static str {
         Thing::Enemy(_) => "Enemy",
         Thing::Exit(_) => "Exit",
         Thing::Inn(_) => "Inn",
+        Thing::Place(_) => "Place",
         Thing::PlayerStart => "Player start",
     }
 }

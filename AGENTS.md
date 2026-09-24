@@ -65,7 +65,8 @@ for 5–8) and answers conversations. Hosts take `--save <file>` (carry the whol
 day and on quitting, Ctrl+C for `dark-host`; without `--player` the save's host plays on as
 themselves) and `--world-seed <n>`. The story is the project's `story.ron`.
 
-The editor (maps, villagers, enemies, exits, text; Play needs `dark-player` built beside it).
+The editor (maps, villagers, enemies, exits, text, worlds made from a seed and the places stamped
+on them; Play needs `dark-player` built beside it).
 The minimap under the map list shows the whole map and moves the view when clicked or dragged:
 ```
 cargo build -p dark-player && cargo run -p dark-editor -- --project ../adventurer

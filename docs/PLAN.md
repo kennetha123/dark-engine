@@ -1374,9 +1374,13 @@ everything the world holds:
 
 - The editor gains a **world view**: the whole world as the seed makes it, zoomed out to biomes
   and roads, with the authored places marked, and stamps placed and moved in it. §24.1's minimap
-  is the small version of the same thing. Until it exists a place is stamped by writing its `at`
-  into the scene file by hand; the editor does show the places a scene stamps, as the game builds
-  them.
+  is the small version of the same thing. **What the editor does today** (built): a map says it is
+  made from a seed and which seed, and is no longer held to what a brush can cover, so a world
+  scene can be born there; the land is made as the panel looks at it, a few patches a frame, so a
+  designer sees the country rather than a green field; and a place is stamped by choosing it and
+  clicking, moved by dragging it, and removed like anything else. A stamped place's ground, props
+  and people are drawn where they land, its doors and inns faintly, so a designer can see what a
+  town covers before putting it there.
 - A place's own ways out cannot lead back into the map it is stamped on: an arrival is written in
   the scene it leaves from, and a place does not know where it was put down. A door from a town
   into a hut and back again works; a door into the open world beside the town does not.

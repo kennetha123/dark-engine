@@ -18,6 +18,8 @@ pub enum Thing {
     Enemy(usize),
     Exit(usize),
     Inn(usize),
+    /// A town, camp or ruin stamped on this map (docs/PLAN.md §24.5).
+    Place(usize),
     PlayerStart,
 }
 
@@ -34,6 +36,7 @@ pub fn pick(
     scene: &SceneDef,
     at: Vec2,
     drawn: impl Fn(&PlacedProp) -> Option<(f32, f32, f32, f32)>,
+    sizes: impl Fn(&str) -> Option<(f32, f32)>,
 ) -> Option<Thing> {
     let near = |p: (f32, f32)| Vec2::from(p).distance(at);
     // A person is picked anywhere from the feet (where they stand) up to the head.
@@ -103,6 +106,22 @@ pub fn pick(
                 .position(|e| inside(e.area))
                 .map(Thing::Exit)
         })
+        .or_else(|| {
+            // A place last of all: everything it holds is drawn inside it, so clicking a villager
+            // in a town picks the villager, and clicking the town's ground picks the town. The
+            // smallest one holding the click wins, so a quarter can be picked inside its town.
+            let mut held: Vec<(f32, usize)> = scene
+                .places
+                .iter()
+                .enumerate()
+                .filter_map(|(i, place)| {
+                    let (w, h) = sizes(&place.scene)?;
+                    inside((place.at.0, place.at.1, w, h)).then_some((w * h, i))
+                })
+                .collect();
+            held.sort_by(|a, b| a.0.total_cmp(&b.0));
+            held.first().map(|(_, i)| Thing::Place(*i))
+        })
 }
 
 /// Where a thing stands (an area's top-left corner), for dragging it.
@@ -119,6 +138,7 @@ pub fn position_of(scene: &SceneDef, thing: Thing) -> Option<Vec2> {
             let (x, y, ..) = scene.inns.get(i)?.area;
             (x, y)
         }
+        Thing::Place(i) => scene.places.get(i)?.at,
         Thing::PlayerStart => scene.player.as_ref()?.spawn,
     }))
 }
@@ -156,6 +176,11 @@ pub fn move_to(scene: &mut SceneDef, thing: Thing, to: Vec2) {
                 inn.bed = (inn.bed.0 + shift.0, inn.bed.1 + shift.1);
             }
         }
+        Thing::Place(i) => {
+            if let Some(place) = scene.places.get_mut(i) {
+                place.at = to;
+            }
+        }
         Thing::PlayerStart => {
             if let Some(p) = &mut scene.player {
                 p.spawn = to;
@@ -182,6 +207,9 @@ pub fn remove(scene: &mut SceneDef, thing: Thing) -> bool {
         }
         Thing::Inn(i) if gone(scene.inns.len(), i) => {
             scene.inns.remove(i);
+        }
+        Thing::Place(i) if gone(scene.places.len(), i) => {
+            scene.places.remove(i);
         }
         _ => return false,
     }
@@ -505,33 +533,38 @@ mod tests {
             16.0,
         )));
         let unknown = |_: &PlacedProp| None;
+        // No places in this scene, so nothing has a size to be picked by.
+        let sizes = |_: &str| None;
         assert_eq!(
-            pick(&s, Vec2::new(101.0, 100.0), unknown),
+            pick(&s, Vec2::new(101.0, 100.0), unknown, sizes),
             Some(Thing::Npc(0))
         );
         assert_eq!(
-            pick(&s, Vec2::new(125.0, 101.0), unknown),
+            pick(&s, Vec2::new(125.0, 101.0), unknown, sizes),
             Some(Thing::Prop(0))
         );
         assert_eq!(
-            pick(&s, Vec2::new(40.0, 42.0), unknown),
+            pick(&s, Vec2::new(40.0, 42.0), unknown, sizes),
             Some(Thing::PlayerStart)
         );
         assert_eq!(
-            pick(&s, Vec2::new(10.0, 110.0), unknown),
+            pick(&s, Vec2::new(10.0, 110.0), unknown, sizes),
             Some(Thing::Inn(0))
         );
-        assert_eq!(pick(&s, Vec2::new(150.0, 20.0), unknown), None);
+        assert_eq!(pick(&s, Vec2::new(150.0, 20.0), unknown, sizes), None);
         // A tall picture is picked anywhere on it, not only at its foot.
         let tree = |p: &PlacedProp| Some((p.position.0 - 30.0, p.position.1 - 80.0, 60.0, 80.0));
-        assert_eq!(pick(&s, Vec2::new(130.0, 30.0), tree), Some(Thing::Prop(0)));
         assert_eq!(
-            pick(&s, Vec2::new(101.0, 100.0), tree),
+            pick(&s, Vec2::new(130.0, 30.0), tree, |_: &str| None),
+            Some(Thing::Prop(0))
+        );
+        assert_eq!(
+            pick(&s, Vec2::new(101.0, 100.0), tree, |_: &str| None),
             Some(Thing::Npc(0)),
             "people first"
         );
         assert_eq!(
-            pick(&s, Vec2::new(102.0, 72.0), tree),
+            pick(&s, Vec2::new(102.0, 72.0), tree, |_: &str| None),
             Some(Thing::Npc(0)),
             "a person is picked by the head too"
         );
