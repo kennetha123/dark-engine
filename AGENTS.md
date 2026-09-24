@@ -48,7 +48,8 @@ network with how full they are (`1/4` … `4/4`); every host says so on the port
 project — the same settings, the same scenes, the same scene to start in — and the handshake now
 checks it: a game in another world is marked as such in the list, and a player who joins one by
 address is turned away instead of walking on ground the host does not have.
-`--day-secs <n>` shortens the day for testing; `--player <uuid>` keeps a stable identity.
+`--day-secs <n>` shortens the day for testing; `--hour <0-23>` starts the first day at that hour
+(for watching a villager's day, or the light); `--player <uuid>` keeps a stable identity.
 In the game: WASD/arrows walk, Shift runs, Space jumps, J attacks (again to combo), K dodges,
 E talks to an NPC in reach (number keys answer when a conversation offers choices; on its last
 line E ends it; walking away ends it any time) or packs up your tent, Z sleeps (when every player online sleeps,

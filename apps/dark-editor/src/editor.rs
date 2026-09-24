@@ -205,6 +205,8 @@ pub struct Editor {
     hover: Option<Vec2>,
     /// Asked to close, and nothing is left unsaved.
     pub quit: bool,
+    /// Which hour a playtest starts at, for watching a villager's day. Dawn when unset.
+    play_hour: Option<u32>,
     /// How many play a playtest, each in a window of their own.
     players: u8,
     /// Picking, on the map an exit leads to, where it arrives: the exit's map and number.
@@ -301,6 +303,7 @@ impl Editor {
             hover: None,
             quit: false,
             players: 1,
+            play_hour: None,
             picking: None,
             project,
         };
@@ -730,6 +733,9 @@ impl Editor {
             .arg("--project")
             .arg(self.project.root())
             .args(["--lang", &self.language]);
+        if let Some(hour) = self.play_hour {
+            command.args(["--hour", &hour.to_string()]);
+        }
         // More than one player: a host, and a window of its own for each other player, joined.
         if self.players > 1 {
             let others = (self.players - 1).to_string();
@@ -976,6 +982,24 @@ impl Editor {
             {
                 self.play();
             }
+            ComboBox::from_id_salt("play hour")
+                .selected_text(match self.play_hour {
+                    None => "at dawn".to_owned(),
+                    Some(h) => format!("at {h:02}:00"),
+                })
+                .width(86.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.play_hour, None, "at dawn");
+                    for hour in 0..24u32 {
+                        ui.selectable_value(
+                            &mut self.play_hour,
+                            Some(hour),
+                            format!("at {hour:02}:00"),
+                        );
+                    }
+                })
+                .response
+                .on_hover_text("Which hour the game starts at, for watching a villager's day");
             ComboBox::from_id_salt("players")
                 .selected_text(match self.players {
                     1 => "1 player".to_owned(),
@@ -2286,6 +2310,65 @@ impl Form<'_> {
         self.scatter(ui, def);
     }
 
+    /// Where a villager is through the day (docs/PLAN.md §21.1): an hour, a place, and whether
+    /// they sleep there. Nothing here means they stand where they were put.
+    ///
+    /// The place is a tile rather than a name, because a day is about *where* somebody is: they
+    /// walk there when the hour comes, and the map is refused at save time if they cannot reach
+    /// it or would have to climb to it.
+    fn day(&mut self, ui: &mut Ui, person: &mut dark_assets::NpcDef, which: usize) {
+        let post = person.position;
+        ui.label("Their day");
+        ui.weak("Where they are at each hour. Nothing here: they stay where they stand.");
+        let mut remove = None;
+        for (n, entry) in person.day.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label("At");
+                let mut hour = entry.from;
+                if self
+                    .track(ui.add(DragValue::new(&mut hour).speed(0.25).range(0.0..=23.75)))
+                    .changed()
+                {
+                    entry.from = hour;
+                }
+                // Where they are, in pixels as the rest of this panel counts: a day entry is a
+                // place on the map, not a tile of the grid.
+                ui.label("o'clock they are at");
+                for (label, value) in [("x", &mut entry.at.0), ("y", &mut entry.at.1)] {
+                    ui.label(label);
+                    self.track(ui.add(DragValue::new(value).speed(1.0)));
+                }
+                self.track(ui.checkbox(&mut entry.sleep, "asleep"));
+                if ui.button("✖").on_hover_text("Remove this hour").clicked() {
+                    remove = Some(n);
+                }
+            });
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Add an hour…").clicked() {
+                // Four hours after the last one, starting where they stand: a day is written by
+                // moving each entry from there, not by typing numbers into an empty row.
+                let from = person
+                    .day
+                    .last()
+                    .map_or(8.0, |entry| (entry.from + 4.0) % 24.0);
+                person.day.push(dark_assets::DayEntry {
+                    from,
+                    at: post,
+                    sleep: false,
+                });
+                self.changed = Some(egui::Id::new(("day", which, "add")));
+            }
+            if !person.day.is_empty() {
+                ui.weak(format!("{} hours in their day", person.day.len()));
+            }
+        });
+        if let Some(n) = remove {
+            person.day.remove(n);
+            self.changed = Some(egui::Id::new(("day", which, "remove")));
+        }
+    }
+
     /// Whether this map's ground is made from a seed rather than drawn, and which seed
     /// (docs/PLAN.md §24.4). A made map is a country: hills, plains and water, worked out as the
     /// players walk, with what a designer draws laid on top of it.
@@ -2631,6 +2714,8 @@ impl Form<'_> {
                 })
                 .response
                 .on_hover_text("A person in world.ron: one who lives the year, and can join you");
+                ui.separator();
+                self.day(ui, npc, i);
                 ui.separator();
                 ui.label(format!("What they say ({})", self.language));
                 ui.weak("Each time someone talks to them, the next line.");

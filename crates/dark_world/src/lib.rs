@@ -142,7 +142,13 @@ impl Plugin for HostPlugin {
             "clock tick rate must match the app tick rate"
         );
         app.insert_resource(NetHost(self.host))
-            .insert_resource(WorldClock(GameClock::new(self.clock)))
+            .insert_resource(WorldClock({
+                let mut clock = GameClock::new(self.clock);
+                if self.clock.start_hour > 0 {
+                    clock.set_time(clock.day(), self.clock.start_hour.min(23));
+                }
+                clock
+            }))
             .insert_resource(SessionEvents::default())
             .configure_sets(
                 FixedUpdate,

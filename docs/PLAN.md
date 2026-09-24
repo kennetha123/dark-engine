@@ -874,8 +874,9 @@ in the editor; neither needs scripting.
   (no baking, eating or working, only standing there); a villager walks the same day whether or
   not anyone is in the map to see it; a blow wakes a sleeper only until they are free to act,
   when they lie down again; a routine NPC's saved position (`SavedPerson`) is overwritten by
-  wherever the hour says they should be; the editor has no day editor yet (`scenes/*.ron` by
-  hand).
+  wherever the hour says they should be. The editor writes a villager's day — an hour, a place
+  and whether they sleep there — and Play starts the game at an hour of the designer's choosing
+  (`--hour`), since a day is only worth watching at the hour it happens.
 
 ### 21.2 The life (designed, not built)
 
