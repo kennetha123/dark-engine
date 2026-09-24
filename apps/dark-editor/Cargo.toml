@@ -13,6 +13,7 @@ workspace = true
 dark_assets.workspace = true
 dark_combat.workspace = true
 dark_life.workspace = true
+dark_land.workspace = true
 dark_physics.workspace = true
 dark_render.workspace = true
 dark_sim.workspace = true

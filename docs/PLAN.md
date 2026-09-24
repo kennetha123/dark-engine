@@ -713,8 +713,9 @@ docs/            this plan
 - **Which map the game starts on** is written into `project.ron` by "Start here", and only that
   line of it: a project file is written by hand and carries comments. A map can be deleted, after
   being told what leads to it, stamps it, or begins the game there.
-- **Text** is a workspace of its own: every line the project has, in every language, searched by
-  the words or the key, with a switch for what is not written yet. Elsewhere text is reached
+- **Text** is a workspace of its own: every line the project *names* — the words already written,
+  and the keys a villager or a conversation refers to with nothing behind them yet — in every
+  language, searched by the words or the key, with a switch for what is not written yet. Elsewhere text is reached
   through whoever says it, which is the right way to write a scene and the wrong way to finish a
   language.
 - WYSIWYG: the map is built exactly as the game builds it (`dark_world::Map::preview`: terrain,
@@ -1395,9 +1396,10 @@ everything the world holds:
 
 **Still to come in §24.5:**
 
-- The editor gains a **world view**: the whole world as the seed makes it, zoomed out to biomes
-  and roads, with the authored places marked, and stamps placed and moved in it. §24.1's minimap
-  is the small version of the same thing. **What the editor does today** (built): a map says it is
+- The editor's **minimap is the world view** (built): on a made map it draws the country the seed
+  makes — water, plain and the steps above it, worked out once and kept — with the places stamped
+  on it marked, and it moves the view when clicked. What is still to come is going the other way:
+  stamping and moving places *in* that view rather than in the map. **What the editor does today** (built): a map says it is
   made from a seed and which seed, and is no longer held to what a brush can cover, so a world
   scene can be born there; the land is made as the panel looks at it, a few patches a frame, so a
   designer sees the country rather than a green field; and a place is stamped by choosing it and

@@ -214,6 +214,8 @@ pub struct Editor {
     pub quit: bool,
     /// Which hour a playtest starts at, for watching a villager's day. Dawn when unset.
     play_hour: Option<u32>,
+    /// Pictures of the countries seeds make, for the minimap, by seed and size.
+    countries: HashMap<String, egui::TextureHandle>,
     /// A map the designer has asked to delete, until they say yes or no, and what points at it.
     deleting: Option<String>,
     pointing_at: Option<Vec<String>>,
@@ -322,6 +324,7 @@ impl Editor {
             quit: false,
             players: 1,
             play_hour: None,
+            countries: HashMap::new(),
             deleting: None,
             pointing_at: None,
             text_search: String::new(),
@@ -839,7 +842,24 @@ impl Editor {
                 .on_hover_text("Lines some language has no words for");
         });
         let languages = self.strings.languages.clone();
-        let keys: Vec<String> = self.strings.keys().into_iter().collect();
+        // Every key the project *names*, not only the ones somebody has already written words
+        // for: a villager made a minute ago has a key for their name and none of their lines
+        // written, and those empty lines are exactly what a writer came here to fill.
+        let mut keys = self.strings.keys();
+        if let Some(scene) = &self.scene {
+            keys.extend(ops::keys_in(&scene.def));
+        }
+        for storylet in &self.story.def().storylets {
+            keys.extend(storylet.nodes.values().map(|node| node.line.clone()));
+            keys.extend(
+                storylet
+                    .nodes
+                    .values()
+                    .flat_map(|node| node.choices.iter().map(|choice| choice.says.clone())),
+            );
+        }
+        keys.extend(self.story.def().endings.iter().map(|end| end.text.clone()));
+        let keys: Vec<String> = keys.into_iter().collect();
         let looking = self.text_search.to_lowercase();
         // Worked out before drawing, so the rows do not shift while they are read.
         let rows: Vec<(String, Vec<Said>)> = keys
@@ -1498,13 +1518,69 @@ impl Editor {
     /// The whole map in a small box, with the part being worked on outlined: on a map larger
     /// than a few screens it is the only way to tell where the view is (docs/PLAN.md §24).
     /// A click or a drag inside it looks there.
+    /// The country a seed makes, as a picture the size of the minimap: water, level plain and
+    /// the three steps above it. Worked out once for a seed and a size and kept, because it is
+    /// tens of thousands of questions of the land and nothing about it changes.
+    fn country(
+        &mut self,
+        ctx: &egui::Context,
+        seed: u64,
+        size: (f32, f32),
+        shown: (usize, usize),
+    ) -> egui::TextureHandle {
+        let name = format!("country {seed} {}x{}", shown.0, shown.1);
+        if let Some(kept) = self.countries.get(&name) {
+            return kept.clone();
+        }
+        let land = dark_land::Land::new(seed);
+        let tile = self.tile as f32;
+        let (cols, rows) = (size.0 / tile, size.1 / tile);
+        let mut pixels = Vec::with_capacity(shown.0 * shown.1);
+        for down in 0..shown.1 {
+            for across in 0..shown.0 {
+                let col = (across as f32 + 0.5) / shown.0 as f32 * cols;
+                let row = (down as f32 + 0.5) / shown.1 as f32 * rows;
+                let ink = match land.cell(col as i64, row as i64) {
+                    Cell::Wall => Color32::from_rgb(40, 70, 120),
+                    Cell::Floor => Color32::from_rgb(56, 84, 46),
+                    Cell::Level(1) => Color32::from_rgb(74, 96, 52),
+                    Cell::Level(2) => Color32::from_rgb(98, 94, 62),
+                    Cell::Level(_) => Color32::from_rgb(126, 122, 112),
+                };
+                pixels.push(ink);
+            }
+        }
+        let image = egui::ColorImage {
+            size: [shown.0, shown.1],
+            pixels,
+            source_size: egui::vec2(shown.0 as f32, shown.1 as f32),
+        };
+        let texture = ctx.load_texture(&name, image, egui::TextureOptions::LINEAR);
+        // One country at a time: a designer looks at one world, and the picture is remade when
+        // the seed or the panel changes.
+        self.countries.clear();
+        self.countries.insert(name, texture.clone());
+        texture
+    }
+
     fn minimap(&mut self, ui: &mut Ui) {
         // Nothing to show before a map is open: the panel keeps its room for the palette.
         let Some(scene) = &self.scene else {
             return;
         };
-        let def = &scene.def;
+        let (land, size, places) = (scene.def.land, scene.def.size, scene.def.places.clone());
         ui.heading("Minimap");
+        // Worked out before the scene is borrowed for the drawing below: a picture of a country
+        // is kept on the editor, not on the scene.
+        let country = land.map(|land| {
+            let wide = (ui.available_width() - 8.0).round().max(1.0) as usize;
+            let tall = (MINIMAP_HEIGHT - 8.0).round().max(1.0) as usize;
+            self.country(ui.ctx(), land.seed, size, (wide, tall))
+        });
+        let Some(scene) = &self.scene else {
+            return;
+        };
+        let def = &scene.def;
         let (rect, response) = ui.allocate_exact_size(
             vec2(ui.available_width(), MINIMAP_HEIGHT),
             Sense::click_and_drag(),
@@ -1514,6 +1590,17 @@ impl Editor {
         let fit = Fit::new(rect.shrink(4.0), Vec2::from(def.size));
         // The ground, then the land raised above it: a shape a designer recognises at a glance.
         painter.rect_filled(fit.shown, 0.0, Color32::from_rgb(38, 46, 38));
+        // A world made from a seed has no drawn ground to show, so the country itself is drawn:
+        // water, plain and the steps above it, worked out once and kept (docs/PLAN.md §24.4).
+        // This is the only view of a whole world the editor has.
+        if let Some(country) = &country {
+            painter.image(
+                country.id(),
+                fit.shown,
+                Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
         let tile = self.tile as f32;
         for fill in &def.terrain.fill {
             let (col, row, cols, rows) = fill.tiles;
@@ -1540,6 +1627,18 @@ impl Editor {
                 1.0,
                 Color32::from_rgb(120, 116, 104),
             );
+        }
+        // The towns, camps and ruins stamped on it: where a designer is going when they are
+        // looking at a country (§24.5).
+        for place in &places {
+            let Some((w, h)) = self.catalog.sizes.get(&place.scene).copied() else {
+                continue;
+            };
+            let at = fit.rect((place.at.0, place.at.1, w, h));
+            let violet = Color32::from_rgb(200, 150, 255);
+            painter.rect_filled(at, 0.0, violet.gamma_multiply(0.5));
+            // A place smaller than a pixel of the minimap is still worth seeing.
+            painter.circle_stroke(at.center(), 3.0, Stroke::new(1.0, violet));
         }
         for inn in &def.inns {
             painter.rect_filled(fit.rect(inn.area), 0.0, Color32::from_rgb(110, 170, 255));
