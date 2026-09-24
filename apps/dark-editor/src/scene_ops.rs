@@ -553,6 +553,80 @@ pub fn keys_in(scene: &SceneDef) -> HashSet<String> {
         .collect()
 }
 
+/// Which way lies out of a map from `at`: south, north, east or west, whichever edge the point
+/// leans towards. A door belongs at the edge somebody leaves by, and the one place a map says
+/// where its edges are is its size.
+fn outward(at: (f32, f32), size: (f32, f32)) -> (f32, f32) {
+    let away = (at.0 - size.0 / 2.0, at.1 - size.1 / 2.0);
+    if away.0.abs() > away.1.abs() {
+        (away.0.signum(), 0.0)
+    } else {
+        (0.0, away.1.signum())
+    }
+}
+
+/// A box `size` wide and tall, set a tile clear of `from` in the direction `step`.
+fn beyond(from: (f32, f32), step: (f32, f32), size: (f32, f32), gap: f32) -> (f32, f32, f32, f32) {
+    let (w, h) = size;
+    let (x, y) = match step {
+        (0.0, down) if down > 0.0 => (from.0 - w / 2.0, from.1 + gap),
+        (0.0, _) => (from.0 - w / 2.0, from.1 - gap - h),
+        (right, _) if right > 0.0 => (from.0 + gap, from.1 - h / 2.0),
+        _ => (from.0 - gap - w, from.1 - h / 2.0),
+    };
+    (x.round(), y.round(), w, h)
+}
+
+/// A door and where it puts people: a box (x, y, width, height) and a point.
+pub type Doorway = ((f32, f32, f32, f32), (f32, f32));
+
+/// Whether a box lies wholly on a map that size. A door drawn off the edge of its map is one
+/// nobody can walk into and nobody can see to drag back, so it is no use offering one.
+fn lies_inside((x, y, w, h): (f32, f32, f32, f32), size: (f32, f32)) -> bool {
+    x >= 0.0 && y >= 0.0 && x + w <= size.0 && y + h <= size.1
+}
+
+/// Where the door back through `door` goes: its box on the map `door` leads to (`there` big),
+/// and where it puts people back on the map `door` is on (`here` big). `None` when there is no
+/// room for it beside the arrival, which is for the caller to say out loud rather than write
+/// something broken.
+///
+/// Both are placed the way a person places them: the door sits at the edge you leave by — the
+/// one the arrival leans towards — and you come back standing inside the map rather than on its
+/// rim. The two are set a tile clear of one another, because the game refuses a map whose exit
+/// arrives inside an exit of the map it arrives on (`dark_world::maps`).
+pub fn way_back(door: &ExitDef, tile: f32, here: (f32, f32), there: (f32, f32)) -> Option<Doorway> {
+    let (x, y, w, h) = door.area;
+    // The door on the other side stands a tile beyond where this one puts you, towards the edge
+    // that arrival is nearest: walking back the way you came is walking out that way. If there
+    // is no room that side — a small interior, where an arrival is a tile or two from the rim —
+    // it goes to the opposite side instead, and failing that to either hand, before giving up.
+    let out = outward(door.spawn, there);
+    let sides = [out, (-out.0, -out.1), (out.1, out.0), (-out.1, -out.0)];
+    let area = sides
+        .into_iter()
+        .map(|step| beyond(door.spawn, step, (w, h), tile))
+        .find(|area| lies_inside(*area, there))?;
+    // And you come back out of this door facing into the map, a tile clear of its box, rather
+    // than standing on the rim you just came through — round the other way if that side of the
+    // door is off the map, which is the same trouble the other way about.
+    let middle = (x + w / 2.0, y + h / 2.0);
+    let out = outward(middle, here);
+    let stand = |step: (f32, f32)| match step {
+        // Out of the map is south, so into it is north: stand a tile above the door.
+        (0.0, down) if down > 0.0 => (middle.0.round(), (y - tile).round()),
+        (0.0, _) => (middle.0.round(), (y + h + tile).round()),
+        (right, _) if right > 0.0 => ((x - tile).round(), middle.1.round()),
+        _ => ((x + w + tile).round(), middle.1.round()),
+    };
+    let on_map = |p: (f32, f32)| p.0 >= 0.0 && p.1 >= 0.0 && p.0 < here.0 && p.1 < here.1;
+    let spawn = [out, (-out.0, -out.1)]
+        .into_iter()
+        .map(stand)
+        .find(|p| on_map(*p))?;
+    Some((area, spawn))
+}
+
 /// A fresh scene: an empty field of `ground` frame 0, `cols` by `rows` tiles.
 pub fn blank_scene(ground_sheet: &str, cols: u32, rows: u32, tile: u32) -> SceneDef {
     let text = format!(
@@ -571,6 +645,156 @@ mod tests {
         let mut s = blank_scene("g", 10, 8, 16);
         s.player = Some(ron::from_str(r#"(sheet: "p", spawn: (40, 40))"#).expect("a player"));
         s
+    }
+
+    /// The game refuses a map whose exit arrives inside an exit of the map it arrives on, so a
+    /// pair the editor makes must never be one: neither door may stand on the other's arrival,
+    /// whatever size or corner the first one has, and whatever fractions it was dragged to. And
+    /// the two must be a clear tile apart, not merely touching, so that rounding the arrival to
+    /// whole pixels can never close the gap.
+    #[test]
+    fn a_door_and_the_way_back_never_stand_on_each_others_arrivals() {
+        let apart = |gap: f32, tile: f32, what: &str| {
+            assert!(gap >= tile - 0.5, "only {gap} between {what} (tile {tile})");
+        };
+        for tile in [8.0f32, 16.0, 32.0] {
+            for &here in &[(800.0f32, 600.0f32), (160.0, 2000.0)] {
+                for &there in &[(800.0f32, 600.0f32), (3000.0, 240.0)] {
+                    for &(x, y, w, h) in &[
+                        (0.0f32, 0.0f32, 16.0f32, 16.0f32),
+                        (100.5, 60.25, 4.0, 200.0),
+                        (600.0, 500.75, 64.0, 1.0),
+                        (12.0, 12.0, 300.0, 7.5),
+                    ] {
+                        for &spawn in &[(0.0f32, 0.0f32), (20.5, 13.25), (700.0, 400.0)] {
+                            let door = ExitDef {
+                                area: (x, y, w, h),
+                                to: "scenes/there.ron".into(),
+                                spawn,
+                            };
+                            // There is not always room; what there is never to be is a pair the
+                            // game refuses, so only what it offers is judged.
+                            let Some((area, back_to)) = way_back(&door, tile, here, there) else {
+                                continue;
+                            };
+                            let back = ExitDef {
+                                area,
+                                to: "scenes/here.ron".into(),
+                                spawn: back_to,
+                            };
+                            assert!(
+                                !back.contains(door.spawn),
+                                "the way back at {area:?} stands on the arrival {spawn:?}"
+                            );
+                            assert!(
+                                !door.contains(back.spawn),
+                                "coming back to {:?} lands inside the door at {:?}",
+                                back.spawn,
+                                door.area
+                            );
+                            // How far a point lies outside a box, whichever side it is on.
+                            let clear = |p: (f32, f32), (bx, by, bw, bh): (f32, f32, f32, f32)| {
+                                let dx = (bx - p.0).max(p.0 - (bx + bw)).max(0.0);
+                                let dy = (by - p.1).max(p.1 - (by + bh)).max(0.0);
+                                dx.max(dy)
+                            };
+                            apart(
+                                clear(door.spawn, area),
+                                tile,
+                                "the way back and its arrival",
+                            );
+                            apart(
+                                clear(back.spawn, door.area),
+                                tile,
+                                "the door and its arrival",
+                            );
+                            // A door drawn off the edge of its map is one nobody can walk into,
+                            // and the arrival must be somewhere a person can stand.
+                            assert!(
+                                lies_inside(area, there),
+                                "the way back at {area:?} is off a {there:?} map"
+                            );
+                            assert!(
+                                back.spawn.0 >= 0.0
+                                    && back.spawn.1 >= 0.0
+                                    && back.spawn.0 < here.0
+                                    && back.spawn.1 < here.1,
+                                "coming back to {back_to:?} is off a {here:?} map"
+                            );
+                            // And it is the same door: the same size, so it can be dragged onto
+                            // the art without being reshaped first.
+                            assert_eq!((area.2, area.3), (w, h));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The pair goes where a person would put it: the door at the edge you leave by, and the
+    /// arrival standing inside the map rather than on the rim. These are the two doors between
+    /// the meadow and the grove, which were placed by hand before the editor could make them.
+    #[test]
+    fn the_way_back_goes_to_the_edge_the_arrival_leans_towards() {
+        // The meadow's door to the grove sits near its north edge, and puts you in the grove's
+        // southern half — so the grove's door back belongs south of that, and coming back to the
+        // meadow puts you south of its door, inside the map.
+        let door = ExitDef {
+            area: (778.0, 398.0, 44.0, 16.0),
+            to: "scenes/grove.ron".into(),
+            spawn: (400.0, 530.0),
+        };
+        let (area, back_to) =
+            way_back(&door, 16.0, (1600.0, 1200.0), (800.0, 600.0)).expect("there is room");
+        assert_eq!(area, (378.0, 546.0, 44.0, 16.0), "south of the arrival");
+        assert_eq!(
+            back_to,
+            (800.0, 430.0),
+            "below the meadow's door, not above"
+        );
+
+        // And the other way about: a door at a map's west edge puts you in the east of the next
+        // one, so the way back belongs at that map's east edge.
+        let door = ExitDef {
+            area: (0.0, 300.0, 16.0, 48.0),
+            to: "scenes/east.ron".into(),
+            spawn: (760.0, 300.0),
+        };
+        let (area, back_to) =
+            way_back(&door, 16.0, (800.0, 600.0), (800.0, 600.0)).expect("there is room");
+        // Centred on the arrival across the way it faces, as the meadow's pair is.
+        assert_eq!(area, (776.0, 276.0, 16.0, 48.0), "at the east edge");
+        assert_eq!(
+            back_to,
+            (32.0, 324.0),
+            "east of the west door, inside the map"
+        );
+    }
+
+    /// A small interior is where the edge the arrival leans towards has no room behind it: the
+    /// door goes to the other side of the arrival rather than off the map, since a door drawn
+    /// past the rim is one nobody can walk into and nobody can see to drag back.
+    #[test]
+    fn a_door_with_no_room_at_its_edge_goes_to_the_other_side() {
+        let hut = (320.0f32, 240.0f32);
+        let door = ExitDef {
+            area: (100.0, 0.0, 44.0, 16.0),
+            to: "scenes/hut.ron".into(),
+            spawn: (160.0, 228.0),
+        };
+        let (area, _) = way_back(&door, 16.0, (800.0, 600.0), hut).expect("the other side");
+        // South of (160, 228) would start at y 244, past the hut's 240: so north of it instead.
+        assert_eq!(area, (138.0, 196.0, 44.0, 16.0));
+        assert!(lies_inside(area, hut));
+
+        // And when the arrival is jammed into a corner with a door too big for any side of it,
+        // nothing is offered rather than something the designer must unpick by hand.
+        let door = ExitDef {
+            area: (0.0, 0.0, 300.0, 200.0),
+            to: "scenes/hut.ron".into(),
+            spawn: (10.0, 10.0),
+        };
+        assert!(way_back(&door, 16.0, (800.0, 600.0), hut).is_none());
     }
 
     #[test]

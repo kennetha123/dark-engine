@@ -15,7 +15,7 @@ use egui::{
 };
 use glam::Vec2;
 
-use crate::catalog::{Catalog, scene_name, sheet_name};
+use crate::catalog::{Catalog, face_name, scene_name, sheet_name};
 use crate::database::{Database, Elsewhere};
 use crate::minimap::{self, Fit};
 use crate::scene_ops::{self as ops, History, Thing};
@@ -222,6 +222,9 @@ pub struct Editor {
     play_hour: Option<u32>,
     /// Pictures of the countries seeds make, for the minimap, by seed and size.
     countries: HashMap<String, egui::TextureHandle>,
+    /// Faceset pictures, for choosing a portrait; `None` for one that will not load, so a
+    /// picture that is missing is not read again every frame.
+    facesets: HashMap<String, Option<egui::TextureHandle>>,
     /// A map the designer has asked to delete, until they say yes or no, and what points at it.
     deleting: Option<String>,
     pointing_at: Option<Vec<String>>,
@@ -331,6 +334,7 @@ impl Editor {
             players: 1,
             play_hour: None,
             countries: HashMap::new(),
+            facesets: HashMap::new(),
             deleting: None,
             pointing_at: None,
             text_search: String::new(),
@@ -718,6 +722,167 @@ impl Editor {
         };
     }
 
+    /// Makes the door back through exit `exit`: one on the map it leads to, at the edge that
+    /// arrival leans towards, leading here and arriving inside this map rather than on its rim.
+    /// A way in that has no way out is the commonest thing to forget, and where the pair goes is
+    /// `ops::way_back`, which keeps it clear of the game's own rule about arrivals and exits.
+    fn add_way_back(&mut self, exit: usize) {
+        let Some(scene) = &self.scene else {
+            return;
+        };
+        if scene.dirty {
+            self.status = (
+                "Save this map first (Ctrl+S), then add the way back.".into(),
+                true,
+            );
+            return;
+        }
+        let here = scene.path.clone();
+        let Some(door) = scene.def.exits.get(exit).cloned() else {
+            return;
+        };
+        // Scenes are named in two hands here — what the editor writes, and what somebody typed
+        // into a scene — so they are compared the way the game compares them.
+        let named = |scene: &str| scene.replace('\\', "/").trim_start_matches("./").to_owned();
+        let (here, to) = (named(&here), named(&door.to));
+        if to == here {
+            self.status = (
+                "This door leads to its own map; the way back is itself.".into(),
+                true,
+            );
+            return;
+        }
+        let this_map = scene.def.size;
+        let size_of = |want: &str| {
+            self.catalog
+                .sizes
+                .iter()
+                .find(|(path, _)| named(path) == want)
+                .map(|(_, size)| *size)
+        };
+        let Some(other_map) = size_of(&to) else {
+            self.status = (format!("{} is not a map here.", scene_name(&to)), true);
+            return;
+        };
+        // A door made a moment ago arrives at the dead middle of the map it leads to, which is
+        // nobody's choice of doorway: a way back built around it would sit in the middle of that
+        // map, nowhere near an edge, and be saved before anyone saw it.
+        let untouched = (Vec2::from(other_map) / 2.0).round();
+        if Vec2::from(door.spawn) == untouched {
+            self.status = (
+                format!(
+                    "Say where this door arrives in {} first (\"Pick it there…\"): it still \
+                     arrives at the middle of the map, which is where a new door starts.",
+                    scene_name(&to)
+                ),
+                true,
+            );
+            return;
+        }
+        // A scene stamped onto a world is a place, not a map (§24.5): the game refuses one that
+        // is both, and a door written into the world that holds it would say so only after the
+        // world had already been written over.
+        if let Some(world) = self.stamped_on(&here) {
+            self.status = (
+                format!(
+                    "{} is a place stamped on {}, not a map of its own: a door cannot lead back \
+                     to it. Put the door on {} instead.",
+                    scene_name(&here),
+                    scene_name(&world),
+                    scene_name(&world)
+                ),
+                true,
+            );
+            return;
+        }
+        let Some((there, back_to)) = ops::way_back(&door, self.tile as f32, this_map, other_map)
+        else {
+            self.status = (
+                format!(
+                    "No room for a door beside where this one arrives in {}. \
+                     Move where it arrives, then try again.",
+                    scene_name(&door.to)
+                ),
+                true,
+            );
+            return;
+        };
+        let result = self
+            .project
+            .load_scene(&to)
+            .map_err(|e| e.to_string())
+            .and_then(|mut def| {
+                // On a world made from a seed the game moves an arrival that fell in water to
+                // the nearest dry ground, which can be a long way off and knows nothing about
+                // doors (§24.4). A door set a tile from where the arrival *was* would then be
+                // left behind, or land under the one it was moved to, so it is not offered.
+                if def.land.is_some() {
+                    return Err(format!(
+                        "{} is made from a seed: where a door arrives there can be moved to dry \
+                         ground, so the way back has to be put down by hand.",
+                        scene_name(&to)
+                    ));
+                }
+                if let Some(n) = def.exits.iter().position(|e| named(&e.to) == here) {
+                    return Err(format!(
+                        "{} already has a door back to {} (#{n}).",
+                        scene_name(&to),
+                        scene_name(&here)
+                    ));
+                }
+                def.exits.push(dark_assets::ExitDef {
+                    area: there,
+                    to: here.clone(),
+                    spawn: back_to,
+                });
+                let at = def.exits.len() - 1;
+                self.project
+                    .save_scene(&to, &def)
+                    .map_err(|e| e.to_string())
+                    .map(|()| at)
+            });
+        match result {
+            Ok(at) => {
+                self.open(to.clone());
+                // Only if it opened: a map that did not is not the one being looked at.
+                if self.scene.as_ref().is_some_and(|s| named(&s.path) == to) {
+                    self.selected = Some(Thing::Exit(at));
+                }
+                self.status = match self.check() {
+                    Ok(()) => (
+                        format!(
+                            "Added the way back to {}. Move it where the door is.",
+                            scene_name(&here)
+                        ),
+                        false,
+                    ),
+                    Err(e) => (
+                        format!("Added, but the game will not load it yet: {e}"),
+                        true,
+                    ),
+                };
+            }
+            Err(e) => self.status = (e, true),
+        }
+    }
+
+    /// The world a scene is stamped on as a place, if one is (§24.5). A scene is a place or a
+    /// map, never both, and the game refuses a project where one is treated as the other.
+    fn stamped_on(&self, scene: &str) -> Option<String> {
+        let named = |path: &str| path.replace('\\', "/").trim_start_matches("./").to_owned();
+        let want = named(scene);
+        self.catalog
+            .scenes
+            .iter()
+            .filter(|other| named(other) != want)
+            .find(|other| {
+                self.project
+                    .load_scene(other)
+                    .is_ok_and(|def| def.places.iter().any(|place| named(&place.scene) == want))
+            })
+            .cloned()
+    }
+
     /// Undoes the last change in what is open: the map or the database.
     fn undo_any(&mut self) {
         match self.workspace {
@@ -1029,6 +1194,10 @@ impl Editor {
         }
         self.catalog.scenes.push(path.clone());
         self.catalog.scenes.sort();
+        // How big it is, at once: a map made a minute ago is one a door is about to lead to, and
+        // everything that asks how large a scene is (stamping it as a place, making the way back
+        // through a door) would otherwise not know this one until the editor was started again.
+        self.catalog.sizes.insert(path.clone(), def.size);
         self.open(path);
         self.status = (
             if self.new_map_made {
@@ -1545,9 +1714,6 @@ impl Editor {
         }
     }
 
-    /// The whole map in a small box, with the part being worked on outlined: on a map larger
-    /// than a few screens it is the only way to tell where the view is (docs/PLAN.md §24).
-    /// A click or a drag inside it looks there.
     /// The country a seed makes, as a picture the size of the minimap: water, level plain and
     /// the three steps above it. Worked out once for a seed and a size and kept, because it is
     /// tens of thousands of questions of the land and nothing about it changes.
@@ -1593,6 +1759,9 @@ impl Editor {
         texture
     }
 
+    /// The whole map in a small box, with the part being worked on outlined: on a map larger
+    /// than a few screens it is the only way to tell where the view is (docs/PLAN.md §24).
+    /// A click or a drag inside it looks there.
     fn minimap(&mut self, ui: &mut Ui) {
         // Nothing to show before a map is open: the panel keeps its room for the palette.
         let Some(scene) = &self.scene else {
@@ -1741,6 +1910,34 @@ impl Editor {
         Some(handle)
     }
 
+    /// A faceset picture, for showing the eight faces to choose between. It is not a sheet, so
+    /// it is read straight off the disk rather than through the viewport; painted art, so it is
+    /// sampled smoothly when it is shrunk to a thumbnail.
+    fn faceset(&mut self, ctx: &egui::Context, picture: &str) -> Option<egui::TextureHandle> {
+        if let Some(kept) = self.facesets.get(picture) {
+            return kept.clone();
+        }
+        let loaded = dark_assets::load_image(&self.project.path(picture))
+            .map_err(|e| tracing::warn!("{picture}: {e}"))
+            .ok()
+            .map(|image| {
+                let colors = egui::ColorImage::from_rgba_unmultiplied(
+                    [image.width as usize, image.height as usize],
+                    &image.rgba,
+                );
+                ctx.load_texture(picture, colors, egui::TextureOptions::LINEAR)
+            });
+        // A few at a time: one villager's portrait is shown at once, and a set of art can hold
+        // a hundred facesets, each a megabyte once it is pixels. A handful is enough to move
+        // between the people of one village without reading the same picture again.
+        const KEPT: usize = 8;
+        if self.facesets.len() >= KEPT {
+            self.facesets.clear();
+        }
+        self.facesets.insert(picture.to_owned(), loaded.clone());
+        loaded
+    }
+
     fn inspector(&mut self, ui: &mut Ui) {
         if let Some((from, _)) = &self.picking {
             ui.heading("Picking where people arrive");
@@ -1755,8 +1952,29 @@ impl Editor {
             }
             return;
         }
-        let Some(scene) = &mut self.scene else {
+        if self.scene.is_none() {
             ui.label("No map is open.");
+            return;
+        }
+        // The picture the chosen villager's portrait comes from, loaded before the form borrows
+        // the map: the form shows the eight faces in it to pick between.
+        let wearing = match self.selected {
+            Some(Thing::Npc(i)) => self
+                .scene
+                .as_ref()
+                .and_then(|scene| scene.def.npcs.get(i))
+                .and_then(|npc| npc.face.as_ref())
+                .map(|face| face.image.clone()),
+            _ => None,
+        };
+        // Which picture was looked for travels with what was found, so that the frame in which
+        // somebody picks a different one shows nothing rather than the faces of the old picture,
+        // or a complaint that a picture nobody has tried to read yet cannot be read.
+        let faceset = wearing.map(|picture| {
+            let texture = self.faceset(ui.ctx(), &picture);
+            (picture, texture)
+        });
+        let Some(scene) = &mut self.scene else {
             return;
         };
         let before = scene.def.clone();
@@ -1767,6 +1985,8 @@ impl Editor {
             text_changed: false,
             palette: self.prop.clone(),
             pick_arrival: None,
+            way_back: None,
+            faceset,
             strings: &mut self.strings,
             language: &self.language,
             catalog: &self.catalog,
@@ -1795,7 +2015,7 @@ impl Editor {
             }
         }
         let (changed, text_changed) = (form.changed, form.text_changed);
-        let (step, pick_arrival) = (form.step, form.pick_arrival);
+        let (step, pick_arrival, way_back) = (form.step, form.pick_arrival, form.way_back);
         if let Some(id) = changed {
             if self.editing != Some(id) || step {
                 self.history.record(&before);
@@ -1809,6 +2029,10 @@ impl Editor {
         }
         if let Some(exit) = pick_arrival {
             self.start_picking(exit);
+            return;
+        }
+        if let Some(exit) = way_back {
+            self.add_way_back(exit);
             return;
         }
         if remove {
@@ -2608,6 +2832,11 @@ struct Form<'a> {
     palette: Option<(String, u32)>,
     /// Asked to pick, on the map it leads to, where exit `n` arrives.
     pick_arrival: Option<usize>,
+    /// Asked to make the door back through exit `n`, on the map it leads to.
+    way_back: Option<usize>,
+    /// The picture the chosen villager's portrait was cut from when this frame began, and what
+    /// came of reading it. `None` for the picture means it could not be read.
+    faceset: Option<(String, Option<egui::TextureHandle>)>,
     strings: &'a mut Strings,
     language: &'a str,
     catalog: &'a Catalog,
@@ -3218,6 +3447,136 @@ impl Form<'_> {
                 .response
                 .on_hover_text("A person in world.ron: one who lives the year, and can join you");
                 ui.separator();
+                ui.label("Portrait");
+                ui.weak("Shown beside what they say.");
+                ui.horizontal(|ui| {
+                    let mut picture = npc
+                        .face
+                        .as_ref()
+                        .map(|face| face.image.clone())
+                        .unwrap_or_default();
+                    let before = picture.clone();
+                    ComboBox::from_id_salt(("face", i))
+                        .selected_text(if picture.is_empty() {
+                            "(no portrait)".to_owned()
+                        } else {
+                            face_name(&picture)
+                        })
+                        .width(180.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut picture, String::new(), "(no portrait)");
+                            for path in &self.catalog.faces {
+                                ui.selectable_value(&mut picture, path.clone(), face_name(path));
+                            }
+                        });
+                    if picture != before {
+                        // A picture chosen afresh starts at its first face: which face is which
+                        // is a fact about the old picture and says nothing about the new one.
+                        npc.face = (!picture.is_empty()).then_some(dark_assets::FaceDef {
+                            image: picture,
+                            index: 0,
+                        });
+                        self.press(("face", i));
+                    }
+                });
+                // The eight faces in it, to click between: a faceset is a 4×2 grid, and which of
+                // them a villager wears is something to see rather than a number to guess. Only
+                // the picture this frame began with is drawn; one just chosen appears next frame.
+                let read = self
+                    .faceset
+                    .clone()
+                    .filter(|(picture, _)| Some(picture) == npc.face.as_ref().map(|f| &f.image));
+                if let (Some(face), Some((_, Some(texture)))) = (npc.face.as_mut(), read.clone()) {
+                    let mut picked = None;
+                    // Four across and two down, the way they lie in the picture, so that what is
+                    // clicked here is recognisably what the art has in it.
+                    egui::Grid::new(("faces", i))
+                        .num_columns(4)
+                        .spacing(vec2(2.0, 2.0))
+                        .show(ui, |ui| {
+                            for index in 0..8u32 {
+                                let corner =
+                                    pos2((index % 4) as f32 / 4.0, (index / 4) as f32 / 2.0);
+                                let uv = Rect::from_min_size(corner, vec2(0.25, 0.5));
+                                let image =
+                                    egui::Image::new((texture.id(), vec2(44.0, 44.0))).uv(uv);
+                                let button = egui::Button::image(image)
+                                    .selected(index == face.index)
+                                    .min_size(vec2(48.0, 48.0));
+                                if ui
+                                    .add(button)
+                                    .on_hover_text(format!("Face {index}"))
+                                    .clicked()
+                                {
+                                    picked = Some(index);
+                                }
+                                if index % 4 == 3 {
+                                    ui.end_row();
+                                }
+                            }
+                        });
+                    if let Some(index) = picked
+                        && index != face.index
+                    {
+                        face.index = index;
+                        self.press(("face index", i));
+                    }
+                } else if let Some((picture, None)) = read {
+                    ui.colored_label(
+                        Color32::from_rgb(255, 110, 100),
+                        format!("{} cannot be read.", face_name(&picture)),
+                    );
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Moves like");
+                    let before = npc.moveset.clone();
+                    ComboBox::from_id_salt(("moveset", i))
+                        .selected_text(npc.moveset.clone().unwrap_or_else(|| "(unarmed)".into()))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut npc.moveset, None, "(unarmed)");
+                            for moveset in &self.catalog.movesets {
+                                ui.selectable_value(
+                                    &mut npc.moveset,
+                                    Some(moveset.clone()),
+                                    moveset,
+                                );
+                            }
+                        });
+                    if npc.moveset != before {
+                        self.press(("moveset", i));
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "How they fight, from combat.ron, once they are fighting beside you",
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Swings");
+                    let before = npc.attack.clone();
+                    ComboBox::from_id_salt(("npc attack", i))
+                        .selected_text(
+                            npc.attack
+                                .as_deref()
+                                .map_or("(nothing)", |sheet| sheet_name(sheet)),
+                        )
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut npc.attack, None, "(nothing)");
+                            for sheet in &self.catalog.attacks {
+                                ui.selectable_value(
+                                    &mut npc.attack,
+                                    Some(sheet.clone()),
+                                    sheet_name(sheet),
+                                );
+                            }
+                        });
+                    if npc.attack != before {
+                        self.press(("npc attack", i));
+                    }
+                })
+                .response
+                .on_hover_text("The sheet their swing is drawn from, beside their walking sheet");
+                ui.separator();
                 self.day(ui, npc, i);
                 ui.separator();
                 ui.label(format!("What they say ({})", self.language));
@@ -3307,6 +3666,15 @@ impl Form<'_> {
                     ui.weak("Where you appear on the other map.");
                     if ui.button("Pick it there…").clicked() {
                         self.pick_arrival = Some(i);
+                    }
+                    if ui
+                        .button("Add the way back…")
+                        .on_hover_text(
+                            "A door on that map leading here, beside where this one arrives",
+                        )
+                        .clicked()
+                    {
+                        self.way_back = Some(i);
                     }
                 });
                 self.area(ui, &mut exit.area);

@@ -67,7 +67,8 @@ for 5–8) and answers conversations. Hosts take `--save <file>` (carry the whol
 day and on quitting, Ctrl+C for `dark-host`; without `--player` the save's host plays on as
 themselves) and `--world-seed <n>`. The story is the project's `story.ron`.
 
-The editor (maps, villagers and their days, enemies, exits, worlds made from a seed and the places
+The editor (maps, villagers with their portraits and days, enemies, exits and the way back through
+them, worlds made from a seed and the places
 stamped on them, the world database, conversations, and a Text workspace holding every line in
 every language; Play needs `dark-player` built beside it).
 The minimap under the map list shows the whole map and moves the view when clicked or dragged:

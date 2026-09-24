@@ -712,6 +712,26 @@ docs/            this plan
   rather than from a column of numbers.
   Play starts the game at an hour of the designer's choosing, since a day is only worth watching
   at the hour it happens.
+- **A villager's portrait** is chosen from the facesets in the project's art (found by looking:
+  the pictures in a `faces` folder, or named like one), never typed as a path. The eight faces
+  in the chosen picture are shown four across and two down, as they lie in it, and the one
+  clicked is the one they wear — which face is which is a thing to see rather than a number to
+  guess. How they fight (a moveset from `combat.ron`) and the sheet they swing are chosen
+  beside it, so everything a villager is made of is on one panel.
+- **A door's way back** is made by the editor rather than by hand, a way in with no way out
+  being the commonest thing to forget: "Add the way back" writes the paired exit into the map
+  this one leads to, at the edge its arrival leans towards — the other side of that arrival if
+  there is no room at that edge, as in a small interior — leading here and arriving inside this
+  map rather than on its rim, and a tile clear of the door, so that the game's own rule that an
+  arrival may not land inside an exit of the map it arrives on (§10) is kept.
+  It would rather say no than write something a designer must unpick by hand, so it refuses
+  when: that map already has a door back (and says which one); the arrival is still the middle
+  of the map, where a new door starts, so nobody has yet said where this one comes out; there is
+  no room for a door beside the arrival; this scene is stamped somewhere as a place rather than
+  being a map of its own (§24.5); or the map it leads to is made from a seed, where the game may
+  move an arrival that fell in water to dry ground a long way off (§24.4) and leave a door made
+  here behind. Scene names are compared the way the game compares them, so a hand-written
+  `./scenes/x.ron` is the same door as `scenes/x.ron`.
 - **Which map the game starts on** is written into `project.ron` by "Start here", and only that
   line of it: a project file is written by hand and carries comments. A map can be deleted, after
   being told what leads to it, stamps it, or begins the game there.
