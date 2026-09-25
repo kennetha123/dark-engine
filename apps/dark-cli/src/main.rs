@@ -6,17 +6,26 @@
 //! `dark-cli preview-land <seed> <tiles> <tiles-per-pixel> <out.png>` draws the country a world
 //! seed makes, from far above: water, plain, and the steps up out of it.
 //!
+//! `dark-cli preview-world <project-dir> <scene> <tiles-per-pixel> <out.png>` draws a world
+//! scene's whole country the same way — inside its drawn outline, if it has one — with the
+//! places stamped on it outlined in white and its ways out in red.
+//!
 //! `dark-cli simulate <project-dir> [--seed n] [--runs n] [--lang code]` fast-forwards the world
 //! simulation (`world.ron`) through a year: the chronicle of one seed, or statistics over many.
 //!
 //! `dark-cli package <project-dir> <out-dir> [--exe <dark-player>]` collects the game and only
 //! the files it loads into a folder to hand over: the exe beside a `game` folder.
 //!
+//! `dark-cli bake-model <project-dir> <model.model.ron>` turns an artist's export (FBX or glTF)
+//! into the glTF the view loads and measures its clips for the host. Needs Blender; set
+//! `DARK_BLENDER` if it is not installed where it usually is. Run it after every export.
+//!
 //! `dark-cli bake-spine <project-dir> <sheet.spine.ron>` measures a Spine skeleton for the host
 //! (clip lengths, events, hitboxes) and writes the sheet's `baked` file. Run it after every
 //! export from Spine. `dark-cli preview-spine <project-dir> <sheet.spine.ron> <clip> <tick>
 //! <out.png>` draws the skeleton at that clip and tick, as the game would, four times enlarged.
 
+mod bake_model;
 mod land;
 mod package;
 mod simulate;
@@ -49,6 +58,19 @@ fn main() -> ExitCode {
                 }
             }
         }
+        [cmd, project, scene, every, out] if cmd == "preview-world" => {
+            let Ok(every) = every.parse() else {
+                eprintln!("error: preview-world takes a number of tiles to the pixel");
+                return ExitCode::FAILURE;
+            };
+            match land::preview_world(project, scene, every, out) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         [cmd, project, sheet, out] if cmd == "preview-sheet" => {
             match preview_sheet(project, sheet, out) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -69,6 +91,15 @@ fn main() -> ExitCode {
         }
         [cmd, project, sheet, clip, tick, out] if cmd == "preview-spine" => {
             match preview_spine(project, sheet, clip, tick, out) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        [cmd, project, model] if cmd == "bake-model" => {
+            match bake_model::bake_model(project, model) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
                     eprintln!("error: {err}");
@@ -122,6 +153,7 @@ fn main() -> ExitCode {
         _ => {
             eprintln!("usage: dark-cli preview-sheet <project-dir> <sheet.ron> <out.png>");
             eprintln!("       dark-cli preview-land <seed> <tiles> <tiles-per-pixel> <out.png>");
+            eprintln!("       dark-cli bake-model <project-dir> <model.model.ron>");
             eprintln!("       dark-cli bake-spine <project-dir> <sheet.spine.ron>");
             eprintln!(
                 "       dark-cli preview-spine <project-dir> <sheet.spine.ron> <clip> <tick> <out.png>"

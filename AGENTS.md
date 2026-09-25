@@ -137,6 +137,15 @@ cargo run -p dark-cli -- preview-sheet ../adventurer sheets/grass_props.sheet.ro
 cargo run -p dark-cli -- preview-spine ../adventurer sheets/goblin.spine.ron attack_down 20 out.png
 ```
 
+A 3D model (an artist's FBX or glTF) is baked into the glTF the game loads and the clip
+measurements the host reads. Needs Blender; `DARK_BLENDER` says where it is if it is not in the
+usual place. Run it after every export:
+```
+cargo run -p dark-cli -- bake-model ../adventurer models/peasant_girl.model.ron
+```
+A `*.model.ron` names the export, the mesh, the bake, `scale` (model units to world pixels) and
+which animation each engine action is. A model has one clip per action, not one per action and
+facing: the mesh is turned to face. Nothing draws a model yet — see `journals/engine/04`.
 Spine skeletons (4.1 JSON exports) must be baked for the host after every export; with
 `DARK_TEST_PROJECT=<abs path to ../adventurer>`, `cargo test` fails on a stale bake:
 ```

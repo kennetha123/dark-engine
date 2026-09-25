@@ -68,6 +68,44 @@ fn every_sheet_and_scene_in_the_project_loads() {
     assert!(checked > 0, "no sheets or scenes found");
 }
 
+/// Every `*.model.ron` in the project bakes to what is on disk beside it. A model exported again
+/// and not baked again is the same trouble as a stale Spine bake: the host would be counting
+/// ticks for an animation that is no longer there.
+#[test]
+fn every_model_in_the_project_is_baked_from_what_is_there_now() {
+    let Ok(dir) = std::env::var("DARK_TEST_PROJECT") else {
+        eprintln!("DARK_TEST_PROJECT not set; skipping");
+        return;
+    };
+    let project = Project::open(dir).expect("project.ron");
+    let Ok(entries) = std::fs::read_dir(project.path("models")) else {
+        return; // A project with no 3D models yet.
+    };
+    for entry in entries.flatten() {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        if !file.ends_with(".model.ron") {
+            continue;
+        }
+        let name = format!("models/{file}");
+        let model = project
+            .load_model(&name)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let source = std::fs::read(project.path(&model.def.source))
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            dark_assets::source_hash(&source),
+            model.bake.source_hash,
+            "{name}: the model changed since it was baked"
+        );
+        for (clip, ..) in model.def.clips() {
+            assert!(
+                model.bake.clips[&clip].ticks >= 1,
+                "{name}: {clip} is no ticks long"
+            );
+        }
+    }
+}
+
 #[test]
 fn every_line_and_name_has_text_in_every_language_and_faces_and_font_load() {
     let Ok(dir) = std::env::var("DARK_TEST_PROJECT") else {
@@ -153,6 +191,31 @@ fn every_line_and_name_has_text_in_every_language_and_faces_and_font_load() {
     }
     keys.extend(dark_life::Status::ALL.map(|s| s.key().to_owned()));
     keys.push("life.accident".to_owned());
+    // The inventory screen: every slot, and every word it puts beside a number.
+    keys.extend(dark_life::Slot::ALL.map(|s| s.key().to_owned()));
+    for key in [
+        "ui.pack",
+        "ui.pack_help",
+        "ui.pack_you",
+        "ui.pack_empty",
+        "stat.damage",
+        "stat.protection",
+        "stat.resist",
+        "stat.slash",
+        "stat.pierce",
+        "stat.blunt",
+        "stat.poison",
+        "stat.disease",
+        "stat.curse",
+        "stat.fire",
+        "stat.warmth",
+        "stat.cooling",
+        "stat.charm",
+        "stat.pockets",
+        "stat.pouches",
+    ] {
+        keys.push(key.to_owned());
+    }
     // What the engine has people say about parties (dark_world::party).
     for key in [
         "party.yes",

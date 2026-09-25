@@ -10,6 +10,11 @@ use dark_physics::{Cell, Shape, Terrain};
 use dark_sprite::{AutoSlice, CharacterLayout, Clip, Facing, Frame, Pivot, Rect, SpriteSheet};
 use serde::{Deserialize, Serialize};
 
+mod model;
+pub use model::{
+    BakedModelClip, LoadedModel, MeasuredClip, ModelBake, ModelDef, ModelMeasure, source_hash,
+    ticks_for,
+};
 mod spine;
 pub use spine::{BakedClip, SpineBake, SpineDef, SpineSheet, skeleton_hash};
 

@@ -628,6 +628,59 @@ docs/            this plan
   are not read yet (JSON only); a skeleton's root is taken as its feet (the goblin's stand a few
   pixels lower); the goblin has no bounding boxes, so its hits use its moveset's circle.
 
+## 16.1 Models (M9, phase 1: baking)
+
+The art direction moves from sprites to 3D meshes, toon shaded (`journals/engine/04`). This is
+the first phase of that: getting an artist's export into the game as data. Nothing draws a mesh
+yet.
+
+- A `*.model.ron` names what the artist exported (`source`, FBX or glTF), the glTF the view will
+  load (`mesh`), the measurements the host reads (`baked`), `scale` (model units to world pixels),
+  which engine action each animation is, and which actions loop.
+- **No directions.** A Spine sheet needs an animation for all eight facings because a 2D skeleton
+  cannot be turned; a mesh is turned instead, so a model has one clip per action. That is eight
+  times fewer clips to name, bake and keep in step.
+- `dark-cli bake-model <project> <model.model.ron>` runs **Blender** headless
+  (`tools/bake_model.py`; `DARK_BLENDER` overrides where it is found), which imports the export,
+  writes the glTF, and measures each clip's length **in seconds** and its events from the
+  action's pose markers. `dark-cli` turns that measurement into the bake: it owns the arithmetic
+  and the two things only the engine knows — which clips loop, and the source's hash.
+- **The seconds-to-ticks rule is §16's, deliberately** (`dark_assets::model::ticks_for`): a clip
+  that plays once is `floor(duration × 60) + 1` ticks and a looping one `round(duration × 60)`,
+  and an event lands on the first tick at or past its mark. A model and a skeleton of the same
+  real duration have to agree, or an attack would recover on a different tick depending only on
+  how the character happens to be drawn. A test pins the two rules together.
+- Blender writes its measurement to a file beside the bake, never the bake itself, so a run that
+  fails cannot leave a stale bake looking fresh; the measurement is deleted once it is read.
+- **FBX is never read at run time.** It is Autodesk's format and reading it in Rust is a poor
+  bet; Blender is already needed to author the models and opens everything an artist might send.
+  The game only ever sees glTF. This is the same trade as `bake-spine`, which measures a skeleton
+  once so the headless host never runs Spine.
+- The bake carries `source_hash`, `height` (world pixels), `bones`, and each clip's `animation`,
+  `ticks`, `looping` and `events`. That is all the simulation ever reads of a model: **bone
+  matrices never enter a networked tick.** Loading checks the bake exists, holds every clip the
+  definition names, and that the mesh is beside it; with `DARK_TEST_PROJECT` set, a test checks
+  every model's source hash and fails on a stale bake.
+- The script writes RON directly so that a build tool needs no JSON dependency; `dark-cli` reads
+  it straight back into `ModelMeasure`, which is what holds the Python and the Rust to one shape.
+  `ModelMeasure` **refuses unknown fields**, so a field the script renames fails the bake instead
+  of reading back as a default. A test in `dark_assets` carries a copy of the script's output and
+  bakes it — a transcription, not the script's own bytes, so it cannot see the script drift; the
+  refusal above is what catches that. Names are escaped on the way out, because an animation is
+  called whatever an artist typed, and a non-finite measurement is refused rather than written as
+  `NaN`, which RON will not read back.
+- Blender is run with `--python-exit-code 1`. Without it a script that raises anything but
+  `SystemExit` still exits 0, and the bake would be judged on whatever had been written before
+  the exception.
+- Known gaps: nothing renders a model yet (phase 2); no bone reduction, so a Mixamo rig arrives
+  with all 69 including fingers and both eyes; no material or texture handling beyond what glTF
+  export carries; models are not yet reachable as a look's `sheet`. Because of that last one,
+  two shipping paths do not know about models yet and must before phase 2 lands: `dark-cli
+  package` does not collect a model's source, mesh or bake the way it collects a skeleton's, and
+  `Project::fingerprint` does not cover a bake — whose clip ticks drive attack recovery, so two
+  machines with different bakes would fight differently and the handshake would not see it.
+  (`fingerprint` does not follow a sheet to its Spine bake either; that gap predates models.)
+
 ## 17. Save, storylets and endings (as built in M7)
 
 - The whole world is saved (`dark_world::WorldSave`, one RON file, version 1): the world
