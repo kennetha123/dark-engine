@@ -681,6 +681,67 @@ yet.
   machines with different bakes would fight differently and the handshake would not see it.
   (`fingerprint` does not follow a sheet to its Spine bake either; that gap predates models.)
 
+## 16.2 Models in the round (M9, phase 2a: loading and posing)
+
+`dark_model` reads the glTF that baking wrote and poses it. It is **presentation**, like
+`dark_spine`, and is not in the simulation-dependency list: it is where the `gltf` crate lives
+and where bone matrices stay.
+
+- `Model::load(project, def)` reads the **mesh**, never the artist's source. It gathers parts
+  (vertices, indices, the picture that paints them), the skeleton, and the animations.
+- A vertex carries position, normal, uv, four joints and four weights, laid out as the shader
+  will want them. Weights are normalised; a weightless vertex is pinned to its first bone rather
+  than collapsing to the origin and dragging its triangle across the screen.
+- **glTF names a bone two different ways and they are not the same.** A vertex names one by its
+  place in the skin's joint list; an animation names one by the glTF node it targets. `Rigging`
+  keeps both maps. Confusing them skins a mesh to whichever bone happens to sit at a node's
+  number, which looks like a character coming apart into spikes.
+- **glTF is Y-up by specification.** Blender is Z-up and converts on export, so a model measured
+  during baking and the same model read back here are the same height on different axes.
+  `Model::UP` says so once, and `Model::height` measures along it rather than naming an axis
+  again.
+- **Everything above a joint still moves it.** glTF builds a joint's matrix from the scene root,
+  and an exporter routinely leaves a transform up there — Blender's armature object carries the
+  whole Z-up turn and its own scale, which for a Mixamo rig is a quarter turn and a hundredth.
+  A joint whose parent is not itself a joint folds that chain into where it rests.
+- **A clip is shifted to begin at zero.** Blender writes keys at the action's own frame numbers,
+  so a Mixamo action starts at 1/30 s rather than 0, while playback counts ticks from zero.
+  Loading subtracts the earliest key across the clip's channels, which makes the clip's length
+  the same span `bake-model` measured and lets a tick be played as `tick / 60`.
+- **Interpolation is read, not assumed.** A STEP track holds its key rather than blending —
+  Blender writes STEP for anything an animator snapped, and real exports carry both. A cubic
+  track is refused with a warning, because its output holds three values per key (in-tangent,
+  value, out-tangent) and pairing those with times one for one would read tangents as poses.
+- An attribute accessor whose length disagrees with the positions is refused rather than padded.
+  A short `JOINTS_0` would silently pin the tail of a mesh to bone zero and drag it to the
+  origin, which looks exactly like the tearing this loader was already debugged for once.
+- Bones are held with parents before children, so one forward pass resolves the tree. glTF does
+  not promise that order; a file that breaks it is sorted, with a warning, and both name maps
+  follow the bones to their new places. The sort cannot hang on a cycle.
+- `Pose::pose(model, animation, looping, seconds)` walks the skeleton once and leaves a palette
+  of `world × inverse_bind`, one matrix per bone. A looping clip wraps; one that plays once holds
+  its last pose. An animation nobody has leaves the model at rest, with a warning — wrong, but
+  visible, which beats an empty screen.
+- Keyframes are sampled by walking to the first key past the time and blending. Outside the keys
+  the value is held, never extrapolated. Tracks are a few dozen keys and this runs once per bone
+  per frame, so a scan beats the bookkeeping a search would need.
+- `dark-cli preview-model <project> <model> <clip> <tick> <out.png>` fills the posed triangles on
+  the CPU, with a depth buffer, from the angle a top-down game looks from — the same idea as
+  `preview-spine`, and the way this phase was checked without a window or a GPU. It prints the
+  loaded height beside the baked one: the two measure the same model through different tools, so
+  a disagreement means a transform was dropped or the export is not Y-up. A triangle with a
+  non-finite corner is dropped, because every comparison in a rasteriser is false for a NaN and
+  one would poison its depth pixel for the rest of the picture.
+- Known gaps: **nothing on the GPU yet** (phase 2b is the mesh pipeline in `dark_render`: depth
+  buffer, skinned-mesh shader, bone palette); one skin only — the first found, with a warning if
+  there are more; **models are loaded from `document.meshes()` rather than the scene graph**, so
+  a mesh's own node transform is not applied and an unskinned primitive is weighted to bone zero
+  instead of being placed by its node (a character with a separate prop in the same file would
+  be dragged by the hips); no morph targets; no cubic interpolation; no material beyond a
+  base-colour texture; flat face shading in the preview, which the toon ramp replaces in phase
+  3. `dark-cli package` and `Project::fingerprint` still do not know about models — carried over
+  from §16.1 and now due in phase 2b, when a model first becomes reachable.
+
 ## 17. Save, storylets and endings (as built in M7)
 
 - The whole world is saved (`dark_world::WorldSave`, one RON file, version 1): the world

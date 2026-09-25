@@ -24,6 +24,7 @@ dark_sim = { path = "crates/dark_sim" }
 dark_combat = { path = "crates/dark_combat" }
 dark_audio = { path = "crates/dark_audio" }
 dark_spine = { path = "crates/dark_spine" }
+dark_model = { path = "crates/dark_model" }
 dark_story = { path = "crates/dark_story" }
 dark_view = { path = "crates/dark_view" }
 dark_life = { path = "crates/dark_life" }
@@ -51,6 +52,9 @@ naga = { version = "=30.0.1", features = ["wgsl-in"] }
 ron = { version = "0.12.2", features = ["integer128"] }
 # Spine 4.1 runtime (spine-c transpiled): pinned to the Spine editor the studio exports from.
 rusty_spine = "=0.7.1"
+# glTF 2.0, for the 3D models Blender bakes (journals/engine/04). `import` reads a GLB and
+# its buffers; `utils` gives the typed accessor readers that walk them.
+gltf = { version = "1.4.1", default-features = false, features = ["import", "utils", "names"] }
 pollster = "1.0.1"
 postcard = { version = "1.1.3", features = ["alloc"] }
 renet = "2.0.0"

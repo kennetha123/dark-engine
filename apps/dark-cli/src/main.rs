@@ -20,6 +20,9 @@
 //! into the glTF the view loads and measures its clips for the host. Needs Blender; set
 //! `DARK_BLENDER` if it is not installed where it usually is. Run it after every export.
 //!
+//! `dark-cli preview-model <project-dir> <model.model.ron> <clip> <tick> <out.png>` draws a
+//! posed model on the CPU, from the angle a top-down game looks at it.
+//!
 //! `dark-cli bake-spine <project-dir> <sheet.spine.ron>` measures a Spine skeleton for the host
 //! (clip lengths, events, hitboxes) and writes the sheet's `baked` file. Run it after every
 //! export from Spine. `dark-cli preview-spine <project-dir> <sheet.spine.ron> <clip> <tick>
@@ -28,6 +31,7 @@
 mod bake_model;
 mod land;
 mod package;
+mod preview_model;
 mod simulate;
 
 use std::path::PathBuf;
@@ -98,6 +102,15 @@ fn main() -> ExitCode {
                 }
             }
         }
+        [cmd, project, model, clip, tick, out] if cmd == "preview-model" => {
+            match preview_model::preview_model(project, model, clip, tick, out) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         [cmd, project, model] if cmd == "bake-model" => {
             match bake_model::bake_model(project, model) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -154,6 +167,9 @@ fn main() -> ExitCode {
             eprintln!("usage: dark-cli preview-sheet <project-dir> <sheet.ron> <out.png>");
             eprintln!("       dark-cli preview-land <seed> <tiles> <tiles-per-pixel> <out.png>");
             eprintln!("       dark-cli bake-model <project-dir> <model.model.ron>");
+            eprintln!(
+                "       dark-cli preview-model <project-dir> <model.model.ron> <clip> <tick> <out.png>"
+            );
             eprintln!("       dark-cli bake-spine <project-dir> <sheet.spine.ron>");
             eprintln!(
                 "       dark-cli preview-spine <project-dir> <sheet.spine.ron> <clip> <tick> <out.png>"

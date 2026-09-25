@@ -262,4 +262,82 @@ rather than inventing a `strike_event`. The `project_smoke` model test scans the
 only and is a no-op until a project has models; it is a guard for phase 2, not a claim about
 today.
 
-Phases 2–7 not started.
+### Phase 2a — loading and posing, done 2026-09-26
+
+Phase 2 splits. This is the half that reads a model and poses it; the mesh pipeline in
+`dark_render` is 2b and is not started.
+
+`crates/dark_model/` (new crate, presentation): `Model`, `Part`, `Vertex`, `Bone`, `Skeleton`,
+`Animation`, `Track`, `Pose`. `apps/dark-cli/src/preview_model.rs` (new). Workspace gains `gltf`
+1.4.1, pinned in the root as rule 5 requires. Docs: `docs/PLAN.md` §16.2.
+
+**Proved by looking.** `preview-model` fills the posed triangles on the CPU with a depth buffer,
+from a 50° top-down camera. The Peasant_Girl draws at 5,036 triangles over 69 bones, textured and
+correctly self-occluding, and four ticks of her clip give four different images.
+
+**Decided during the work**
+
+- **`dark_model` is a presentation crate**, out of `SIM_CRATES`, exactly as `dark_spine` is. That
+  is where `gltf` lives and where bone matrices stay. The check still passes.
+- **A CPU preview, not the GPU, proves this phase.** It mirrors `preview-spine`, needs no window,
+  and separates "can we read and pose a model" from "can we draw one fast" — which is 2b.
+- **The orthographic projection uses the DirectX convention**, depth in 0..1, because that is
+  what wgpu wants when this becomes a real pipeline.
+
+**Corrected during the work**
+
+- **The model rendered upside down.** glTF is Y-up by specification; Blender is Z-up and converts
+  on export. `Model::height` was reading Z and the preview camera was climbing Z. Both now go
+  through `Model::UP`, and PLAN §16.2 says it once so nothing guesses again. This is the third
+  time an axis convention has cost time in this line of work.
+- **The character came apart into spikes.** glTF names a bone two different ways: a **vertex**
+  by its place in the skin's joint list, an **animation** by the glTF node it targets. One map
+  was being used for both, so vertices skinned to whichever bone happened to sit at a node's
+  number. `Rigging` now keeps both maps, and the parent-order sort moves both with it.
+- `glam` 0.33 deprecated `Mat4::look_at_rh` and `Mat4::orthographic_rh`. Moved to
+  `glam::camera::rh`, and the render is byte-identical across the change.
+
+**From the review**
+
+It found that three things this phase assumed were wrong **on the very model being used to prove
+it**, which the reframing camera in `preview-model` was hiding. Each was confirmed by reading the
+GLB before it was fixed:
+
+- **The rule-1 guard never covered this crate.** `dark_model` was not in `FORBIDDEN` in
+  `tools/check-sim-deps.sh`, and neither was `gltf`. Absent from `SIM_CRATES` is not the same as
+  guarded — the script would have said *passed* while `gltf` sat in the simulation tree. Both
+  this entry and PLAN §16.2 claimed a coverage that did not exist. Now listed, and proved:
+  adding `dark_model` to `dark_world` makes the check fail.
+- **Everything above a joint was being discarded.** The Peasant_Girl's topmost joint hangs under
+  an `Armature` node carrying a quarter turn and a scale of 0.01 — the whole Z-up to Y-up
+  conversion. A joint whose parent is not a joint now folds that chain into its rest transform.
+  The loaded height and the baked height agree to 1.5% (40.65 px against 41.24 px), and
+  `preview-model` prints both so a dropped transform shows up instead of being reframed away.
+- **The clip was off by a frame and never reached its end.** The GLB's key times run 0.0333 s to
+  2.2 s, because Blender writes an action at its own frame numbers, while playback counts ticks
+  from zero. Loading now shifts a clip to start at zero, which also makes its length the same
+  span `bake-model` measured.
+- **STEP tracks were being blended.** This export carries both LINEAR and STEP. A held track now
+  keeps its key, and a cubic track is refused rather than read as tangents.
+- Attribute accessors shorter than the positions are refused instead of padded; a second skin is
+  warned about; and the rasteriser drops non-finite triangles, which would otherwise poison a
+  depth pixel permanently.
+
+**And it found the tests could not fail.** The sort fixture was a straight reversal, where the
+map and its inverse are the same array, so returning either would pass — on exactly the mapping
+the joint-vs-node bug depends on. The child-bone test used pure translations, which commute, so
+reversing the composition passed. `palette()` — the crate's actual output — had no test at all,
+and every fixture left `inverse_bind` at identity.
+
+All three are now sharpened, plus a new test for STEP, and a script breaks each pinned behaviour
+in turn to prove they fail. **The palette test missed its first sabotage** — written with
+translations only, it fell into the same commuting trap; it now turns the bone. Four sabotages,
+four caught.
+
+**Gates** — all four green. `check-sim-deps.sh` now genuinely covers `dark_model` and `gltf`.
+
+**Still carried** — `dark-cli package` and `Project::fingerprint` do not know about models. Due
+in 2b, when a model first becomes reachable. PLAN §16.2 now restates it so §16.1 is not the only
+place that remembers.
+
+Phase 2b, and 3–7, not started.
