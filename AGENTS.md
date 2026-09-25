@@ -6,6 +6,26 @@ Internal Dark Wagon Studio engine (Rust). Top-down 2D pixel action RPG, Windows 
 
 - **`docs/PLAN.md`** is locked truth for scope, stack, architecture rules and milestones.
   Read it before working in an area it covers. Change it deliberately, in the same change as the code.
+- **`docs/WORLD.md`** is locked truth for the setting: the country, its factions, its rules.
+  **`docs/cast/`** holds the people in it. Read them before writing anything the player will see.
+- **`journals/`** is the decision trail â€” why the above say what they say. See `journals/README.md`.
+
+## Planning workflow
+
+Every line of work runs: plan, materialize, execute.
+
+1. **Plan.** Work the problem in conversation. Plans are not authoritative.
+2. **Materialize.** Write the plan to `journals/<area>/<NN>-<slug>.md` following
+   `journals/README.md`. An entry is a record of intent, not an instruction to act.
+3. **Execute.** Carry the entry out against the code. Append the outcome to its *Execution log*
+   in the same file.
+
+Do not begin execution in the session that wrote the entry unless told to. Silence never
+authorizes it. Trivial changes (typo, comment, import fix, formatting) skip this workflow â€” say
+what you are doing and proceed.
+
+World and story entries are **Decided**: a record, with no execution to follow. When one needs
+engine work, that build gets its own entry in an engine area.
 
 ## Rules
 
