@@ -8,7 +8,7 @@
 
 use dark_assets::Project;
 use dark_model::{Model, Pose};
-use dark_render::{Light, MAX_BONES, ModelDraw, ModelVertex, Renderer};
+use dark_render::{Light, MAX_BONES, ModelDraw, ModelVertex, Renderer, Scene};
 use glam::Mat4;
 
 /// Asks the machine for any adapter and builds a renderer with no window.
@@ -110,10 +110,21 @@ pub fn preview_model_gpu(
             palette: &palette,
             texture: *texture,
             double_sided: *double_sided,
+            layer: dark_render::layer::WORLD,
+            sort_y: 0.0,
         })
         .collect();
 
-    renderer.render_models(camera, Light::default(), Some([0.22, 0.26, 0.24]), &draws);
+    // Through the whole frame, not a pass of its own: this is the path the game will use.
+    renderer.render_scene(Scene {
+        camera: glam::Vec2::ZERO,
+        clear: [0.22, 0.26, 0.24],
+        sprites: &mut [],
+        meshes: &[],
+        models: &draws,
+        model_camera: camera,
+        light: Light::default(),
+    });
     let capture = renderer.capture();
     let image = image::RgbaImage::from_raw(capture.width, capture.height, capture.rgba)
         .ok_or("the captured frame is the wrong size")?;

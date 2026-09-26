@@ -178,7 +178,30 @@ pub(crate) struct Batch {
     pub texture: TextureId,
     pub start: u32,
     pub end: u32,
-    pub triangles: bool,
+    pub kind: BatchKind,
+}
+
+/// What a batch draws. Sprites and mesh triangles share one buffer of [`Instance`]s; a model has
+/// buffers of its own and is drawn indexed, against the depth buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BatchKind {
+    Sprites,
+    Triangles,
+    Model {
+        /// Shifts this model's indices into the shared vertex buffer.
+        base: i32,
+        /// Byte offset of its bone palette.
+        palette: u32,
+        double_sided: bool,
+    },
+}
+
+impl Batch {
+    /// Only the tests ask this now; drawing matches on the kind itself.
+    #[cfg(test)]
+    pub(crate) fn triangles(&self) -> bool {
+        matches!(self.kind, BatchKind::Triangles)
+    }
 }
 
 /// Everything the GPU passes need for one frame: sprites in one instance buffer, meshes in one
@@ -187,6 +210,11 @@ pub(crate) struct Batch {
 pub(crate) struct FrameBatches {
     pub instances: Vec<Instance>,
     pub vertices: Vec<Instance>,
+    /// Skinned models: their own vertex layout, their own indices, and every bone palette of the
+    /// frame end to end. A batch names its stretch of each.
+    pub model_vertices: Vec<crate::ModelVertex>,
+    pub model_indices: Vec<u32>,
+    pub bones: Vec<glam::Mat4>,
     /// Main pass, back to front: the world.
     pub main: Vec<Batch>,
     /// Interface and debug ([`layer::UI`] and up), drawn after silhouettes so none shows through.
@@ -232,6 +260,7 @@ impl Drawn {
 pub(crate) fn build_batches(
     sprites: &mut [Sprite],
     meshes: &[Mesh],
+    models: &[crate::ModelDraw],
     texture_size: impl Fn(TextureId) -> (u32, u32),
 ) -> FrameBatches {
     // Stable: equal keys keep submission order. total_cmp, because a NaN position must not
@@ -252,7 +281,46 @@ pub(crate) fn build_batches(
     // Everything that can hide a character (with its layer), and the characters.
     let mut can_occlude: Vec<(Drawn, i32)> = Vec::new();
     let mut bodies: Vec<Drawn> = Vec::new();
+    let mut model_order: Vec<usize> = (0..models.len()).collect();
+    model_order.sort_by(|&a, &b| {
+        let (a, b) = (&models[a], &models[b]);
+        before(key(a.layer, a.sort_y, 0), key(b.layer, b.sort_y, 0))
+    });
+    let mut next_model = model_order.iter().peekable();
     let mut next_mesh = mesh_order.iter().peekable();
+    let mut draw_models_before = |frame: &mut FrameBatches, until: Option<(i32, f32, i16)>| {
+        while let Some(&&m) = next_model.peek() {
+            let model = &models[m];
+            let due = until.is_none_or(|k| before(key(model.layer, model.sort_y, 0), k).is_lt());
+            if !due {
+                break;
+            }
+            next_model.next();
+            if model.vertices.is_empty() || model.indices.is_empty() {
+                continue;
+            }
+            // Each model's indices keep their own numbering and are shifted by `base`, so the
+            // buffers can be shared without rewriting them.
+            let base = frame.model_vertices.len() as i32;
+            let start = frame.model_indices.len() as u32;
+            frame.model_vertices.extend_from_slice(model.vertices);
+            frame.model_indices.extend_from_slice(model.indices);
+            let palette = (frame.bones.len() / crate::MAX_BONES) as u64;
+            frame
+                .bones
+                .extend(crate::model::padded_palette(model.palette));
+            frame.main.push(Batch {
+                texture: model.texture,
+                start,
+                end: frame.model_indices.len() as u32,
+                kind: BatchKind::Model {
+                    base,
+                    palette: (palette * crate::BONE_STRIDE) as u32,
+                    double_sided: model.double_sided,
+                },
+            });
+        }
+    };
     let mut draw_meshes_before = |frame: &mut FrameBatches,
                                   seq: &mut u32,
                                   bodies: &mut Vec<Drawn>,
@@ -300,12 +368,9 @@ pub(crate) fn build_batches(
         }
     };
     for sprite in sprites.iter() {
-        draw_meshes_before(
-            &mut frame,
-            &mut seq,
-            &mut bodies,
-            Some(key(sprite.layer, sprite.sort_y, sprite.sub)),
-        );
+        let until = Some(key(sprite.layer, sprite.sort_y, sprite.sub));
+        draw_meshes_before(&mut frame, &mut seq, &mut bodies, until);
+        draw_models_before(&mut frame, until);
         let (tw, th) = texture_size(sprite.texture);
         let size = Vec2::new(sprite.src.w as f32, sprite.src.h as f32) * sprite.repeat;
         let lifted = (sprite.position - sprite.pivot - Vec2::new(0.0, sprite.lift)).round();
@@ -361,6 +426,7 @@ pub(crate) fn build_batches(
         }
     }
     draw_meshes_before(&mut frame, &mut seq, &mut bodies, None);
+    draw_models_before(&mut frame, None);
 
     // Occluders: drawn after some character body they overlap, and not interface or debug.
     let occluders: Vec<Drawn> = can_occlude
@@ -416,28 +482,36 @@ pub(crate) fn build_batches(
 
 fn append(batches: &mut Vec<Batch>, texture: TextureId, index: u32) {
     match batches.last_mut() {
-        Some(batch) if !batch.triangles && batch.texture == texture && batch.end == index => {
+        Some(batch)
+            if batch.kind == BatchKind::Sprites
+                && batch.texture == texture
+                && batch.end == index =>
+        {
             batch.end = index + 1
         }
         _ => batches.push(Batch {
             texture,
             start: index,
             end: index + 1,
-            triangles: false,
+            kind: BatchKind::Sprites,
         }),
     }
 }
 
 fn append_triangles(batches: &mut Vec<Batch>, texture: TextureId, start: u32, end: u32) {
     match batches.last_mut() {
-        Some(batch) if batch.triangles && batch.texture == texture && batch.end == start => {
+        Some(batch)
+            if batch.kind == BatchKind::Triangles
+                && batch.texture == texture
+                && batch.end == start =>
+        {
             batch.end = end
         }
         _ => batches.push(Batch {
             texture,
             start,
             end,
-            triangles: true,
+            kind: BatchKind::Triangles,
         }),
     }
 }
@@ -502,7 +576,7 @@ mod tests {
             shadow.sub = -1;
             // Given feet first, the shadow must still be drawn before them.
             let mut both = [feet, shadow];
-            let frame = build_batches(&mut both, &[], |_| (16, 16));
+            let frame = build_batches(&mut both, &[], &[], |_| (16, 16));
             assert_eq!(frame.instances.len(), 2);
             assert_eq!(both[0].sub, -1, "the shadow sorted first at {y} px");
         }
@@ -527,7 +601,7 @@ mod tests {
             sprite(0, 0.0, -100),
             sprite(0, 20.0, 0),
         ];
-        let frame = build_batches(&mut sprites, &[], |_| (16, 16));
+        let frame = build_batches(&mut sprites, &[], &[], |_| (16, 16));
         let ys: Vec<f32> = frame.instances.iter().map(|i| i.pos[1]).collect();
         assert_eq!(ys, vec![0.0, 10.0, 20.0, 50.0]);
         assert_eq!(
@@ -537,13 +611,13 @@ mod tests {
                     texture: TextureId(0),
                     start: 0,
                     end: 3,
-                    triangles: false,
+                    kind: BatchKind::Sprites,
                 },
                 Batch {
                     texture: TextureId(1),
                     start: 3,
                     end: 4,
-                    triangles: false,
+                    kind: BatchKind::Sprites,
                 },
             ]
         );
@@ -559,7 +633,7 @@ mod tests {
             Vec2::new(8.0, 32.0),
         );
         s.flip_x = true;
-        let frame = build_batches(&mut [s], &[], |_| (64, 32));
+        let frame = build_batches(&mut [s], &[], &[], |_| (64, 32));
         let i = frame.instances[0];
         assert_eq!(i.pos, [3.0, -12.0]);
         assert_eq!(i.uv_min, [0.5, 0.0]);
@@ -575,7 +649,7 @@ mod tests {
             Vec2::ZERO,
         );
         s.repeat = Vec2::new(3.0, 2.0);
-        let frame = build_batches(&mut [s], &[], |_| (400, 400));
+        let frame = build_batches(&mut [s], &[], &[], |_| (400, 400));
         assert_eq!(frame.instances[0].size, [240.0, 160.0]);
     }
 
@@ -589,7 +663,7 @@ mod tests {
         );
         hero.kind = SpriteKind::Character;
         hero.lift = 12.0;
-        let frame = build_batches(&mut [hero], &[], |_| (16, 16));
+        let frame = build_batches(&mut [hero], &[], &[], |_| (16, 16));
         assert_eq!(frame.instances.len(), 1);
         assert_eq!(
             (frame.instances[0].mode, frame.instances[0].pos),
@@ -617,7 +691,9 @@ mod tests {
         let far = sprite(3, 90.0, 0); // in front, not overlapping
         let mut debug = sprite(1, 0.0, layer::DEBUG);
         debug.position = Vec2::new(45.0, 40.0);
-        let frame = build_batches(&mut [hero, behind, tree, far, debug], &[], |_| (64, 64));
+        let frame = build_batches(&mut [hero, behind, tree, far, debug], &[], &[], |_| {
+            (64, 64)
+        });
         let occluder_textures: Vec<_> = frame.occluders.iter().map(|b| b.texture).collect();
         assert_eq!(occluder_textures, vec![TextureId(2)]);
         assert_eq!(frame.silhouettes.len(), 1);
@@ -639,7 +715,9 @@ mod tests {
             s.kind = SpriteKind::Character;
             s
         };
-        let frame = build_batches(&mut [character(50.0), character(55.0)], &[], |_| (16, 16));
+        let frame = build_batches(&mut [character(50.0), character(55.0)], &[], &[], |_| {
+            (16, 16)
+        });
         assert!(frame.occluders.is_empty() && frame.silhouettes.is_empty());
     }
 
@@ -692,12 +770,13 @@ mod tests {
         let frame = build_batches(
             &mut [sprite(30.0), sprite(10.0)],
             &[triangle(20.0), triangle(40.0), triangle(20.0)],
+            &[],
             |_| (4, 4),
         );
         let kinds: Vec<(bool, u32, u32)> = frame
             .main
             .iter()
-            .map(|b| (b.triangles, b.start, b.end))
+            .map(|b| (b.triangles(), b.start, b.end))
             .collect();
         // The sprite at 10, both meshes at 20 (one batch), the sprite at 30, the mesh at 40.
         assert_eq!(
@@ -730,12 +809,12 @@ mod tests {
             Vec2::new(0.0, 20.0),
             Vec2::new(0.0, 16.0),
         );
-        let frame = build_batches(&mut [tree], std::slice::from_ref(&body), |_| (16, 16));
+        let frame = build_batches(&mut [tree], std::slice::from_ref(&body), &[], |_| (16, 16));
         assert_eq!(frame.occluders.len(), 1, "the tree hides it");
         assert!(matches!(
             frame.silhouettes[..],
             [Batch {
-                triangles: true,
+                kind: BatchKind::Triangles,
                 ..
             }]
         ));
@@ -755,7 +834,7 @@ mod tests {
             Vec2::new(0.0, 20.0),
             Vec2::new(0.0, 16.0),
         );
-        let frame = build_batches(&mut [tree], &[plain], |_| (16, 16));
+        let frame = build_batches(&mut [tree], &[plain], &[], |_| (16, 16));
         assert!(frame.silhouettes.is_empty() && frame.occluders.is_empty());
     }
 
@@ -764,7 +843,7 @@ mod tests {
         let mut bubble = Sprite::new(TextureId(0), Rect::new(0, 0, 4, 4), Vec2::ZERO, Vec2::ZERO);
         bubble.layer = layer::UI;
         let tree = Sprite::new(TextureId(0), Rect::new(0, 0, 4, 4), Vec2::ZERO, Vec2::ZERO);
-        let frame = build_batches(&mut [bubble, tree], &[], |_| (4, 4));
+        let frame = build_batches(&mut [bubble, tree], &[], &[], |_| (4, 4));
         assert_eq!(frame.main.len(), 1, "the tree");
         assert_eq!(frame.overlay.len(), 1, "the bubble");
     }

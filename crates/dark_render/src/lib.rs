@@ -69,6 +69,19 @@ pub enum RenderError {
 }
 
 /// RGBA8 (sRGB) pixels read back from the internal target.
+/// Everything one frame draws. Sprites and meshes are laid out flat by the 2D camera; models
+/// are placed by `model_camera`, which is world to clip with near at 0.
+pub struct Scene<'a> {
+    /// Where the 2D camera looks, in world pixels.
+    pub camera: Vec2,
+    pub clear: [f64; 3],
+    pub sprites: &'a mut [Sprite],
+    pub meshes: &'a [Mesh],
+    pub models: &'a [ModelDraw<'a>],
+    pub model_camera: glam::Mat4,
+    pub light: Light,
+}
+
 pub struct Capture {
     pub width: u32,
     pub height: u32,
@@ -407,13 +420,24 @@ impl Renderer {
         ];
         // The three sprite passes share the vertex stage and differ in fragment entry and target;
         // meshes use the same attributes per vertex instead of per instance.
+        // A pipeline must agree with its pass about depth. The main pass carries one for the
+        // models; everything drawn there has to declare it, and the sprites declare it in the
+        // only way that leaves them alone — never write, never fail.
+        let ignores_depth = wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        };
         let pipeline = |label: &str,
                         vertex_entry: &str,
                         step_mode: wgpu::VertexStepMode,
                         entry: &str,
                         layouts: &[Option<&wgpu::BindGroupLayout>],
                         format: wgpu::TextureFormat,
-                        blend: wgpu::BlendState| {
+                        blend: wgpu::BlendState,
+                        depth: bool| {
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(label),
                 bind_group_layouts: layouts,
@@ -433,7 +457,7 @@ impl Renderer {
                     })],
                 },
                 primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
+                depth_stencil: depth.then(|| ignores_depth.clone()),
                 multisample: wgpu::MultisampleState::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &sprite_shader,
@@ -453,7 +477,8 @@ impl Renderer {
                                entry: &str,
                                layouts: &[Option<&wgpu::BindGroupLayout>],
                                format: wgpu::TextureFormat,
-                               blend: wgpu::BlendState| {
+                               blend: wgpu::BlendState,
+                               depth: bool| {
             pipeline(
                 label,
                 "vs_sprite",
@@ -462,6 +487,7 @@ impl Renderer {
                 layouts,
                 format,
                 blend,
+                depth,
             )
         };
         let base_layouts = [Some(&globals_layout), Some(&texture_layout)];
@@ -476,6 +502,7 @@ impl Renderer {
             &base_layouts,
             TARGET_FORMAT,
             wgpu::BlendState::ALPHA_BLENDING,
+            true,
         );
         let mesh_pipeline = pipeline(
             "mesh",
@@ -485,6 +512,7 @@ impl Renderer {
             &base_layouts,
             TARGET_FORMAT,
             wgpu::BlendState::ALPHA_BLENDING,
+            true,
         );
         let models = build_models(&device, internal_size, &texture_layout);
         let silhouettes = mask_supported.then(|| {
@@ -507,6 +535,7 @@ impl Renderer {
                         color: max,
                         alpha: max,
                     },
+                    false,
                 ),
                 silhouette_pipeline: sprite_pipeline(
                     "silhouette",
@@ -518,6 +547,7 @@ impl Renderer {
                     ],
                     TARGET_FORMAT,
                     wgpu::BlendState::ALPHA_BLENDING,
+                    false,
                 ),
                 silhouette_mesh_pipeline: pipeline(
                     "mesh silhouette",
@@ -531,6 +561,7 @@ impl Renderer {
                     ],
                     TARGET_FORMAT,
                     wgpu::BlendState::ALPHA_BLENDING,
+                    false,
                 ),
                 mask_view,
                 mask_bind_group,
@@ -600,17 +631,9 @@ impl Renderer {
         }
     }
 
-    /// Draws posed models against a depth buffer, in a pass of their own.
-    ///
-    /// `camera` is world to clip, with near at 0 as wgpu wants. `clear` gives the target a
-    /// colour first. The depth buffer is always cleared, because it belongs to this pass alone.
-    ///
-    /// **Offscreen only, for now.** This writes to the internal target in a submit of its own,
-    /// and the sprite pass clears that target unconditionally while `render` presents inside its
-    /// own submit — so in a windowed frame a model is either wiped by the next `render` or drawn
-    /// after the frame that showed it. Reaching the screen means drawing models inside
-    /// `render_with`, before the blit, which is phase 4's work along with sorting them against
-    /// the sprites (docs/PLAN.md §16.3). Today the only caller captures the target directly.
+    /// Draws models alone, clearing first: previews and tests, where there is no world around
+    /// them. It is [`Renderer::render_scene`] with nothing else in the frame, so the models take
+    /// the same path they take in the game.
     pub fn render_models(
         &mut self,
         camera: glam::Mat4,
@@ -618,146 +641,15 @@ impl Renderer {
         clear: Option<[f64; 3]>,
         draws: &[ModelDraw],
     ) {
-        if draws.is_empty() && clear.is_none() {
-            return;
-        }
-        // Everything for the frame goes into one buffer each, and a draw names its own stretch.
-        let mut vertices: Vec<ModelVertex> = Vec::new();
-        let mut indices: Vec<u32> = Vec::new();
-        let mut bones: Vec<glam::Mat4> = Vec::new();
-        let mut spans: Vec<(std::ops::Range<u32>, i32, TextureId, u32, bool)> = Vec::new();
-        for draw in draws {
-            if draw.indices.is_empty() || draw.vertices.is_empty() {
-                continue;
-            }
-            let base = vertices.len() as i32;
-            let first = indices.len() as u32;
-            vertices.extend_from_slice(draw.vertices);
-            indices.extend_from_slice(draw.indices);
-            let palette = bones.len() / model::MAX_BONES;
-            if draw.palette.len() > model::MAX_BONES {
-                tracing::warn!(
-                    "a model has {} bones; the palette holds {}, and the rest will not move",
-                    draw.palette.len(),
-                    model::MAX_BONES
-                );
-            }
-            bones.extend(model::padded_palette(draw.palette));
-            spans.push((
-                first..indices.len() as u32,
-                base,
-                draw.texture,
-                (palette as u64 * BONE_STRIDE) as u32,
-                draw.double_sided,
-            ));
-        }
-
-        let grow = |buffer: &mut wgpu::Buffer,
-                    capacity: &mut usize,
-                    want: usize,
-                    usage: wgpu::BufferUsages,
-                    device: &wgpu::Device| {
-            if want > *capacity {
-                *capacity = want.next_power_of_two();
-                *buffer = create_model_buffer(device, *capacity, usage);
-            }
-        };
-        grow(
-            &mut self.models.vertices,
-            &mut self.models.vertex_capacity,
-            vertices.len(),
-            wgpu::BufferUsages::VERTEX,
-            &self.device,
-        );
-        grow(
-            &mut self.models.indices,
-            &mut self.models.index_capacity,
-            indices.len(),
-            wgpu::BufferUsages::INDEX,
-            &self.device,
-        );
-        let palettes = bones.len() / model::MAX_BONES;
-        if palettes > self.models.bone_capacity {
-            self.models.bone_capacity = palettes.next_power_of_two();
-            self.models.bones = create_bone_buffer(&self.device, self.models.bone_capacity);
-            self.models.bones_bind_group =
-                bone_bind_group(&self.device, &self.models.bones_layout, &self.models.bones);
-        }
-        if !vertices.is_empty() {
-            self.queue
-                .write_buffer(&self.models.vertices, 0, bytemuck::cast_slice(&vertices));
-            self.queue
-                .write_buffer(&self.models.indices, 0, bytemuck::cast_slice(&indices));
-            let bones: Vec<[[f32; 4]; 4]> =
-                bones.iter().map(glam::Mat4::to_cols_array_2d).collect();
-            self.queue
-                .write_buffer(&self.models.bones, 0, bytemuck::cast_slice(&bones));
-        }
-        self.queue.write_buffer(
-            &self.models.camera,
-            0,
-            bytemuck::bytes_of(&model::ModelCamera::new(camera, light)),
-        );
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("models"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("models"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.target_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: match clear {
-                            Some([r, g, b]) => wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a: 1.0 }),
-                            None => wgpu::LoadOp::Load,
-                        },
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.models.depth,
-                    depth_ops: Some(wgpu::Operations {
-                        // Far, so the first thing drawn at a pixel wins it.
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_bind_group(0, &self.models.camera_bind_group, &[]);
-            pass.set_index_buffer(self.models.indices.slice(..), wgpu::IndexFormat::Uint32);
-            pass.set_vertex_buffer(0, self.models.vertices.slice(..));
-            let mut both = None;
-            for (range, base, texture, offset, double_sided) in &spans {
-                let Some(gpu) = self.textures.get(texture.0 as usize) else {
-                    tracing::warn!(
-                        "a model draw names texture {}, which is not there",
-                        texture.0
-                    );
-                    continue;
-                };
-                if both != Some(*double_sided) {
-                    pass.set_pipeline(if *double_sided {
-                        &self.models.both_sides
-                    } else {
-                        &self.models.pipeline
-                    });
-                    both = Some(*double_sided);
-                }
-                pass.set_bind_group(1, &gpu.bind_group, &[]);
-                pass.set_bind_group(2, &self.models.bones_bind_group, &[*offset]);
-                pass.draw_indexed(range.clone(), *base, 0..1);
-            }
-        }
-        self.queue.submit([encoder.finish()]);
+        self.render_scene(Scene {
+            camera: Vec2::ZERO,
+            clear: clear.unwrap_or([0.0; 3]),
+            sprites: &mut [],
+            meshes: &[],
+            models: draws,
+            model_camera: camera,
+            light,
+        });
     }
 
     pub fn internal_size(&self) -> (u32, u32) {
@@ -922,9 +814,35 @@ impl Renderer {
         sprites: &mut [Sprite],
         meshes: &[Mesh],
     ) {
+        self.render_scene(Scene {
+            camera,
+            clear,
+            sprites,
+            meshes,
+            models: &[],
+            model_camera: glam::Mat4::IDENTITY,
+            light: Light::default(),
+        });
+    }
+
+    /// Draws one frame: sprites, posed 2D skeletons and skinned models, in one sorted order.
+    ///
+    /// The world is still sorted back to front by layer and by feet — a model takes its place in
+    /// that order like anything else. What a model gets on top of that is a **depth buffer**, so
+    /// that its own surfaces sort against each other; sprites neither read nor write it.
+    pub fn render_scene(&mut self, scene: Scene<'_>) {
+        let Scene {
+            camera,
+            clear,
+            sprites,
+            meshes,
+            models,
+            model_camera,
+            light,
+        } = scene;
         let textures = &self.textures;
         let frame_batches =
-            sprite::build_batches(sprites, meshes, |id| textures[id.0 as usize].size);
+            sprite::build_batches(sprites, meshes, models, |id| textures[id.0 as usize].size);
         let instances = &frame_batches.instances;
         if instances.len() > self.instance_capacity {
             self.instance_capacity = instances.len().next_power_of_two();
@@ -943,6 +861,54 @@ impl Renderer {
             self.queue
                 .write_buffer(&self.mesh_vertices, 0, bytemuck::cast_slice(vertices));
         }
+        // The models' own buffers, and the frame's bone palettes end to end.
+        let model_vertices = &frame_batches.model_vertices;
+        if model_vertices.len() > self.models.vertex_capacity {
+            self.models.vertex_capacity = model_vertices.len().next_power_of_two();
+            self.models.vertices = create_model_buffer(
+                &self.device,
+                self.models.vertex_capacity,
+                wgpu::BufferUsages::VERTEX,
+            );
+        }
+        let model_indices = &frame_batches.model_indices;
+        if model_indices.len() > self.models.index_capacity {
+            self.models.index_capacity = model_indices.len().next_power_of_two();
+            self.models.indices = create_model_buffer(
+                &self.device,
+                self.models.index_capacity,
+                wgpu::BufferUsages::INDEX,
+            );
+        }
+        let palettes = frame_batches.bones.len() / model::MAX_BONES;
+        if palettes > self.models.bone_capacity {
+            self.models.bone_capacity = palettes.next_power_of_two();
+            self.models.bones = create_bone_buffer(&self.device, self.models.bone_capacity);
+            self.models.bones_bind_group =
+                bone_bind_group(&self.device, &self.models.bones_layout, &self.models.bones);
+        }
+        if !model_vertices.is_empty() {
+            self.queue.write_buffer(
+                &self.models.vertices,
+                0,
+                bytemuck::cast_slice(model_vertices),
+            );
+            self.queue
+                .write_buffer(&self.models.indices, 0, bytemuck::cast_slice(model_indices));
+            let bones: Vec<[[f32; 4]; 4]> = frame_batches
+                .bones
+                .iter()
+                .map(glam::Mat4::to_cols_array_2d)
+                .collect();
+            self.queue
+                .write_buffer(&self.models.bones, 0, bytemuck::cast_slice(&bones));
+            self.queue.write_buffer(
+                &self.models.camera,
+                0,
+                bytemuck::bytes_of(&model::ModelCamera::new(model_camera, light)),
+            );
+        }
+
         let internal = Vec2::new(self.internal_size.0 as f32, self.internal_size.1 as f32);
         let globals = Globals {
             origin: (camera - internal / 2.0).round().to_array(),
@@ -969,6 +935,16 @@ impl Renderer {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
+                // Only the models read or write this; the sprite pipelines are built to ignore
+                // it, so the flat world keeps the painter's order it has always had.
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.models.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 ..Default::default()
             });
             self.draw_mixed(
@@ -1033,6 +1009,16 @@ impl Renderer {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
+                // It draws with the main pass's pipelines, so it must offer what they declare.
+                // Nothing here reads or writes it.
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.models.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
                 ..Default::default()
             });
             self.draw_mixed(
@@ -1232,24 +1218,54 @@ impl Renderer {
         quads: &wgpu::RenderPipeline,
         triangles: &wgpu::RenderPipeline,
     ) {
-        pass.set_bind_group(0, &self.globals_bind_group, &[]);
-        let mut meshes = None;
+        // What the pass is set up for at the moment. A model uses a different pipeline layout
+        // and a different camera, so switching to or from one rebinds group 0.
+        let mut set = None;
         for batch in batches {
-            if meshes != Some(batch.triangles) {
-                meshes = Some(batch.triangles);
-                if batch.triangles {
-                    pass.set_pipeline(triangles);
-                    pass.set_vertex_buffer(0, self.mesh_vertices.slice(..));
-                } else {
-                    pass.set_pipeline(quads);
-                    pass.set_vertex_buffer(0, self.instances.slice(..));
+            let kind = batch.kind;
+            if set != Some(kind_of(kind)) {
+                set = Some(kind_of(kind));
+                match kind {
+                    sprite::BatchKind::Sprites => {
+                        pass.set_pipeline(quads);
+                        pass.set_bind_group(0, &self.globals_bind_group, &[]);
+                        pass.set_vertex_buffer(0, self.instances.slice(..));
+                    }
+                    sprite::BatchKind::Triangles => {
+                        pass.set_pipeline(triangles);
+                        pass.set_bind_group(0, &self.globals_bind_group, &[]);
+                        pass.set_vertex_buffer(0, self.mesh_vertices.slice(..));
+                    }
+                    sprite::BatchKind::Model { double_sided, .. } => {
+                        pass.set_pipeline(if double_sided {
+                            &self.models.both_sides
+                        } else {
+                            &self.models.pipeline
+                        });
+                        pass.set_bind_group(0, &self.models.camera_bind_group, &[]);
+                        pass.set_vertex_buffer(0, self.models.vertices.slice(..));
+                        pass.set_index_buffer(
+                            self.models.indices.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                    }
                 }
             }
-            pass.set_bind_group(1, &self.textures[batch.texture.0 as usize].bind_group, &[]);
-            if batch.triangles {
-                pass.draw(batch.start..batch.end, 0..1);
-            } else {
-                pass.draw(0..6, batch.start..batch.end);
+            let Some(gpu) = self.textures.get(batch.texture.0 as usize) else {
+                tracing::warn!(
+                    "a batch names texture {}, which is not there",
+                    batch.texture.0
+                );
+                continue;
+            };
+            pass.set_bind_group(1, &gpu.bind_group, &[]);
+            match kind {
+                sprite::BatchKind::Sprites => pass.draw(0..6, batch.start..batch.end),
+                sprite::BatchKind::Triangles => pass.draw(batch.start..batch.end, 0..1),
+                sprite::BatchKind::Model { base, palette, .. } => {
+                    pass.set_bind_group(2, &self.models.bones_bind_group, &[palette]);
+                    pass.draw_indexed(batch.start..batch.end, base, 0..1);
+                }
             }
         }
     }
@@ -1284,6 +1300,16 @@ fn create_mask(device: &wgpu::Device, (width, height): (u32, u32)) -> wgpu::Text
 }
 
 /// The depth buffer the mesh pass tests against, at the target's size.
+/// What the pass has to be set up for. Two batches of the same kind run on without rebinding;
+/// models of different sidedness do not, because they are different pipelines.
+fn kind_of(kind: sprite::BatchKind) -> (u8, bool) {
+    match kind {
+        sprite::BatchKind::Sprites => (0, false),
+        sprite::BatchKind::Triangles => (1, false),
+        sprite::BatchKind::Model { double_sided, .. } => (2, double_sided),
+    }
+}
+
 fn create_depth(device: &wgpu::Device, size: (u32, u32)) -> wgpu::TextureView {
     device
         .create_texture(&wgpu::TextureDescriptor {

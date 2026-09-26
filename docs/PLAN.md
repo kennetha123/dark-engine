@@ -777,13 +777,9 @@ and where bone matrices stay.
   Shading still differs a little between the two: the CPU preview lights each face flat where the
   shader interpolates the vertex normals, and it multiplies in gamma where the shader multiplies
   in linear.
-- **Offscreen only, for now.** The pass writes to the internal target in a submit of its own,
-  while the sprite pass clears that target unconditionally and `render` presents inside its own
-  submit. So in a windowed frame a model is either wiped by the next `render` or drawn after the
-  frame that showed it. Getting one on screen means drawing models inside `render_with`, before
-  the blit — phase 4's work, along with sorting them against the sprites.
-- Known gaps: models and sprites are not sorted against each other, and a model cannot yet reach
-  a window at all; no toon ramp or outline (phase 3); one light; no shadows; skinned normals use
+- This began as a pass of its own, which could only ever reach an offscreen capture. It is now
+  drawn inside the main pass — see §16.4.
+- Known gaps: no toon ramp or outline (phase 3); one light; no shadows; skinned normals use
   the bone matrix rather than its inverse transpose, which is right while bones only turn and
   move but not if one is scaled; every `Renderer` builds the mesh pass whether it draws models or
   not; a part with no texture of its own is given a plain one by the caller rather than by the
@@ -793,6 +789,36 @@ and where bone matrices stay.
   recovery. §16.2 named phase 2b as the deadline on the grounds that a model would become
   reachable by then. It has not — nothing in `dark-player` draws one yet — so both move to
   **phase 4**, which is when a model first reaches the game.
+
+
+## 16.4 Models in the frame (M9, phase 4a: one sorted order)
+
+A model is drawn in the **main pass**, in the same back-to-front order as everything else, so a
+prop standing in front of a character covers them and one standing behind does not.
+
+- `Renderer::render_scene(Scene)` draws a frame: sprites, posed 2D skeletons and skinned models
+  together. `render_with` and `render_models` are thin calls on it, so there is one path.
+- **A `ModelDraw` carries a `layer` and a `sort_y`**, exactly as a `Mesh` does, and
+  `build_batches` interleaves models into the sorted stream the same way it already interleaves
+  skeletons.
+- **A batch now has a kind** — sprites, triangles, or a model. A model batch names its stretch of
+  the frame's model index buffer, the `base` that shifts its indices into the shared vertex
+  buffer, and the byte offset of its bone palette. `draw_mixed` rebinds the pipeline, the camera
+  and the buffers when the kind changes; two models of different sidedness break the run, because
+  they are different pipelines.
+- **The main pass carries the depth buffer**, and only models read or write it. Every sprite
+  pipeline drawn there declares it in the one way that leaves them alone — never write, never
+  fail — so the flat world keeps the painter's order it has always had, while a model's own
+  surfaces still sort against each other. The interface pass shares the same buffer because it
+  shares those pipelines; the mask and silhouette passes have their own and carry none.
+- The camera is two things at once: `camera` places sprites flat as before, and `model_camera`
+  is world to clip for the meshes. A game camera that agrees with both is §16.5.
+- Known gaps: **a model is not part of the silhouette system** — a character behind a prop shows
+  through as a silhouette only if they are drawn as sprites or Spine meshes, and a model behind a
+  tree is simply hidden; a model at `layer::UI` or above would be sorted into the interface pass,
+  which has no model pipeline bound, and is silently dropped; nothing in `dark-player` submits a
+  model yet, so this is still only exercised by `preview-model --gpu` and the renderer's own GPU
+  tests.
 
 ## 17. Save, storylets and endings (as built in M7)
 

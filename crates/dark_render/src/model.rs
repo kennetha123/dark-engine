@@ -42,6 +42,10 @@ pub struct ModelDraw<'a> {
     /// Drawn from both faces. A closed body wants its inside culled; a hair card or a skirt
     /// modelled as one layer would lose half its triangles to that.
     pub double_sided: bool,
+    /// Where it falls among the sprites, exactly as a [`crate::Mesh`] does: the world is still
+    /// sorted back to front by layer and by feet, and a model takes its place in that order.
+    pub layer: i32,
+    pub sort_y: f32,
 }
 
 /// Where the light comes from and how dark it leaves the far side.
@@ -209,10 +213,101 @@ mod gpu_tests {
         }
     }
 
+    /// A model draw at the world layer, where a character stands.
+    fn model<'a>(
+        vertices: &'a [ModelVertex],
+        indices: &'a [u32],
+        palette: &'a [Mat4],
+        texture: crate::TextureId,
+        double_sided: bool,
+    ) -> ModelDraw<'a> {
+        ModelDraw {
+            vertices,
+            indices,
+            palette,
+            texture,
+            double_sided,
+            layer: crate::layer::WORLD,
+            sort_y: 0.0,
+        }
+    }
+
     fn middle(capture: &crate::Capture) -> [u8; 3] {
         let (x, y) = (capture.width / 2, capture.height / 2);
         let at = ((y * capture.width + x) * 4) as usize;
         [capture.rgba[at], capture.rgba[at + 1], capture.rgba[at + 2]]
+    }
+
+    /// The point of drawing models in the main pass rather than one of their own: a model takes
+    /// its place in the world's back-to-front order, so a prop standing in front of a character
+    /// covers them and one standing behind does not.
+    #[test]
+    fn a_model_sorts_among_the_sprites_by_where_its_feet_are() {
+        let Some(mut renderer) = renderer() else {
+            eprintln!("no GPU; skipping");
+            return;
+        };
+        let red = renderer
+            .create_texture("red", 1, 1, &[255, 0, 0, 255])
+            .expect("a texture");
+        let blue = renderer
+            .create_texture("blue", 1, 1, &[0, 0, 255, 255])
+            .expect("a texture");
+        let palette = [Mat4::IDENTITY];
+        let (vertices, indices) = quad(0.5);
+
+        // A sprite over the whole view. The camera sits at the origin and the target is 64 by
+        // 64, so the world's top-left corner is at (-32, -32).
+        let sheet = |sort_y: f32| {
+            let mut sprite = crate::Sprite::new(
+                blue,
+                dark_sprite::Rect::new(0, 0, 1, 1),
+                glam::Vec2::new(-32.0, -32.0),
+                glam::Vec2::ZERO,
+            );
+            sprite.repeat = glam::Vec2::new(SIZE.0 as f32, SIZE.1 as f32);
+            sprite.layer = crate::layer::WORLD;
+            sprite.sort_y = sort_y;
+            sprite
+        };
+
+        // The model's feet are at 50; the sprite is further down the screen, so it is drawn
+        // after and covers it.
+        let mut in_front = [sheet(90.0)];
+        renderer.render_scene(crate::Scene {
+            camera: glam::Vec2::ZERO,
+            clear: [0.0, 0.0, 0.0],
+            sprites: &mut in_front,
+            meshes: &[],
+            models: &[ModelDraw {
+                sort_y: 50.0,
+                ..model(&vertices, &indices, &palette, red, true)
+            }],
+            model_camera: Mat4::IDENTITY,
+            light: flat(),
+        });
+        let [r, _, b] = middle(&renderer.capture());
+        assert!(
+            b > 200 && r < 60,
+            "a sprite in front covers it: got {r},{b}"
+        );
+
+        // And the same sprite higher up the screen is drawn first, so the model covers it.
+        let mut behind = [sheet(10.0)];
+        renderer.render_scene(crate::Scene {
+            camera: glam::Vec2::ZERO,
+            clear: [0.0, 0.0, 0.0],
+            sprites: &mut behind,
+            meshes: &[],
+            models: &[ModelDraw {
+                sort_y: 50.0,
+                ..model(&vertices, &indices, &palette, red, true)
+            }],
+            model_camera: Mat4::IDENTITY,
+            light: flat(),
+        });
+        let [r, _, b] = middle(&renderer.capture());
+        assert!(r > 200 && b < 60, "a sprite behind does not: got {r},{b}");
     }
 
     /// The cull-back pipeline is what every closed character is drawn with, and until this test
@@ -247,6 +342,8 @@ mod gpu_tests {
                     palette: &palette,
                     texture: white,
                     double_sided,
+                    layer: crate::layer::WORLD,
+                    sort_y: 0.0,
                 }],
             );
             middle(&renderer.capture())[0] > 200
@@ -285,6 +382,8 @@ mod gpu_tests {
             palette: &palette,
             texture: t,
             double_sided: true,
+            layer: crate::layer::WORLD,
+            sort_y: 0.0,
         };
 
         // Far first, then near.
@@ -338,6 +437,8 @@ mod gpu_tests {
                 palette: &at_rest,
                 texture: white,
                 double_sided: true,
+                layer: crate::layer::WORLD,
+                sort_y: 0.0,
             }],
         );
         let [r, ..] = middle(&renderer.capture());
@@ -355,6 +456,8 @@ mod gpu_tests {
                 palette: &moved,
                 texture: white,
                 double_sided: true,
+                layer: crate::layer::WORLD,
+                sort_y: 0.0,
             }],
         );
         let [r, ..] = middle(&renderer.capture());
@@ -391,6 +494,8 @@ mod gpu_tests {
                     palette: &away,
                     texture: white,
                     double_sided: true,
+                    layer: crate::layer::WORLD,
+                    sort_y: 0.0,
                 },
                 ModelDraw {
                     vertices: &here_v,
@@ -398,6 +503,8 @@ mod gpu_tests {
                     palette: &here,
                     texture: white,
                     double_sided: true,
+                    layer: crate::layer::WORLD,
+                    sort_y: 0.0,
                 },
             ],
         );

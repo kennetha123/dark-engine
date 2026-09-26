@@ -411,4 +411,42 @@ named 2b as the deadline because a model would be reachable by then; it is not, 
 phase 4 and §16.3 says so rather than letting PLAN forget. Skinned normals still use the bone
 matrix rather than its inverse transpose, which is right while bones only turn and move.
 
-Phases 3–7 not started.
+### Phase 4a — models in the frame, done 2026-09-26
+
+Phase 3 (toon shading) is **skipped for now**, at the user's direction. Nothing depends on it:
+the entry has 3 and 4 both depending on 2, not on each other.
+
+Phase 4 splits. This is the half that puts a model into the frame the game draws, in one sorted
+order with the sprites. The game camera and wiring `dark-player` are 4b.
+
+`crates/dark_render/src/sprite.rs`: `BatchKind`, and `build_batches` interleaves models the way
+it already interleaves Spine meshes. `crates/dark_render/src/lib.rs`: `Scene`, `render_scene`,
+the depth attachment on the main pass, `draw_mixed` learning the model batch.
+`apps/dark-cli/src/gpu_model.rs` uses the new path. Docs: `docs/PLAN.md` §16.4, and §16.3
+corrected where it said offscreen-only.
+
+**Decided during the work**
+
+- **One order, not two passes.** A model takes its place among the sprites by layer and feet,
+  like everything else. Drawing models in a pass of their own would have put every character in
+  front of every prop.
+- **The depth buffer lives on the main pass and only models touch it.** Every sprite pipeline
+  drawn there declares it as never-write, never-fail, so the flat world is untouched while a
+  model's own surfaces still sort. Verified by the autopilot screenshot, which is unchanged.
+- **`render_scene` is the one implementation.** `render_with` and `render_models` are thin calls
+  on it, so the GPU tests exercise the path the game will use rather than a preview-only one.
+- **A `Scene` struct rather than seven arguments**, which also leaves room for 4b's camera.
+
+**Proved**
+
+- A new GPU test puts a model between two sprites: a sprite lower down the screen covers it, the
+  same sprite higher up does not.
+- The autopilot screenshot of the meadow is unchanged — the depth attachment disturbs nothing.
+- `preview-model --gpu` is byte-identical to before the move, now going through the main pass.
+- Nine sabotages against the GPU tests, all caught.
+
+**Known and recorded, not fixed** — a model is not part of the silhouette system, so a character
+drawn as a model behind a tree is simply hidden rather than showing through; and a model sorted
+into the interface pass would be dropped silently. Both are in §16.4.
+
+Phase 4b (the game camera, and `dark-player` submitting a model), and 3 and 5–7, not started.
