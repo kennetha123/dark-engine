@@ -181,9 +181,14 @@ pub fn preview_model(
         "{out}: {clip} at tick {tick}, {drawn} triangles, {} bones ({w}x{h})",
         model.skeleton.bones.len()
     );
+    // How tall it actually poses, against what baking measured in Blender. These are the same
+    // model through different tools; a disagreement means a skinning transform is wrong, and it
+    // is the only thing that can tell, because this preview frames on the model's own bounds and
+    // draws one a hundred times too large pixel for pixel the same.
+    let (lo, hi) = bounds(&model, &pose);
+    let posed = (hi - lo).dot(dark_model::Model::UP) * model.scale;
     println!(
-        "  height: {:.2} px loaded, {:.2} px baked",
-        model.height(),
+        "  stands {posed:.1} px posed, baked at {:.1} px",
         loaded.bake.height
     );
     Ok(())

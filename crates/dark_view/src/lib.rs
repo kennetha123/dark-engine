@@ -14,7 +14,7 @@ use dark_physics::{Cell, Shape};
 use dark_render::{Outline, Sprite, TextureId, layer};
 use dark_sprite::Rect;
 use dark_world::Map;
-use glam::Vec2;
+use glam::{Mat4, Vec2, Vec3, Vec4};
 
 /// How wide and tall a piece of a map is, in pixels. Small enough that little outside the screen
 /// is copied with the pieces that meet it; large enough that a map is not mostly bookkeeping.
@@ -376,7 +376,7 @@ impl MapView {
                 white,
                 top: frame_rect(def.terrain.top_frame.unwrap_or(def.ground.frame)),
                 face: frame_rect(def.terrain.face_frame.unwrap_or(def.ground.frame)),
-                water: def.land.map(|_| [0.10, 0.22, 0.42, 1.0]),
+                water: def.land.as_ref().map(|_| [0.10, 0.22, 0.42, 1.0]),
                 jump_apex,
                 props: Vec::new(),
                 colliders: Vec::new(),
@@ -397,6 +397,46 @@ impl MapView {
             let mut sprite = Sprite::new(ground_tex, rect, Vec2::ZERO, Vec2::ZERO);
             sprite.repeat = size / Vec2::new(rect.w as f32, rect.h as f32);
             sprite.layer = layer::GROUND;
+            view.lay_wide(0, sprite, false);
+        }
+        // Floors laid over it, flat, on the surface under their middle: the ground, or the top of
+        // a rise a town was levelled onto, which is drawn lifted by its height in a layer of its
+        // own — so the floor is too, after every top in that layer. Floors are meant for ground a
+        // place has levelled; one spanning several levels is drawn at its middle's. They draw in
+        // the order they are written, so a pier laid after the water is on the water.
+        let tile = terrain.tile();
+        for (nth, floor) in def.floors.iter().enumerate() {
+            let Some(rect) = frame_rect(floor.frame) else {
+                tracing::warn!(
+                    "{}: a floor names frame {} of the ground sheet, which has no such frame",
+                    map.name,
+                    floor.frame
+                );
+                continue;
+            };
+            let (col, row, w, h) = floor.tiles;
+            let middle = (
+                i64::from(col) + i64::from(w / 2),
+                i64::from(row) + i64::from(h / 2),
+            );
+            let level = terrain
+                .cell(middle.0, middle.1)
+                .and_then(Cell::level)
+                .unwrap_or(0);
+            let at = Vec2::new(col as f32, row as f32) * tile
+                - Vec2::new(0.0, f32::from(level) * terrain.level_height());
+            let area = Vec2::new(w as f32, h as f32) * tile;
+            let mut sprite = Sprite::new(ground_tex, rect, at, Vec2::ZERO);
+            sprite.repeat = area / Vec2::new(rect.w as f32, rect.h as f32);
+            if level == 0 {
+                sprite.layer = layer::GROUND;
+                sprite.sort_y = 0.0;
+            } else {
+                sprite.layer = layer::TERRAIN + i32::from(level.min(40));
+                // After every top in the layer, which sort by the rows they stand on.
+                sprite.sort_y = size.y + tile;
+            }
+            sprite.sub = 1 + i16::try_from(nth).unwrap_or(i16::MAX - 1);
             view.lay_wide(0, sprite, false);
         }
 
@@ -1251,5 +1291,171 @@ mod tests {
             1,
             "the one just off the top-left corner"
         );
+    }
+}
+
+/// Where a model stands in the world it is drawn in: `X` runs east, `Y` stands up out of the
+/// ground, and `Z` runs south. The ground plane `XZ` is the map's own, pixel for pixel.
+///
+/// glTF is Y-up, so a model loads into this frame already (`dark_model::Model::UP`).
+pub fn stand_at(feet: Vec2, elevation: f32, scale: f32) -> Mat4 {
+    Mat4::from_translation(Vec3::new(feet.x, elevation, feet.y))
+        * Mat4::from_scale(Vec3::splat(scale))
+}
+
+/// The camera a model is drawn through, agreeing pixel for pixel with the flat one the sprites
+/// use.
+///
+/// **It is not a tilted camera.** Turn a camera down to fifty degrees and a step north moves you
+/// `sin 50°` of a pixel up the screen, while the sprite world moves a whole one; the ground would
+/// disagree with itself. What a top-down game actually looks through is an **oblique**
+/// projection: the ground is one to one with world pixels, and height shears straight up the
+/// screen. That is the projection the art already assumes — a character's feet are at their
+/// world place and the sprite rises from there — so a model and a sprite of the same person
+/// stand in the same spot.
+///
+/// A step north and a rise of the same size therefore move a point the same way, which is what
+/// lets height read as height.
+///
+/// `camera` and `internal` are what [`dark_render::Renderer::render_scene`] is given, and the
+/// origin is rounded exactly as it rounds it, or models would sit half a pixel off the ground.
+pub fn model_camera(camera: Vec2, internal: (u32, u32)) -> Mat4 {
+    let size = Vec2::new(internal.0.max(1) as f32, internal.1.max(1) as f32);
+    let origin = (camera - size / 2.0).round();
+
+    // Depth: what is further south, and what is higher, is nearer the viewer. Measured from the
+    // middle of the screen rather than from the world's corner, so a map kilometres across keeps
+    // its precision where the player is.
+    let middle = origin.y + size.y / 2.0;
+    // How far either way the depth buffer reaches. It cannot scale with the view alone: a tall
+    // thing near the edge of a small viewport is further out in depth than that viewport is
+    // wide. Half of this is the budget, and it buys two screens of ground plus four thousand
+    // pixels of height in each direction — far more than a frame can hold, and a 32-bit depth
+    // buffer still resolves a thousandth of a pixel across it.
+    let span = size.y * 4.0 + 8192.0;
+
+    Mat4::from_cols(
+        // X: east, one world pixel to one screen pixel.
+        Vec4::new(2.0 / size.x, 0.0, 0.0, 0.0),
+        // Y: up the screen, and nearer.
+        Vec4::new(0.0, 2.0 / size.y, -1.0 / span, 0.0),
+        // Z: south is down the screen, and nearer.
+        Vec4::new(0.0, -2.0 / size.y, -1.0 / span, 0.0),
+        Vec4::new(
+            -2.0 * origin.x / size.x - 1.0,
+            1.0 + 2.0 * origin.y / size.y,
+            0.5 + middle / span,
+            1.0,
+        ),
+    )
+}
+
+#[cfg(test)]
+mod camera_tests {
+    use super::*;
+
+    const SIZE: (u32, u32) = (640, 360);
+
+    /// Where a point lands on the screen, in pixels from the top-left.
+    fn on_screen(camera: Vec2, at: Vec3) -> Vec2 {
+        let clip = model_camera(camera, SIZE) * at.extend(1.0);
+        let ndc = clip.truncate() / clip.w;
+        Vec2::new(
+            (ndc.x * 0.5 + 0.5) * SIZE.0 as f32,
+            (0.5 - ndc.y * 0.5) * SIZE.1 as f32,
+        )
+    }
+
+    fn depth(camera: Vec2, at: Vec3) -> f32 {
+        let clip = model_camera(camera, SIZE) * at.extend(1.0);
+        clip.z / clip.w
+    }
+
+    /// The ground is the map's own, pixel for pixel: a model standing where a sprite stands is
+    /// drawn where that sprite is drawn. This is the whole reason the projection is oblique.
+    #[test]
+    fn the_ground_agrees_with_the_flat_camera_pixel_for_pixel() {
+        let camera = Vec2::new(1000.0, 800.0);
+        // How `render_scene` places a sprite: world minus the rounded origin.
+        let origin = (camera - Vec2::new(SIZE.0 as f32, SIZE.1 as f32) / 2.0).round();
+        for world in [
+            Vec2::new(1000.0, 800.0),
+            Vec2::new(1017.0, 743.0),
+            Vec2::new(812.5, 931.25),
+        ] {
+            let flat = world - origin;
+            let mesh = on_screen(camera, Vec3::new(world.x, 0.0, world.y));
+            assert!(
+                mesh.abs_diff_eq(flat, 1e-3),
+                "a model at {world} lands at {mesh}, a sprite at {flat}"
+            );
+        }
+    }
+
+    /// A step north and a rise of the same size move a point the same way. That is what makes
+    /// height read as height rather than as walking away.
+    #[test]
+    fn rising_looks_the_same_as_stepping_north() {
+        let camera = Vec2::new(0.0, 0.0);
+        let foot = Vec3::new(10.0, 0.0, 20.0);
+        let risen = on_screen(camera, foot + Vec3::new(0.0, 32.0, 0.0));
+        let north = on_screen(camera, foot - Vec3::new(0.0, 0.0, 32.0));
+        assert!(
+            risen.abs_diff_eq(north, 1e-3),
+            "rising put it at {risen}, stepping north at {north}"
+        );
+    }
+
+    /// What is further south, and what is higher, is nearer the viewer — so a character's front
+    /// hides their back, and they stand in front of what is behind them.
+    #[test]
+    fn what_is_south_and_what_is_high_is_nearer() {
+        let camera = Vec2::new(0.0, 0.0);
+        let here = Vec3::new(0.0, 0.0, 0.0);
+        assert!(
+            depth(camera, here + Vec3::new(0.0, 0.0, 40.0)) < depth(camera, here),
+            "further south is nearer"
+        );
+        assert!(
+            depth(camera, here + Vec3::new(0.0, 40.0, 0.0)) < depth(camera, here),
+            "higher is nearer"
+        );
+        assert_eq!(
+            depth(camera, here + Vec3::new(50.0, 0.0, 0.0)),
+            depth(camera, here),
+            "east and west are the same distance away"
+        );
+    }
+
+    /// Everything a frame can see has to land inside the depth buffer's range, or it is clipped
+    /// away and simply never drawn.
+    #[test]
+    fn a_screenful_stays_inside_the_depth_range() {
+        let camera = Vec2::new(12_000.0, 9_000.0);
+        let (w, h) = (SIZE.0 as f32, SIZE.1 as f32);
+        // Twice as far out as the view reaches, and taller than anything that stands in it: a
+        // model is submitted before it is culled, and a tree is not a person's height.
+        for corner in [-1.0f32, 1.0] {
+            for high in [0.0f32, 400.0, 1800.0] {
+                let at = Vec3::new(camera.x + corner * w, high, camera.y + corner * h);
+                let z = depth(camera, at);
+                assert!(
+                    (0.0..=1.0).contains(&z),
+                    "a corner of the view at {at} has depth {z}"
+                );
+            }
+        }
+    }
+
+    /// A model stands where its feet are put, at the scale it is given.
+    #[test]
+    fn standing_puts_the_feet_where_they_were_asked_for() {
+        let at = stand_at(Vec2::new(300.0, 200.0), 0.0, 20.0);
+        assert_eq!(
+            at.transform_point3(Vec3::ZERO),
+            Vec3::new(300.0, 0.0, 200.0)
+        );
+        // A model one unit tall stands twenty pixels tall.
+        assert_eq!(at.transform_point3(Vec3::Y), Vec3::new(300.0, 20.0, 200.0));
     }
 }

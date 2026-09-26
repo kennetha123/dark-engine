@@ -700,6 +700,13 @@ and where bone matrices stay.
   during baking and the same model read back here are the same height on different axes.
   `Model::UP` says so once, and `Model::height` measures along it rather than naming an axis
   again.
+- **A joint matrix is `skin_root × the joint's world × its inverse bind`.** `skin_root` is the
+  skinned mesh node's own place in the scene. Blender writes its bind matrices in the armature's
+  space while the vertices sit in the mesh node's, and this is what carries the result from the
+  one to the other. Without it a Mixamo export poses **a hundred times too large and lying on its
+  side**, while its raw vertices are the right size all along — so nothing that frames a model on
+  its own bounds can tell. It was measured rather than reasoned from the specification, after a
+  reading of the specification produced exactly that error.
 - **Everything above a joint still moves it.** glTF builds a joint's matrix from the scene root,
   and an exporter routinely leaves a transform up there — Blender's armature object carries the
   whole Z-up turn and its own scale, which for a Mixamo rig is a quarter turn and a hundredth.
@@ -718,6 +725,10 @@ and where bone matrices stay.
 - Bones are held with parents before children, so one forward pass resolves the tree. glTF does
   not promise that order; a file that breaks it is sorted, with a warning, and both name maps
   follow the bones to their new places. The sort cannot hang on a cycle.
+- A bone rests where its own node says. Nothing above the joints is folded into a rest pose:
+  an animated bone replaces its rest outright, so anything folded there would apply to still
+  bones and not to moving ones. Whatever sits above them is `skin_root`, which applies to every
+  joint alike.
 - `Pose::pose(model, animation, looping, seconds)` walks the skeleton once and leaves a palette
   of `world × inverse_bind`, one matrix per bone. A looping clip wraps; one that plays once holds
   its last pose. An animation nobody has leaves the model at rest, with a warning — wrong, but
@@ -725,6 +736,11 @@ and where bone matrices stay.
 - Keyframes are sampled by walking to the first key past the time and blending. Outside the keys
   the value is held, never extrapolated. Tracks are a few dozen keys and this runs once per bone
   per frame, so a scan beats the bookkeeping a search would need.
+- **A model must pose at the size it was baked at.** `preview-model` prints both, and
+  `dark_model/tests/project_models.rs` asserts it for every model in `DARK_TEST_PROJECT`. This
+  is the only check that can catch a wrong skinning transform, because every preview frames a
+  model on its own bounds and draws one a hundred times too large pixel for pixel the same. The
+  same test checks a model stands up rather than lying down.
 - `dark-cli preview-model <project> <model> <clip> <tick> <out.png>` fills the posed triangles on
   the CPU, with a depth buffer, from the angle a top-down game looks from — the same idea as
   `preview-spine`, and the way this phase was checked without a window or a GPU. It prints the
@@ -819,6 +835,32 @@ prop standing in front of a character covers them and one standing behind does n
   which has no model pipeline bound, and is silently dropped; nothing in `dark-player` submits a
   model yet, so this is still only exercised by `preview-model --gpu` and the renderer's own GPU
   tests.
+
+## 16.5 The camera a model is drawn through (M9, phase 4b)
+
+`dark_view::model_camera` is what places a mesh in the flat world the sprites live in, and
+`dark_view::stand_at` is where one stands.
+
+- **It is not a tilted camera.** Turn a camera down to fifty degrees and a step north moves a
+  point `sin 50°` of a pixel up the screen while the sprite world moves a whole one — the ground
+  would disagree with itself. A top-down game looks through an **oblique** projection: the ground
+  is one to one with world pixels, and height shears straight up the screen. That is what the art
+  already assumes, since a character's feet are at their world place and their sprite rises from
+  there.
+- So **a step north and a rise of the same size move a point the same way**, which is what lets
+  height read as height, and a model and a sprite of the same person stand in the same spot.
+- Depth: what is further south, and what is higher, is nearer. Measured from the middle of the
+  screen rather than the world's corner, so a map kilometres across keeps its precision where the
+  player is. The range holds two screens of ground and four thousand pixels of height each way.
+- The origin is rounded exactly as `render_scene` rounds the sprites', or models would sit half a
+  pixel off the ground.
+- **`DARK_MODEL=<model.ron>`** stands a model in for the player in the running game — how one is
+  looked at in the world until a character's look can name a model. It is drawn **beside** the
+  player's sprite, not instead of it, which also makes the two easy to compare.
+- Known gaps: a look cannot name a model, so nothing in a project draws one yet; the stand-in
+  plays one clip and does not follow what the character is doing; a model is still outside the
+  silhouette system (§16.4); `dark-cli package` and `Project::fingerprint` still do not know
+  about models, and a model is now reachable, so they are due.
 
 ## 17. Save, storylets and endings (as built in M7)
 

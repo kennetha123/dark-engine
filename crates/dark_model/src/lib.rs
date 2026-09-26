@@ -105,6 +105,14 @@ pub struct Model {
     pub animations: HashMap<String, Animation>,
     /// Model units to world pixels, from the definition.
     pub scale: f32,
+    /// Undoes the skinned mesh node's own place in the scene.
+    ///
+    /// glTF builds a joint matrix as `inverse(global(meshNode)) × global(joint) × inverseBind`.
+    /// A joint's chain is walked from the scene root, which picks up whatever the exporter left
+    /// above it — Blender's armature object carries the Z-up turn and its own scale. The mesh
+    /// usually hangs under that same armature, so this cancels it. Leaving it out makes a
+    /// Mixamo model a hundred times too large and lying on its side.
+    pub skin_root: Mat4,
 }
 
 impl Model {
@@ -123,6 +131,7 @@ impl Model {
         let mut model = Model {
             skeleton: rigging.skeleton,
             scale: def.scale,
+            skin_root: skinned_mesh_root(&document),
             images: images.into_iter().map(convert_image).collect(),
             ..Default::default()
         };
@@ -164,6 +173,33 @@ impl Model {
 
     /// Which way is up in a loaded model. glTF says Y; nothing here should guess otherwise.
     pub const UP: Vec3 = Vec3::Y;
+}
+
+/// Where the skinned mesh itself sits in the scene, from the root down. The joints are walked
+/// from the same root, so this is what takes their shared ancestry back out again.
+fn skinned_mesh_root(document: &gltf::Document) -> Mat4 {
+    let mut parent_of: HashMap<usize, usize> = HashMap::new();
+    for node in document.nodes() {
+        for child in node.children() {
+            parent_of.insert(child.index(), node.index());
+        }
+    }
+    let Some(skinned) = document
+        .nodes()
+        .find(|node| node.mesh().is_some() && node.skin().is_some())
+    else {
+        return Mat4::IDENTITY;
+    };
+    let mut carried = Mat4::IDENTITY;
+    let mut at = Some(skinned.index());
+    while let Some(index) = at {
+        let Some(node) = document.nodes().nth(index) else {
+            break;
+        };
+        carried = Mat4::from_cols_array_2d(&node.transform().matrix()) * carried;
+        at = parent_of.get(&index).copied();
+    }
+    carried
 }
 
 /// A skeleton and the two ways glTF names its bones, which are not the same way.
@@ -218,26 +254,9 @@ fn read_skeleton(
         }
     }
 
-    // Everything above a joint still moves it. glTF puts a joint's matrix on the chain from the
-    // scene root, and an exporter routinely leaves a transform up there: Blender's armature
-    // object carries the whole Z-up to Y-up turn and its own scale. A joint whose parent is not
-    // itself a joint therefore inherits that chain, folded into where it rests.
-    let above = |node: &gltf::Node| {
-        let mut carried = Mat4::IDENTITY;
-        let mut at = parent_of.get(&node.index()).copied();
-        while let Some(index) = at {
-            if order.contains_key(&index) {
-                break; // A joint: `Pose` walks the rest of the way itself.
-            }
-            let Some(ancestor) = document.nodes().nth(index) else {
-                break;
-            };
-            carried = Mat4::from_cols_array_2d(&ancestor.transform().matrix()) * carried;
-            at = parent_of.get(&index).copied();
-        }
-        carried
-    };
-
+    // A bone rests where its own node says, and nothing above it is folded in here: whatever
+    // the exporter left above the joints belongs in `Model::skin_root`, which is applied to
+    // every joint matrix rather than only to the ones with no animation track of their own.
     let mut bones: Vec<Bone> = joints
         .iter()
         .enumerate()
@@ -246,15 +265,8 @@ fn read_skeleton(
                 .get(&node.index())
                 .and_then(|p| order.get(p))
                 .copied();
-            let local = Mat4::from_cols_array_2d(&node.transform().matrix());
-            // A root joint carries what sits above it; a joint with a joint parent does not,
-            // because its parent already did.
-            let rest = if parent.is_none() {
-                above(node) * local
-            } else {
-                local
-            };
-            let (s, r, t) = rest.to_scale_rotation_translation();
+            let (t, r, s) = node.transform().decomposed();
+            let (t, r, s) = (Vec3::from(t), Quat::from_array(r), Vec3::from(s));
             Bone {
                 name: node.name().unwrap_or("").to_owned(),
                 parent,

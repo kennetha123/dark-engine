@@ -42,6 +42,10 @@ struct Font {
 
 /// CPU side, before the window exists: maps and every sheet they use.
 pub struct DemoScene {
+    /// A 3D model to stand in for the player, for looking at one in the world. Set
+    /// `DARK_MODEL` to a `*.model.ron` (journals/engine/04, phase 4b). Nothing in the game reads
+    /// a model as a character's look yet; this is how one is looked at until it does.
+    stand_in: Option<StandIn>,
     maps: Option<Maps>,
     sheets: HashMap<String, LoadedSheet>,
     characters: CharacterSheets,
@@ -91,6 +95,56 @@ pub enum Menu {
     Paused,
     /// Others are playing, so the world goes on.
     OthersPlaying,
+}
+
+/// A model standing in for a character: its geometry, the clip it plays, and its pictures once
+/// they are on the GPU.
+struct StandIn {
+    model: dark_model::Model,
+    pose: dark_model::Pose,
+    animation: String,
+    looping: bool,
+    /// Each part ready to draw: the renderer's vertex layout, its indices, its picture and
+    /// whether it is drawn from both faces. Built once — skinning happens in the shader, so
+    /// nothing here changes from frame to frame.
+    parts: Vec<StandInPart>,
+}
+
+struct StandInPart {
+    vertices: Vec<dark_render::ModelVertex>,
+    indices: Vec<u32>,
+    texture: TextureId,
+    double_sided: bool,
+}
+
+/// Loads what `DARK_MODEL` points at, if anything. A model that will not load is said about and
+/// then let go: it is a way of looking at something, not part of the game.
+fn load_stand_in(project: &Project) -> Option<StandIn> {
+    let path = std::env::var("DARK_MODEL").ok()?;
+    let loaded = project
+        .load_model(&path)
+        .inspect_err(|err| tracing::error!("DARK_MODEL={path}: {err}"))
+        .ok()?;
+    let model = dark_model::Model::load(project, &loaded.def)
+        .inspect_err(|err| tracing::error!("DARK_MODEL={path}: {err}"))
+        .ok()?;
+    // Whatever it calls standing still, else the first clip it has.
+    let (name, clip) = loaded
+        .bake
+        .clips
+        .get_key_value("idle")
+        .or_else(|| loaded.bake.clips.iter().next())?;
+    tracing::info!(
+        "{path}: standing in for the player, playing {name} ({} bones)",
+        model.skeleton.bones.len()
+    );
+    Some(StandIn {
+        pose: dark_model::Pose::new(&model),
+        model,
+        animation: clip.animation.clone(),
+        looping: clip.looping,
+        parts: Vec::new(),
+    })
 }
 
 impl DemoScene {
@@ -199,6 +253,7 @@ impl DemoScene {
                 .join(", ")
         );
         Ok(Self {
+            stand_in: load_stand_in(project),
             maps: Some(maps),
             sheets,
             characters,
@@ -328,7 +383,47 @@ impl DemoScene {
                 skeleton: skeleton_of.get(&look.sheet).copied(),
             });
         }
+        let stand_in = match self.stand_in {
+            Some(mut stand) => {
+                let mut textures = Vec::new();
+                for (nth, image) in stand.model.images.iter().enumerate() {
+                    textures.push(renderer.create_texture_smooth(
+                        &format!("model image {nth}"),
+                        image.width,
+                        image.height,
+                        &image.rgba,
+                    )?);
+                }
+                stand.parts = stand
+                    .model
+                    .parts
+                    .iter()
+                    .map(|part| StandInPart {
+                        vertices: part
+                            .vertices
+                            .iter()
+                            .map(|v| dark_render::ModelVertex {
+                                position: v.position.to_array(),
+                                normal: v.normal.to_array(),
+                                uv: v.uv,
+                                joints: v.joints,
+                                weights: v.weights.to_array(),
+                            })
+                            .collect(),
+                        indices: part.indices.clone(),
+                        texture: part
+                            .image
+                            .and_then(|i| textures.get(i).copied())
+                            .unwrap_or(white),
+                        double_sided: part.double_sided,
+                    })
+                    .collect();
+                Some(stand)
+            }
+            None => None,
+        };
         Ok(DemoView {
+            stand_in,
             looks,
             sheets: self.characters,
             maps: views,
@@ -554,6 +649,8 @@ fn head_height(looks: &[LookView], skeletons: &[SkeletonView], c: &DrawCharacter
 
 /// GPU side: turns characters and maps into sprites each frame.
 pub struct DemoView {
+    /// See [`DemoScene::stand_in`].
+    stand_in: Option<StandIn>,
     looks: Vec<LookView>,
     sheets: CharacterSheets,
     maps: Vec<MapView>,
@@ -823,12 +920,41 @@ impl DemoView {
         // Skeletons of those no longer here are dropped.
         self.poses
             .retain(|id, _| characters.iter().any(|c| c.id == *id));
-        renderer.render_with(
+
+        // A model standing in for the player, if one was asked for. Its palette carries where it
+        // stands, so the shader multiplies one matrix a vertex (docs/PLAN.md §16.3).
+        let mut model_draws = Vec::new();
+        let mut palette = Vec::new();
+        if let Some(stand) = &mut self.stand_in
+            && let Some(you) = characters.iter().find(|c| c.you)
+        {
+            stand
+                .pose
+                .pose(&stand.model, &stand.animation, stand.looping, self.seconds);
+            let place = dark_view::stand_at(you.ground, you.body.elevation, stand.model.scale);
+            palette.extend(stand.pose.palette().iter().map(|bone| place * *bone));
+            for part in &stand.parts {
+                model_draws.push(dark_render::ModelDraw {
+                    vertices: &part.vertices,
+                    indices: &part.indices,
+                    palette: &palette,
+                    texture: part.texture,
+                    double_sided: part.double_sided,
+                    layer: layer::WORLD,
+                    // Where a character sorts: by their feet, as their sprite would.
+                    sort_y: you.ground.y,
+                });
+            }
+        }
+        renderer.render_scene(dark_render::Scene {
             camera,
-            [0.0; 3],
-            &mut self.frame_sprites,
-            &self.frame_meshes,
-        );
+            clear: [0.0; 3],
+            sprites: &mut self.frame_sprites,
+            meshes: &self.frame_meshes,
+            models: &model_draws,
+            model_camera: dark_view::model_camera(camera, renderer.internal_size()),
+            light: dark_render::Light::default(),
+        });
     }
 
     /// The project's string table, in the language showing (the title screen reads it too).

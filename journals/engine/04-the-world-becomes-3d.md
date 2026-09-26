@@ -449,4 +449,59 @@ corrected where it said offscreen-only.
 drawn as a model behind a tree is simply hidden rather than showing through; and a model sorted
 into the interface pass would be dropped silently. Both are in §16.4.
 
-Phase 4b (the game camera, and `dark-player` submitting a model), and 3 and 5–7, not started.
+### Phase 4b — a model in the game, done 2026-09-26
+
+`crates/dark_view/src/lib.rs`: `model_camera` and `stand_at`, with tests.
+`crates/dark_model/`: `Model::skin_root`, the rest-pose fold removed, and a new
+`tests/project_models.rs`. `apps/dark-player/src/demo.rs`: `DARK_MODEL` stands a model in for
+the player. Docs: `docs/PLAN.md` §16.2 (the skinning rule), §16.5 (the camera).
+
+**She stands in the meadow, the same height as Borin beside her.**
+
+**Decided during the work**
+
+- **The camera is oblique, not tilted.** A tilted camera foreshortens the ground: a step north
+  would move a model `sin 50°` of a pixel while the sprite world moved a whole one, and the two
+  would disagree about where the ground is. An oblique projection keeps the ground one to one and
+  shears height straight up — which is the projection the sprite art already assumes. A step
+  north and a rise of the same size move a point the same way, and that is what lets height read
+  as height.
+- **The stand-in is a debug view, not a feature.** `DARK_MODEL` draws a model beside the player's
+  sprite rather than instead of it, which is also what makes their sizes easy to compare. A
+  look naming a model is later work.
+
+**Corrected during the work — and this one is the lesson of the whole line**
+
+**Every model had been posing a hundred times too large, and lying on its side, since phase 2a.**
+It was invisible for three phases because `preview-model` frames on the model's own posed bounds:
+a model a hundredfold too big draws pixel for pixel the same as one that is right. It only
+surfaced when she finally stood in a real world, beside sprites that know how large a person is —
+and she filled the screen.
+
+The cause was mine, from phase 2a's review. Finding 2 read the glTF specification and said joint
+chains must include their ancestors. I implemented that, and it was wrong twice over:
+
+- The fold went into a bone's **rest pose**, which an animated bone replaces outright. So it
+  applied to still bones and not to moving ones — and the Hips, which every Mixamo clip animates,
+  ignored it. Measured, the fold changed nothing at all.
+- What was actually needed was the **skinned mesh node's own transform**, applied to every joint
+  matrix: `skin_root × world × inverseBind`. Blender writes bind matrices in the armature's space
+  while the vertices sit in the mesh node's, and that is what carries one to the other.
+
+I reached it by measuring rather than by reading: printing the raw extent, the posed extent, the
+skin root and the root bone's rest, and trying each combination until the posed height matched
+the baked one. Raw mesh 2.03 units, posed 206, baked 41.2 px, posed 41.2 px.
+
+**The guard that was missing.** `crates/dark_model/tests/project_models.rs` now asserts that
+every model in `DARK_TEST_PROJECT` **poses at the size it was baked at**, and that it stands up
+rather than lying down. Baking measures in Blender, loading measures what the engine draws; they
+are one model through two tools and have to agree. `preview-model` prints both on every run.
+Nothing else can see this class of mistake.
+
+**Gates** — `fmt`, `clippy` and `check-sim-deps.sh` clean. `cargo test` is green everywhere
+**except `dark-player`**, which fails to compile its own `pad.rs` tests: the other session in
+this tree added a `pack` field there and its gamepad test no longer infers a type. That is not
+this change — `pad.rs` is untouched by it — and it is theirs to fix, so it is left alone.
+Everything outside that crate: 42 test-result blocks green, no clippy errors.
+
+Phases 3 and 5–7 not started.

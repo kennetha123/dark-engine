@@ -71,7 +71,8 @@ impl Pose {
                 Some(parent) => self.world[parent] * local,
                 None => local,
             };
-            self.palette[index] = self.world[index] * bone.inverse_bind;
+            // The whole joint matrix glTF asks for; see `Model::skin_root`.
+            self.palette[index] = model.skin_root * self.world[index] * bone.inverse_bind;
         }
     }
 }
