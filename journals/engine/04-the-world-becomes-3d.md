@@ -340,4 +340,75 @@ four caught.
 in 2b, when a model first becomes reachable. PLAN §16.2 now restates it so §16.1 is not the only
 place that remembers.
 
-Phase 2b, and 3–7, not started.
+### Phase 2b — the mesh pass, done 2026-09-26
+
+`crates/dark_render/src/model.rs` and `model.wgsl` (new): `ModelVertex`, `ModelDraw`, `Light`,
+`MAX_BONES`, and `Renderer::render_models`. `apps/dark-cli/src/gpu_model.rs` (new) adds
+`preview-model … --gpu`. Docs: `docs/PLAN.md` §16.3.
+
+**How it is checked.** The CPU preview and the GPU one draw the same model, clip and tick with
+the **same camera** — `preview_model::game_camera` is shared, so a difference between the two
+pictures is the drawing and not the framing. They agree to **99.9% of the silhouette**.
+
+**Decided during the work**
+
+- **Models get a pass of their own.** Sprites keep painter's algorithm; meshes get a depth
+  buffer. Sorting the two against each other needs the game's camera and is phase 4.
+- **The palette carries the placement.** `placement × world × inverse bind`, built on the CPU, so
+  the shader multiplies one matrix per vertex rather than three.
+- **One uniform buffer for every palette**, at a 256-aligned stride with a dynamic offset per
+  draw. 128 bones is 8 KiB against the 64 KiB every backend promises. Short palettes are padded
+  with identity rather than with the last draw's bones.
+- **Cut out, not blended.** A depth-tested mesh cannot sort its own transparency.
+- `dark-cli` gains `wgpu` and `pollster` to open a GPU with no window. It is a developer tool,
+  and the preview commands it already carries belong together.
+
+**Corrected during the work**
+
+- **The pipeline ignored `doubleSided` and culled back faces from everything.** This model's
+  material is marked double-sided — its hair and skirt are single-layer cards — so the GPU was
+  throwing half of them away. The silhouettes agreed to only 78.5%. There are now two pipelines
+  and the material picks; agreement went to 99.9%. **Nothing but the CPU-against-GPU comparison
+  would have found this**: the GPU picture looked perfectly plausible on its own.
+- **The CPU preview ignored alpha**, taking a texel's colour and not its transparency, so a
+  cut-out texture drew as a solid card. It did not change this model, whose material is opaque,
+  but it was wrong and is fixed to cut out exactly as `model.wgsl` does.
+
+**From the review**
+
+- **The cull-back pipeline had never drawn a triangle.** The only model to hand is marked
+  `doubleSided`, so every draw so far took the other pipeline — and a silhouette comparison
+  cannot find this, because a closed body looks the same whichever face is culled. There is now
+  a GPU test for it, and the winding it pins was **measured rather than reasoned about**: a probe
+  drew both windings under both pipelines and the test was written to what came back.
+- **Nothing exercised more than one draw, either.** One part means `base_vertex` and the bone
+  offset are always zero. Proved by hand first — splitting the model's single part in two gave a
+  byte-identical picture — and then pinned by a GPU test that draws two quads whose palettes put
+  them in different places.
+- **`BONE_STRIDE` is now asserted 256-aligned at compile time.** The open question in this entry
+  proposes cutting the bone count to about 25, which would make the stride 1600 — an illegal
+  dynamic offset for every draw after the first, and only after the first, so a one-model preview
+  would never have shown it.
+- **Both palette tests were vacuous**, for the third time in this line of work: they padded with
+  the same matrix twice, so a reversal or an off-by-one passed either. `.take(MAX_BONES)` was
+  dead code as well, since the zip already stopped at the slots. Bones are told apart now.
+- **The two previews did not share their light** — the CPU one lit from below, the GPU from
+  above — so only the silhouette was ever comparable. They share `Light::default()` now.
+- `render_models` promised more than it can do: a model cannot reach a window at all yet, because
+  the sprite pass clears the target and `render` presents inside its own submit. The doc comment
+  and §16.3 now say so.
+
+**Corrected in my own method** — a test failed after a sabotage run and I nearly recorded the
+wrong cause. The restore in the sabotage script used `shutil.move`, which keeps the backup's
+timestamp, so cargo did not rebuild and the next run tested a stale artifact. I had already
+"fixed" the test by rewriting it before checking; forcing a rebuild showed the original was fine
+all along. The script now touches what it restores, and says why.
+
+**Gates** — all four green. Seven sabotages against the GPU tests, all caught.
+
+**Still carried** — `dark-cli package` and `Project::fingerprint` do not know about models. §16.2
+named 2b as the deadline because a model would be reachable by then; it is not, so both move to
+phase 4 and §16.3 says so rather than letting PLAN forget. Skinned normals still use the bone
+matrix rather than its inverse transpose, which is right while bones only turn and move.
+
+Phases 3–7 not started.

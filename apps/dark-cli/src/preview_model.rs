@@ -13,6 +13,37 @@ use glam::{Mat4, Vec2, Vec3, Vec4Swizzles};
 /// Where the camera stands: the angle a top-down action RPG looks from.
 const ELEVATION: f32 = 50.0;
 
+/// How large a preview is drawn. Both previews use it, so their pictures line up.
+pub const SIZE: (u32, u32) = (360, 460);
+
+/// Looks down at a posed model from [`ELEVATION`], framed on its own bounds so that any export
+/// fills the picture whatever scale it was authored at. Orthographic, as a top-down game is.
+///
+/// Shared by the CPU preview and the GPU one, so the two can be compared: a difference between
+/// them is then the drawing, not the camera.
+///
+/// Returns the world-to-clip matrix and how large the model is, in its own units.
+pub fn game_camera(model: &Model, pose: &Pose, (w, h): (u32, u32)) -> (Mat4, f32) {
+    let (lo, hi) = bounds(model, pose);
+    let mid = (lo + hi) / 2.0;
+    let size = (hi - lo).max_element().max(1e-3);
+    // glTF is Y-up, so the camera climbs Y and the horizontal plane is XZ (`Model::UP`).
+    let angle = ELEVATION.to_radians();
+    let eye = mid + Vec3::new(0.0, angle.sin(), angle.cos()) * size * 3.0;
+    let view = look_at_mat4(eye, mid, Model::UP);
+    let half = size * 0.62;
+    // The DirectX convention puts depth in 0..1, which is what wgpu wants.
+    let projection = orthographic(
+        -half,
+        half,
+        -half * h as f32 / w as f32,
+        half * h as f32 / w as f32,
+        0.01,
+        size * 10.0,
+    );
+    (projection * view, size)
+}
+
 pub fn preview_model(
     project: &str,
     model_path: &str,
@@ -33,31 +64,10 @@ pub fn preview_model(
     let mut pose = Pose::new(&model);
     pose.pose(&model, &baked.animation, baked.looping, tick as f32 / 60.0);
 
-    let (w, h) = (360u32, 460u32);
+    let (w, h) = SIZE;
     let mut canvas = image::RgbaImage::from_pixel(w, h, image::Rgba([120, 132, 124, 255]));
     let mut depth = vec![f32::MAX; (w * h) as usize];
-
-    // Look down at the model from `ELEVATION`, framed on its own bounds so that any export
-    // fills the picture. Orthographic, as a top-down game is.
-    let (lo, hi) = bounds(&model, &pose);
-    let mid = (lo + hi) / 2.0;
-    let size = (hi - lo).max_element().max(1e-3);
-    // glTF is Y-up, so the camera climbs Y and the horizontal plane is XZ (`Model::UP`).
-    let angle = ELEVATION.to_radians();
-    let eye = mid + Vec3::new(0.0, angle.sin(), angle.cos()) * size * 3.0;
-    let view = look_at_mat4(eye, mid, Model::UP);
-    let half = size * 0.62;
-    // The DirectX convention puts depth in 0..1, which is what wgpu wants when this
-    // becomes a real pipeline.
-    let projection = orthographic(
-        -half,
-        half,
-        -half * h as f32 / w as f32,
-        half * h as f32 / w as f32,
-        0.01,
-        size * 10.0,
-    );
-    let camera = projection * view;
+    let (camera, _) = game_camera(&model, &pose, SIZE);
 
     let mut drawn = 0usize;
     for part in &model.parts {
@@ -109,8 +119,12 @@ pub fn preview_model(
             // banding the toon shader will replace in phase 3.
             let lit = {
                 let normal = (corner[0].1 + corner[1].1 + corner[2].1).normalize_or_zero();
-                let towards = Vec3::new(-0.4, -0.6, 0.7).normalize();
-                0.35 + 0.65 * normal.dot(towards).max(0.0)
+                // The renderer's own light, so that what differs between the two pictures is
+                // the drawing. Lighting this from anywhere else made them incomparable on
+                // everything but the silhouette.
+                let light = dark_render::Light::default();
+                let towards = light.towards.normalize();
+                light.ambient + (1.0 - light.ambient) * normal.dot(towards).max(0.0)
             };
             drawn += 1;
 
@@ -136,18 +150,24 @@ pub fn preview_model(
                     if z >= depth[at] {
                         continue;
                     }
-                    depth[at] = z;
                     let uv = [
                         corner[0].2[0] * b1 + corner[1].2[0] * b2 + corner[2].2[0] * b3,
                         corner[0].2[1] * b1 + corner[1].2[1] * b2 + corner[2].2[1] * b3,
                     ];
-                    let rgb = match image {
+                    let [r, g, b, a] = match image {
                         Some(picture) => sample(picture, uv),
-                        None => [200, 190, 180],
+                        None => [200, 190, 180, 255],
                     };
+                    // Cut out, exactly as `model.wgsl` does. Hair and cloth are drawn on cards
+                    // whose texture is mostly transparent; taking the colour and ignoring the
+                    // alpha fills those cards in solid and puts a dark blob where the hair is.
+                    if a < 128 {
+                        continue;
+                    }
+                    depth[at] = z;
                     let pixel = canvas.get_pixel_mut(x, y);
-                    for c in 0..3 {
-                        pixel[c] = (f32::from(rgb[c]) * lit).clamp(0.0, 255.0) as u8;
+                    for (c, v) in [r, g, b].into_iter().enumerate() {
+                        pixel[c] = (f32::from(v) * lit).clamp(0.0, 255.0) as u8;
                     }
                 }
             }
@@ -170,7 +190,7 @@ pub fn preview_model(
 }
 
 /// A vertex's own matrix: its bones' palette entries, in the proportions it names.
-fn skin_of(vertex: &dark_model::Vertex, palette: &[Mat4]) -> Mat4 {
+pub fn skin_of(vertex: &dark_model::Vertex, palette: &[Mat4]) -> Mat4 {
     let weight: [f32; 4] = vertex.weights.into();
     let mut skin = Mat4::ZERO;
     let mut used = 0.0;
@@ -189,7 +209,7 @@ fn skin_of(vertex: &dark_model::Vertex, palette: &[Mat4]) -> Mat4 {
 }
 
 /// The posed model's bounds, so the camera frames whatever it is given.
-fn bounds(model: &Model, pose: &Pose) -> (Vec3, Vec3) {
+pub fn bounds(model: &Model, pose: &Pose) -> (Vec3, Vec3) {
     let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
     for part in &model.parts {
         for vertex in &part.vertices {
@@ -205,15 +225,15 @@ fn bounds(model: &Model, pose: &Pose) -> (Vec3, Vec3) {
     }
 }
 
-fn sample(image: &dark_assets::Image, uv: [f32; 2]) -> [u8; 3] {
+fn sample(image: &dark_assets::Image, uv: [f32; 2]) -> [u8; 4] {
     if image.width == 0 || image.height == 0 {
-        return [200, 190, 180];
+        return [200, 190, 180, 255];
     }
     let wrap = |v: f32, n: u32| ((v.rem_euclid(1.0) * n as f32) as u32).min(n - 1);
     let (x, y) = (wrap(uv[0], image.width), wrap(uv[1], image.height));
     let at = ((y * image.width + x) * 4) as usize;
-    match image.rgba.get(at..at + 3) {
-        Some(rgb) => [rgb[0], rgb[1], rgb[2]],
-        None => [200, 190, 180],
+    match image.rgba.get(at..at + 4) {
+        Some(rgba) => [rgba[0], rgba[1], rgba[2], rgba[3]],
+        None => [200, 190, 180, 255],
     }
 }

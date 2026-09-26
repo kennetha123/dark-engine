@@ -742,6 +742,58 @@ and where bone matrices stay.
   3. `dark-cli package` and `Project::fingerprint` still do not know about models — carried over
   from §16.1 and now due in phase 2b, when a model first becomes reachable.
 
+## 16.3 The mesh pass (M9, phase 2b: drawing)
+
+`dark_render` draws posed models on the GPU, in a pass of their own
+(`Renderer::render_models`).
+
+- **Meshes cannot share the sprites' ordering.** A sprite is flat and sorts by layer and by
+  feet; a mesh is solid, sees itself from every side, and a hand at the front of a body has to
+  hide the chest behind it. So models are drawn against a **depth buffer**
+  (`Depth32Float`, cleared each pass, nearer wins) and the camera is a matrix rather than an
+  origin and a size. A model and a sprite are **not yet sorted against one another** — that is
+  phase 4, where the camera becomes the game's.
+- **One matrix per vertex.** The palette handed over is `placement × bone's world transform ×
+  its inverse bind`, built on the CPU, so the shader multiplies once rather than three times.
+  Weights are normalised when the model loads, so skinning is an average and cannot grow a mesh.
+- **Bone palettes share one uniform buffer**, each at a 256-byte-aligned stride, picked per draw
+  by a dynamic offset. 128 bones fit in 8 KiB, and 64 KiB is the binding size promised
+  everywhere. A palette shorter than that is padded with identity, never with whatever the last
+  draw left there — a vertex naming a bone its model does not have then stays where the artist
+  put it instead of being flung across the screen by another character's hip.
+- **Two pipelines, and the material picks.** A closed body has its back faces culled; a material
+  marked `doubleSided` does not. Hair, cloth and leaves are modelled as single-layer cards, and
+  culling them takes half of each away.
+- **Colour is cut out, not blended.** A depth-tested mesh cannot sort its own transparency, and
+  a half-lit edge written to the depth buffer would hide whatever came after it.
+- Lighting is one direction and an ambient floor, enough to read the form. The banded toon ramp
+  and the outline are phase 3.
+- **`dark-cli preview-model … --gpu`** draws the same model, clip and tick through the real
+  renderer, with the same camera **and the same light** as the CPU preview, so that a difference
+  between the two pictures is the drawing. They agree to **99.9% of the silhouette**.
+- **What a silhouette cannot prove.** It is the same whichever face is culled, so it says nothing
+  about winding; and a closed body looks the same either way. The cull-back pipeline — the one
+  every character uses — is therefore held by a test on the GPU rather than by the comparison.
+  Shading still differs a little between the two: the CPU preview lights each face flat where the
+  shader interpolates the vertex normals, and it multiplies in gamma where the shader multiplies
+  in linear.
+- **Offscreen only, for now.** The pass writes to the internal target in a submit of its own,
+  while the sprite pass clears that target unconditionally and `render` presents inside its own
+  submit. So in a windowed frame a model is either wiped by the next `render` or drawn after the
+  frame that showed it. Getting one on screen means drawing models inside `render_with`, before
+  the blit — phase 4's work, along with sorting them against the sprites.
+- Known gaps: models and sprites are not sorted against each other, and a model cannot yet reach
+  a window at all; no toon ramp or outline (phase 3); one light; no shadows; skinned normals use
+  the bone matrix rather than its inverse transpose, which is right while bones only turn and
+  move but not if one is scaled; every `Renderer` builds the mesh pass whether it draws models or
+  not; a part with no texture of its own is given a plain one by the caller rather than by the
+  pass; `dark-cli` now pulls in `wgpu` for this preview.
+- **Still carried from §16.1 and §16.2**: `dark-cli package` does not collect a model's source,
+  mesh or bake, and `Project::fingerprint` does not cover a bake whose clip ticks drive attack
+  recovery. §16.2 named phase 2b as the deadline on the grounds that a model would become
+  reachable by then. It has not — nothing in `dark-player` draws one yet — so both move to
+  **phase 4**, which is when a model first reaches the game.
+
 ## 17. Save, storylets and endings (as built in M7)
 
 - The whole world is saved (`dark_world::WorldSave`, one RON file, version 1): the world

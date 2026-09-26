@@ -20,8 +20,9 @@
 //! into the glTF the view loads and measures its clips for the host. Needs Blender; set
 //! `DARK_BLENDER` if it is not installed where it usually is. Run it after every export.
 //!
-//! `dark-cli preview-model <project-dir> <model.model.ron> <clip> <tick> <out.png>` draws a
-//! posed model on the CPU, from the angle a top-down game looks at it.
+//! `dark-cli preview-model <project-dir> <model.model.ron> <clip> <tick> <out.png> [--gpu]`
+//! draws a posed model from the angle a top-down game looks at it: filled by hand, or with
+//! `--gpu` through the renderer's own mesh pipeline. The two should agree.
 //!
 //! `dark-cli bake-spine <project-dir> <sheet.spine.ron>` measures a Spine skeleton for the host
 //! (clip lengths, events, hitboxes) and writes the sheet's `baked` file. Run it after every
@@ -29,6 +30,7 @@
 //! <out.png>` draws the skeleton at that clip and tick, as the game would, four times enlarged.
 
 mod bake_model;
+mod gpu_model;
 mod land;
 mod package;
 mod preview_model;
@@ -102,6 +104,18 @@ fn main() -> ExitCode {
                 }
             }
         }
+        [cmd, project, model, clip, tick, out, flag]
+            if cmd == "preview-model" && flag == "--gpu" =>
+        {
+            match gpu_model::preview_model_gpu(project, model, clip, tick, out, preview_model::SIZE)
+            {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         [cmd, project, model, clip, tick, out] if cmd == "preview-model" => {
             match preview_model::preview_model(project, model, clip, tick, out) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -168,7 +182,7 @@ fn main() -> ExitCode {
             eprintln!("       dark-cli preview-land <seed> <tiles> <tiles-per-pixel> <out.png>");
             eprintln!("       dark-cli bake-model <project-dir> <model.model.ron>");
             eprintln!(
-                "       dark-cli preview-model <project-dir> <model.model.ron> <clip> <tick> <out.png>"
+                "       dark-cli preview-model <project-dir> <model.model.ron> <clip> <tick> <out.png> [--gpu]"
             );
             eprintln!("       dark-cli bake-spine <project-dir> <sheet.spine.ron>");
             eprintln!(

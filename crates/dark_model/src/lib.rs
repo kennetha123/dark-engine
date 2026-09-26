@@ -56,6 +56,9 @@ pub struct Part {
     pub indices: Vec<u32>,
     /// Which of [`Model::images`] paints it, if any.
     pub image: Option<usize>,
+    /// Whether the artist marked it to be drawn from both faces. Hair, cloth and leaves are
+    /// modelled as single-layer cards, and culling their back faces takes half of them away.
+    pub double_sided: bool,
 }
 
 /// A bone. `parent` is an index into [`Skeleton::bones`], earlier than this one.
@@ -401,8 +404,8 @@ fn read_part(
         Some(read) => read.into_u32().collect(),
         None => (0..positions.len() as u32).collect(),
     };
-    let image = primitive
-        .material()
+    let material = primitive.material();
+    let image = material
         .pbr_metallic_roughness()
         .base_color_texture()
         .map(|t| t.texture().source().index());
@@ -410,6 +413,7 @@ fn read_part(
         vertices,
         indices,
         image,
+        double_sided: material.double_sided(),
     })
 }
 
