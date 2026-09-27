@@ -168,7 +168,9 @@ mod tests {
         assert!(pressed(Button::Start, false).1.menu);
         // Nothing is pressed by a button the game does not use.
         assert_eq!(pressed(Button::C, false).0, TickInput::default());
-        assert_eq!(pressed(Button::Mode, false).1.numbers, Vec::new());
+        // Spelled out: `serde_json` is in this crate's tree (through `dark_model` -> `gltf`)
+        // and brings its own `PartialEq` for `u8`, so a bare `Vec::new()` no longer infers.
+        assert_eq!(pressed(Button::Mode, false).1.numbers, Vec::<u8>::new());
     }
 
     #[test]

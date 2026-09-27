@@ -191,31 +191,6 @@ fn every_line_and_name_has_text_in_every_language_and_faces_and_font_load() {
     }
     keys.extend(dark_life::Status::ALL.map(|s| s.key().to_owned()));
     keys.push("life.accident".to_owned());
-    // The inventory screen: every slot, and every word it puts beside a number.
-    keys.extend(dark_life::Slot::ALL.map(|s| s.key().to_owned()));
-    for key in [
-        "ui.pack",
-        "ui.pack_help",
-        "ui.pack_you",
-        "ui.pack_empty",
-        "stat.damage",
-        "stat.protection",
-        "stat.resist",
-        "stat.slash",
-        "stat.pierce",
-        "stat.blunt",
-        "stat.poison",
-        "stat.disease",
-        "stat.curse",
-        "stat.fire",
-        "stat.warmth",
-        "stat.cooling",
-        "stat.charm",
-        "stat.pockets",
-        "stat.pouches",
-    ] {
-        keys.push(key.to_owned());
-    }
     // What the engine has people say about parties (dark_world::party).
     for key in [
         "party.yes",

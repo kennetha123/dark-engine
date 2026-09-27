@@ -6,10 +6,6 @@
 //! `dark-cli preview-land <seed> <tiles> <tiles-per-pixel> <out.png>` draws the country a world
 //! seed makes, from far above: water, plain, and the steps up out of it.
 //!
-//! `dark-cli preview-world <project-dir> <scene> <tiles-per-pixel> <out.png>` draws a world
-//! scene's whole country the same way — inside its drawn outline, if it has one — with the
-//! places stamped on it outlined in white and its ways out in red.
-//!
 //! `dark-cli simulate <project-dir> [--seed n] [--runs n] [--lang code]` fast-forwards the world
 //! simulation (`world.ron`) through a year: the chronicle of one seed, or statistics over many.
 //!
@@ -65,19 +61,6 @@ fn main() -> ExitCode {
                 },
                 None => {
                     eprintln!("error: preview-land takes a seed, a size in tiles and a step");
-                    ExitCode::FAILURE
-                }
-            }
-        }
-        [cmd, project, scene, every, out] if cmd == "preview-world" => {
-            let Ok(every) = every.parse() else {
-                eprintln!("error: preview-world takes a number of tiles to the pixel");
-                return ExitCode::FAILURE;
-            };
-            match land::preview_world(project, scene, every, out) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(err) => {
-                    eprintln!("error: {err}");
                     ExitCode::FAILURE
                 }
             }

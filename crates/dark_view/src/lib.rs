@@ -399,46 +399,6 @@ impl MapView {
             sprite.layer = layer::GROUND;
             view.lay_wide(0, sprite, false);
         }
-        // Floors laid over it, flat, on the surface under their middle: the ground, or the top of
-        // a rise a town was levelled onto, which is drawn lifted by its height in a layer of its
-        // own — so the floor is too, after every top in that layer. Floors are meant for ground a
-        // place has levelled; one spanning several levels is drawn at its middle's. They draw in
-        // the order they are written, so a pier laid after the water is on the water.
-        let tile = terrain.tile();
-        for (nth, floor) in def.floors.iter().enumerate() {
-            let Some(rect) = frame_rect(floor.frame) else {
-                tracing::warn!(
-                    "{}: a floor names frame {} of the ground sheet, which has no such frame",
-                    map.name,
-                    floor.frame
-                );
-                continue;
-            };
-            let (col, row, w, h) = floor.tiles;
-            let middle = (
-                i64::from(col) + i64::from(w / 2),
-                i64::from(row) + i64::from(h / 2),
-            );
-            let level = terrain
-                .cell(middle.0, middle.1)
-                .and_then(Cell::level)
-                .unwrap_or(0);
-            let at = Vec2::new(col as f32, row as f32) * tile
-                - Vec2::new(0.0, f32::from(level) * terrain.level_height());
-            let area = Vec2::new(w as f32, h as f32) * tile;
-            let mut sprite = Sprite::new(ground_tex, rect, at, Vec2::ZERO);
-            sprite.repeat = area / Vec2::new(rect.w as f32, rect.h as f32);
-            if level == 0 {
-                sprite.layer = layer::GROUND;
-                sprite.sort_y = 0.0;
-            } else {
-                sprite.layer = layer::TERRAIN + i32::from(level.min(40));
-                // After every top in the layer, which sort by the rows they stand on.
-                sprite.sort_y = size.y + tile;
-            }
-            sprite.sub = 1 + i16::try_from(nth).unwrap_or(i16::MAX - 1);
-            view.lay_wide(0, sprite, false);
-        }
 
         // Which piece everything standing on the land belongs to, and how far each hangs beyond
         // it — which is what a view must look past itself to find them. The land is not made
