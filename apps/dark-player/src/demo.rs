@@ -60,6 +60,9 @@ pub struct DemoScene {
     /// Skeletons, by the `*.spine.ron` sheet path they are loaded from.
     rigs: HashMap<String, Rig>,
     story: dark_story::StoryDef,
+    /// The sky, as read off disk (`journals/engine/05` phase 2). All of it is in
+    /// [`crate::weather`]; this is the only place the rest of the view knows about it.
+    weather: crate::weather::WeatherLoad,
 }
 
 /// One frame's world, as the view draws it.
@@ -265,6 +268,7 @@ impl DemoScene {
             icons,
             rigs,
             story,
+            weather: crate::weather::WeatherLoad::read(project),
         })
     }
 
@@ -451,6 +455,7 @@ impl DemoScene {
             skeletons,
             poses: HashMap::new(),
             frame_meshes: Vec::new(),
+            weather: self.weather.upload(renderer)?,
             faded: None,
             fade_left: 0.0,
             choosing: Vec::new(),
@@ -692,6 +697,8 @@ pub struct DemoView {
     /// Each skeletal character's posed skeleton, by who it is.
     poses: HashMap<NetId, (usize, Pose)>,
     frame_meshes: Vec<Mesh>,
+    /// The sky overhead: which one it is, its particles and its wash (`crate::weather`).
+    weather: crate::weather::Weather,
     /// Fades to black seen so far (`None` before the first frame), and seconds left of the one
     /// showing.
     faded: Option<u32>,
@@ -704,6 +711,11 @@ pub struct DemoView {
 impl DemoView {
     pub fn toggle_debug(&mut self) {
         self.debug = !self.debug;
+    }
+
+    /// `--weather <sky>`: holds one sky whatever the calendar says, for a screenshot.
+    pub fn force_weather(&mut self, sky: Option<String>) {
+        self.weather.force(sky);
     }
 
     /// Switches to the project's next language and shows its name for a moment.
@@ -915,6 +927,20 @@ impl DemoView {
         self.draw_sparks();
         self.draw_health(characters, dt);
         let screen = (camera - half, half * 2.0);
+        // The sky overhead: its particles among the world's meshes, its wash over the lot and
+        // under the writing. The map's own region, not the spot stood on — so a town stamped onto
+        // a world map has its map's weather rather than its own, until `SceneDef::region_at` is
+        // there to ask (it is one argument away, `journals/engine/05` phase 2).
+        self.weather.draw(
+            frame.time,
+            maps.get(map).def.region.as_deref(),
+            camera,
+            screen,
+            self.white,
+            dt,
+            &mut self.frame_meshes,
+            &mut self.frame_sprites,
+        );
         self.draw_interface(renderer, characters, frame, screen, dt);
         self.draw_fade(frame.story.faded, screen, dt);
         // Skeletons of those no longer here are dropped.

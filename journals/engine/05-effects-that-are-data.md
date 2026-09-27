@@ -153,6 +153,120 @@ Phase 1 is this entry's execution. The rest are separate.
 - The real risk is later: phase 4 touches `apps/dark-player/src/demo.rs`, which another session
   is editing heavily. It waits until that lands.
 
+## Phase 2 in detail — weather (planned 2026-09-27)
+
+The one line above is not enough to build from. The design, worked out against what already
+exists, before executing it.
+
+### What is already there
+
+| Piece | Where |
+|---|---|
+| Seasons of the year, with an `id` | `dark_sim::CalendarDef::season(day)` — day counts from 1 |
+| The region a point stands in | `dark_assets::SceneDef::region_at((x, y))` |
+| Day and hour, replicated | `Frame::time` — a **zero-based** day and an hour in `0..24` |
+| A region's air through the day | `dark_life::Climate`, warmed by `CalendarDef::warmth(day)` |
+| A full-screen tint | `Demo::rect`, as `draw_fade` uses it |
+| Interiors | **None.** "There are no interiors yet" — every map is under the sky |
+
+So the only things missing are *which sky a place has* and *what that sky draws*.
+
+### Decisions
+
+**The calendar decides the weather, and there is no seed.** A sky is a pure function of
+`(day, hour, region)` and the project's own data — a hash of the spell and the region's name,
+picking from weights the designer wrote. No roll is stored, nothing is networked, and every
+client that holds the same project (which the handshake already checks) sees the same sky by
+construction.
+
+The cost is that day 47 in the Marches is wet in *every* year, not just this one. That is the
+right trade here and not only an expedient one: the calendar already fixes the seasons, the year
+*is* the content, and a player who learns that the rains come in the ninth week has learned
+something about the world. The alternative — mixing in the world seed — needs the seed on the
+client, which means the handshake, which means `dark_net::protocol`, and a protocol change buys
+variety nobody asked for. If it is ever wanted, it is one hash input.
+
+**The sky is world truth and lives in a simulation crate.** `WeatherDef` goes in `dark_sim`
+beside `CalendarDef`, in `world.ron`. Only the *picture* of a sky — which `*.fx.ron` it draws,
+how it tints the light — is presentation, and that lives in the project's `fx/weather.ron`, read
+by `dark_fx`.
+
+This is the opposite of how phase 1's `EffectDef` was placed, and deliberately. Nothing in the
+simulation reads an effect; but *whether it is raining* is exactly the kind of thing the
+simulation will want, the moment rain is to make anyone cold or wet. Putting the roll in
+presentation would make that a seam between two files a designer has to keep in step by hand.
+Putting it in `dark_sim` means `life.ron` can one day read the same answer. Nothing in the
+simulation reads it today, and that is fine — the placement is about which side of rule 1 the
+*fact* belongs on, not about who happens to ask first.
+
+**A spell, not a moment.** The day is cut into spells of a few hours; a spell gets one sky.
+Weather that could change every frame is not weather.
+
+### Shapes
+
+`world.ron` gains, in `dark_sim`:
+
+```ron
+weather: (
+    spell_hours: 6,
+    // The first line that fits wins, in the order they are written: the particular ones go at
+    // the top and a line naming neither season nor region goes last. Plainly first-come rather
+    // than most-particular-wins, because there is no honest answer to whether a season should
+    // outrank a region. A sky not named anywhere is clear.
+    chances: [
+        (season: "winter", region: "marches", skies: {"snow": 4, "clear": 3}),
+        (season: "winter", skies: {"clear": 5, "rain": 2}),
+        (skies: {"clear": 6, "rain": 2, "fog": 1}),
+    ],
+),
+```
+
+`fx/weather.ron`, read by `dark_fx`:
+
+```ron
+(
+    change_secs: 6.0,
+    skies: {
+        "rain": (effect: "fx/rain.fx.ron", tint: (0.72, 0.76, 0.88, 0.22)),
+        "snow": (effect: "fx/snow.fx.ron", tint: (0.86, 0.90, 1.0, 0.14)),
+        "fog":  (tint: (0.78, 0.80, 0.82, 0.30)),   // a sky with no particles at all
+    },
+)
+```
+
+`"clear"` is never listed: it is the absence of a sky, so a project says nothing to get one.
+
+### The player
+
+A new `apps/dark-player/src/weather.rs` holds all of it — which sky is overhead, the standing
+emitter, the cross-fade — and `demo.rs` gains only a field, a load and a draw call. **That is on
+purpose**: another session is editing `demo.rs` heavily in this same tree, and three small
+insertions can be committed on their own where a large edit could not.
+
+The emitter stands on the camera and is moved to it every frame, and the file's `area` is
+authored to cover the screen at the project's resolution. A sky that changes stops the old
+emitter — its last drops fall — and starts the new one, with the tint sliding across
+`change_secs`.
+
+`--weather <id>` forces a sky, so a screenshot can be taken of one.
+
+### Verification
+
+- The four gates, and `check-sim-deps.sh` still passing with `WeatherDef` in `dark_sim`.
+- Unit tests on the roll: the same day, hour and region always give the same sky; weights are
+  respected over a year; the most specific line wins; a spell holds for its hours and then may
+  change; no chances at all is always clear; day 1 is the first day (the off-by-one between the
+  clock's zero-based day and the calendar's first).
+- `--autopilot --weather rain --screenshot`, looked at.
+
+### Not in phase 2
+
+- **Sound.** Rain should be audible and is not. It needs FMOD events authored in the project.
+- Weather the world reacts to: being cold or wet in the rain. That is `life.ron` reading
+  `WeatherDef`, and it is its own piece of work.
+- Wind that moves anything but particles; lightning; puddles; snow that lies.
+- Interiors, because there are none.
+
 ## Non-goals
 
 - A node-graph shader editor. See Decisions.
@@ -207,10 +321,83 @@ colour does the tinting), `sheets/fx.sheet.ron`, `fx/rain.fx.ron`, `fx/smoke.fx.
   and fading as it climbs; rain fills the panel and lands. The smoke was tuned twice *in the file*
   between renders, which is the whole point of the phase.
 - `cargo fmt --all`, `cargo clippy` (clean for `dark_fx` and `dark-cli`), `cargo test --workspace
-  --exclude dark-player` all green, `check-sim-deps.sh` passes. `dark-player`'s `pad.rs` test does
-  not compile — that belongs to another session's uncommitted work in this tree, not to this
-  change, and nothing here touches `dark-player`.
+  --exclude dark-player` all green, `check-sim-deps.sh` passes. `dark-player`'s `pad.rs` test did
+  not compile, which this entry first put down to another session's work in the same tree.
+  **That was wrong**, and phase 2 found out why: `dark_model` had put `serde_json` in
+  `dark-player`'s tree through `gltf`, so `Vec::new()` no longer inferred. My own change, blamed
+  on somebody else because it appeared in a file they were editing. Fixed in
+  *Put back what was not mine to commit*.
 
 **Still owed, and unchanged by this phase:** phases 2–6 below. Added to the list: `dark-cli
 package` and `Project::fingerprint` do not know about `*.fx.ron`, exactly as they do not know
 about models. Neither is reachable from a scene yet; both come due together.
+
+### Phase 2 — weather (2026-09-27)
+
+Built to the design in *Phase 2 in detail* above, with the four gates green and `docs/PLAN.md
+§16.7` written in the same change. It rains in the game.
+
+**What landed.** `dark_sim::WeatherDef` / `SkyChance` / `CLEAR` in `world.ron`, with
+`WeatherDef::at` and `spell`, validated when the world is built (7 tests);
+`dark_fx::WeatherArt` / `Sky` reading `fx/weather.ron` (3 tests);
+`apps/dark-player/src/weather.rs`, the whole feature — which sky, the standing emitter, the
+cross-fade, the wash (4 tests); `--weather <sky>`. In the test project: a `weather` block in
+`world.ron`, `fx/weather.ron`, `fx/snow.fx.ron`, and `AGENTS.md` says what the flag does.
+
+`demo.rs` gained six lines: two fields, two constructor lines, a setter and one call. That was
+the point of putting the feature in its own file, and it held.
+
+**Where it differs from the design above.**
+
+- **The first line of `chances` that fits wins, full stop.** The design said "a season and a
+  region, then a season, then the rest", and writing it revealed there is no honest answer to
+  whether a season outranks a region — only a rule nobody could predict. Plain first-come is what
+  the prose had said all along; the ranking went.
+- **The region is the map's own, not the spot stood on.** `SceneDef::region_at`, which would
+  give a stamped town its own sky on a world map, is not on this branch yet — it is in another
+  session's working copy. `SceneDef::region` is, so that is what this uses, and the difference is
+  one argument when the other lands. The meadow declares its own region, so the screenshots below
+  are byte-identical either way.
+- Nothing else. The shapes are as sketched.
+
+**Verified.**
+
+- Eleven sabotages, each against the test that pins it. **Three passed on the first run and had
+  to be strengthened**, which is the whole reason for doing it:
+  - *the same moment always has the same sky* asserted exact answers that came from picking a
+    line, not from the hash — it could not see the region being dropped out of it. It now asserts
+    that two places on the same line differ somewhere in eighty days, and that one place's sky
+    changes within a day.
+  - *a world with no weather is clear* returned `clear` before ever reading `spell_hours`, so it
+    could not see `Default` handing out zero hours. (That bug was real and was caught by every
+    *other* test failing.) It now checks the default spell length and that such a world builds.
+  - *the clock's first day is the calendar's first day* compared two calls that `saturating_sub`
+    and a season-less calendar made identical — dropping the `+ 1` changed nothing. It now uses a
+    season beginning on the second day, so the two sides of the off-by-one land in different
+    seasons.
+- `--autopilot --weather rain|snow|fog --screenshot`, all three looked at: rain falls across the
+  screen under a cool wash, snow drifts and turns, fog is a pale wash with no particles at all,
+  and the interface stays clean above all of it.
+- And **without** the flag, at four hours of day one in Centreau: three spells clear and one
+  raining, chosen by the calendar. The three clear ones are pixel-identical to each other, which
+  is also how it is known that a clear sky costs nothing.
+- `preview-fx` on the new snow.
+- The four gates: `cargo fmt --all`, `cargo clippy --workspace --all-targets -D warnings` clean,
+  `cargo test --workspace` 45 result blocks all green, `check-sim-deps.sh` passes with
+  `WeatherDef` in `dark_sim`.
+
+**What this phase turned up on the way, which matters more than the weather.** Checking the
+staged tree in a worktree — rather than trusting that a commit built because the working tree did
+— showed that **`HEAD` had not compiled since `6fdafcb`**. Three of my commits this session staged
+shared files whole while another session was editing the same tree, and swept in halves of their
+work: `dark_view` drawing a scene's `floors`, `dark-cli` dispatching `preview-world`, the assets
+smoke test reading `dark_life::Slot`. A fourth failure, `pad.rs`'s `Vec::new()`, this entry had
+twice blamed on them and was mine: `dark_model` put `serde_json` in `dark-player`'s tree through
+`gltf`. All four are fixed in *Put back what was not mine to commit, and build again*.
+
+Two lessons, in order of importance:
+
+1. **A tree that builds is not a commit that builds.** Every commit from here is checked out of
+   the index into a worktree and built there before it is made. Nothing else can see this, and in
+   a shared tree it is not an edge case — it happened three times in one session.
+2. Staging a shared file whole is the mistake, every time. Only hunks.

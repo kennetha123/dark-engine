@@ -40,6 +40,163 @@ pub struct WorldDef {
     /// Seasons and the days that matter.
     #[serde(default, skip_serializing_if = "CalendarDef::is_empty")]
     pub calendar: CalendarDef,
+    /// What the sky does, by season and region.
+    #[serde(default, skip_serializing_if = "WeatherDef::is_empty")]
+    pub weather: WeatherDef,
+}
+
+/// What the sky is doing, worked out rather than stored (`journals/engine/05` phase 2).
+///
+/// **The calendar decides the weather, and there is no seed.** A sky is a pure function of the
+/// day, the hour and the region, so nothing is rolled, nothing is saved, and nothing is sent: two
+/// players holding the same project — which the handshake checks — see the same sky because they
+/// computed the same answer. Day 47 in the marches is wet every year, as the seasons come round
+/// every year; a player who learns when the rains come has learned something about the world.
+///
+/// This lives in a simulation crate although only the view reads it today. *Whether it is raining*
+/// is world truth — it is what `life.ron` will read the day rain is to make anyone cold — while
+/// the picture of a sky is presentation and lives in `dark_fx`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct WeatherDef {
+    /// How many hours one sky holds for. Weather that could change every frame is not weather.
+    #[serde(default = "six")]
+    pub spell_hours: u32,
+    /// The first line that fits wins, in the order they are written, so the particular ones go
+    /// first and a line naming neither season nor region goes last and means "otherwise". A place
+    /// no line covers at all is clear.
+    #[serde(default)]
+    pub chances: Vec<SkyChance>,
+}
+
+/// One line of [`WeatherDef::chances`]: which skies a place gets, and how often.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SkyChance {
+    /// The season it applies in, by [`SeasonDef::id`]. Every season, if unset.
+    #[serde(default)]
+    pub season: Option<String>,
+    /// The region it applies in, by [`RegionDef::id`]. Everywhere, if unset.
+    #[serde(default)]
+    pub region: Option<String>,
+    /// Sky id to weight. `"clear"` may be named like any other; a sky with no weight never comes.
+    pub skies: std::collections::BTreeMap<String, u32>,
+}
+
+fn six() -> u32 {
+    6
+}
+
+/// Written out rather than derived: a world that says nothing about the sky must still hold a
+/// spell length that makes sense, and `#[derive(Default)]` would hand it zero hours.
+impl Default for WeatherDef {
+    fn default() -> Self {
+        Self {
+            spell_hours: six(),
+            chances: Vec::new(),
+        }
+    }
+}
+
+/// The sky when nothing says otherwise. Never drawn: it is the absence of weather, so a project
+/// says nothing at all to have one.
+pub const CLEAR: &str = "clear";
+
+impl WeatherDef {
+    pub fn is_empty(&self) -> bool {
+        self.chances.is_empty()
+    }
+
+    /// Which spell of the year `day` (from 1) and `hour` (0 to 24) fall in. Counted from the
+    /// start of the year rather than the start of the day, so a spell that runs past midnight is
+    /// one spell and not two.
+    pub fn spell(&self, day: u32, hour: f32) -> u32 {
+        let hours = self.spell_hours.max(1);
+        let since = u64::from(day.saturating_sub(1)) * 24 + hour.clamp(0.0, 24.0) as u64;
+        (since / u64::from(hours)) as u32
+    }
+
+    /// The sky over `region` at `day` (from 1) and `hour`.
+    ///
+    /// The same three arguments always give the same answer, on every machine, for ever.
+    pub fn at<'a>(
+        &'a self,
+        calendar: &CalendarDef,
+        day: u32,
+        hour: f32,
+        region: Option<&str>,
+    ) -> &'a str {
+        let season = calendar.season(day).map(|s| s.id.as_str());
+        let Some(line) = self.line(season, region) else {
+            return CLEAR;
+        };
+        let total: u32 = line.skies.values().sum();
+        if total == 0 {
+            return CLEAR;
+        }
+        // Hashed rather than rolled: no state to keep, and a region's weather does not depend on
+        // how many other regions were asked about first.
+        let mut roll = spread(self.spell(day, hour), region.unwrap_or("")) % u64::from(total);
+        for (sky, weight) in &line.skies {
+            let weight = u64::from(*weight);
+            if roll < weight {
+                return sky;
+            }
+            roll -= weight;
+        }
+        CLEAR
+    }
+
+    /// The line that governs a place: **the first one that fits**, in the order they are written.
+    ///
+    /// Plainly first-come rather than most-particular-wins, because there is no honest answer to
+    /// whether a line naming only a season beats one naming only a region, and a rule nobody can
+    /// predict is worse than one they have to order by hand. So: the particular lines go at the
+    /// top, and a line naming neither season nor region goes at the bottom and means "otherwise".
+    fn line(&self, season: Option<&str>, region: Option<&str>) -> Option<&SkyChance> {
+        self.chances.iter().find(|c| {
+            c.season.as_deref().is_none_or(|s| Some(s) == season)
+                && c.region.as_deref().is_none_or(|r| Some(r) == region)
+        })
+    }
+
+    pub fn validate(&self, seasons: &CalendarDef, regions: &[RegionDef]) -> Result<(), DefError> {
+        let bad = |m: String| Err(DefError::Invalid(m));
+        if self.spell_hours == 0 || self.spell_hours > 24 {
+            return bad("weather: a spell lasts from 1 to 24 hours".into());
+        }
+        for line in &self.chances {
+            if let Some(season) = &line.season
+                && !seasons.seasons.iter().any(|s| &s.id == season)
+            {
+                return bad(format!("weather: {season} is not a season"));
+            }
+            if let Some(region) = &line.region
+                && !regions.iter().any(|r| &r.id == region)
+            {
+                return bad(format!("weather: {region} is not a region"));
+            }
+            if line.skies.is_empty() {
+                return bad("weather: a line with no skies in it says nothing".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Spreads a spell and a place over the whole of a `u64`, so neighbouring spells are unalike.
+/// Not cryptography and not a random number generator: the same input must give the same output
+/// on every machine and in every build, for ever, which is why it is written out here rather than
+/// taken from a hasher whose results are free to change.
+fn spread(spell: u32, region: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in region.as_bytes().iter().copied().chain(spell.to_le_bytes()) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    // The low bits of an FNV hash move little; stir them before anything takes a remainder.
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    hash ^= hash >> 29;
+    hash
 }
 
 /// The year's seasons and dated events. Days count from 1 to 365.

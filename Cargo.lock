@@ -868,6 +868,7 @@ dependencies = [
  "dark_audio",
  "dark_combat",
  "dark_core",
+ "dark_fx",
  "dark_life",
  "dark_model",
  "dark_net",

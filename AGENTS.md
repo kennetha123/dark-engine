@@ -71,6 +71,9 @@ address is turned away instead of walking on ground the host does not have.
 `--day-secs <n>` shortens the day for testing; `--hour <0-23>` starts the player's first day at
 that hour (for watching a villager's day, or the light; `dark-host` has no such flag);
 `--player <uuid>` keeps a stable identity.
+The sky over a place is worked out from the day, the hour and the region (`world.ron`'s `weather`,
+drawn as `fx/weather.ron` says), so it is the same for everyone in the game and the same on the
+same day of any year; `--weather <sky>` holds one of them for a screenshot.
 In the game: WASD/arrows walk, Shift runs, Space jumps, J attacks (again to combo), K dodges,
 E talks to an NPC in reach (number keys answer when a conversation offers choices; on its last
 line E ends it; walking away ends it any time) or packs up your tent, Z sleeps (when every player online sleeps,

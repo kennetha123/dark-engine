@@ -23,7 +23,10 @@ pub mod world;
 
 use serde::{Deserialize, Serialize};
 
-pub use def::{CalendarDef, DefError, EventDef, SeasonDef, Social, Tuning, WorldDef};
+pub use def::{
+    CLEAR, CalendarDef, DefError, EventDef, RegionDef, SeasonDef, SkyChance, Social, Tuning,
+    WeatherDef, WorldDef,
+};
 pub use director::{HeroParty, Location, Step, YEAR_HOURS};
 pub use rng::Rng;
 pub use social::{Parting, Party, Refusal};
@@ -72,6 +75,7 @@ impl WorldSim {
                 .ok_or_else(|| DefError::Invalid("no friendly faction for players".into()))?,
         };
         def.calendar.validate()?;
+        def.weather.validate(&def.calendar, &def.regions)?;
         Ok(Self {
             world,
             party,

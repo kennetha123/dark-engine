@@ -927,6 +927,48 @@ weighed and refused.
   either — the same debt models carry (§16.5), and it comes due for both the moment a scene can
   name one.
 
+## 16.7 Weather (M9, `journals/engine/05` phase 2)
+
+The first real customer for §16.6, and the biggest thing a player feels in a year-long game.
+
+- **The calendar decides the weather, and there is no seed.** The sky over a place is a pure
+  function of the day, the hour and the region: `dark_sim::WeatherDef::at`, hashing the spell and
+  the region's name and picking from weights a designer wrote. Nothing is rolled, nothing is
+  saved, and **nothing is sent** — two players standing together see the same sky because they
+  computed the same answer from a project the handshake already made them agree on.
+- So the same day of the year is the same weather in every year. That is the trade, and it is a
+  deliberate one: the calendar already fixes the seasons, and a player who learns that the rains
+  come in the ninth week has learned something about the world. Mixing in the world seed would
+  need the seed on the client, which means the handshake, which means the protocol.
+- **Whether it is raining is world truth; the picture of it is not.** `WeatherDef` lives in
+  `dark_sim` beside `CalendarDef`, in `world.ron` — it is what `life.ron` will read the day rain
+  is to make anyone cold or wet. Only the mapping from a sky to a `*.fx.ron` and a tint is
+  presentation, and that is `dark_fx::WeatherArt` reading the project's `fx/weather.ron`. This is
+  the opposite of where §16.6 puts `EffectDef`, and for the opposite reason.
+- **The first line of `chances` that fits wins**, in the order written — not the most particular
+  one. There is no honest answer to whether a line naming only a season should beat one naming
+  only a region, and a rule nobody can predict is worse than one they order by hand. The
+  particular lines go at the top; a line naming neither means "otherwise".
+- **A spell, not a moment.** The year is cut into spells of `spell_hours`, counted from the start
+  of the year so one running past midnight is one spell and not two. Weather that could change
+  every frame is not weather.
+- `"clear"` is the absence of a sky: never listed in `fx/weather.ron`, never drawn, free.
+- A sky may be tint alone — fog has no particles at all.
+- In the player, all of it is `apps/dark-player/src/weather.rs`; `demo.rs` holds a field and one
+  call. The emitter stands on the camera and is moved to it each frame, so the file's `area` is
+  authored to cover the screen at the project's resolution. The wash goes on `layer::UI` below
+  everything else drawn there: over the whole world, canopies included, and under the writing.
+- **`--weather <sky>`** holds one sky whatever the calendar says, for a screenshot.
+- The clock counts days from zero and the calendar from one. The `+ 1` is in `Weather::sky` and
+  nowhere else.
+- The region is the **map's own** (`SceneDef::region`), not the spot stood on, so a town stamped
+  onto a world map has its map's weather rather than its own. One argument away from right, once
+  `SceneDef::region_at` is on this branch.
+- Known gaps: **no sound** — rain should be audible and needs FMOD events in the project; nothing
+  is colder or wetter for being rained on (that is `life.ron` reading `WeatherDef`); no wind that
+  moves anything but particles, no lightning, no puddles, no snow that lies; and no interiors to
+  be dry in, because the game has none yet.
+
 ## 17. Save, storylets and endings (as built in M7)
 
 - The whole world is saved (`dark_world::WorldSave`, one RON file, version 1): the world

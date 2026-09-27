@@ -16,7 +16,9 @@ use dark_render::layer;
 use serde::{Deserialize, Serialize};
 
 mod live;
+mod weather;
 pub use live::{Art, EffectId, Effects, Handle, Particle};
+pub use weather::{Sky, WeatherArt};
 
 /// A span a value is picked from, evenly. A single number in the file means a fixed value.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]

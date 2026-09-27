@@ -42,6 +42,7 @@ mod pad;
 mod saves;
 mod settings;
 mod title;
+mod weather;
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -229,6 +230,8 @@ struct Player {
     seen: Vec<DrawCharacter>,
     audio: Audio,
     overlay: bool,
+    /// `--weather <sky>`: one sky whatever the calendar says, for a screenshot.
+    weather: Option<String>,
     /// The Esc menu is open: the character takes no input, and the world waits while nobody
     /// else is online.
     menu: bool,
@@ -756,6 +759,7 @@ impl Game for Player {
                     if self.overlay {
                         view.toggle_debug();
                     }
+                    view.force_weather(self.weather.clone());
                     if let Some(lang) = &self.lang
                         && !view.set_language(lang)
                     {
@@ -1183,6 +1187,8 @@ struct Args {
     /// Open it on the games to play together in (docs/PLAN.md §23).
     together: bool,
     lang: Option<String>,
+    /// `--weather <sky>`: one sky whatever the calendar says.
+    weather: Option<String>,
     save: Option<PathBuf>,
     world_seed: Option<u64>,
     screenshot: Option<PathBuf>,
@@ -1211,6 +1217,7 @@ fn parse_args() -> Result<Args, String> {
         title: false,
         together: false,
         lang: None,
+        weather: None,
         save: None,
         world_seed: None,
         screenshot: None,
@@ -1284,6 +1291,7 @@ fn parse_args() -> Result<Args, String> {
             "--project" => args.project = Some(value.into()),
             "--scene" => args.scene = Some(value),
             "--lang" => args.lang = Some(value),
+            "--weather" => args.weather = Some(value),
             "--save" => args.save = Some(value.into()),
             "--world-seed" => args.world_seed = Some(value.parse().map_err(|_| bad("a number"))?),
             "--clients" => args.clients = value.parse().map_err(|_| bad("a number"))?,
@@ -1588,6 +1596,7 @@ fn main() -> ExitCode {
         seen: Vec::new(),
         audio,
         overlay: args.overlay,
+        weather: args.weather.clone(),
         menu: args.menu,
         to_title: false,
         start,

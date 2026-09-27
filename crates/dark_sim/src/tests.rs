@@ -542,3 +542,216 @@ fn going_over_to_the_demons_costs_titles_standing_and_friends() {
     // And the other side will not follow them now.
     assert_eq!(sim.ask_to_join(me, fenna), Err(Refusal::Enemy));
 }
+
+/// A little weather over the test world: a winter that snows in the wilds, a wetter winter
+/// everywhere else, and an otherwise.
+const TEST_WEATHER: &str = r#"
+    calendar: (seasons: [
+        (id: "spring", name: "Spring", from_day: 1),
+        (id: "winter", name: "Winter", from_day: 300, warmth: -800),
+    ]),
+    weather: (
+        spell_hours: 6,
+        chances: [
+            (season: "winter", region: "wilds", skies: {"snow": 1}),
+            (season: "winter", skies: {"rain": 1}),
+            (region: "capital", skies: {"fog": 1}),
+            (skies: {"clear": 3, "rain": 1}),
+        ],
+    ),
+"#;
+
+/// The test world with a weather block spliced in, so every weather test reads the same way.
+fn world_with(weather: &str) -> WorldDef {
+    let text = TEST_WORLD.replacen('(', &format!("({weather}"), 1);
+    WorldDef::parse(&text).expect("the test's own world parses")
+}
+
+fn weather_world() -> WorldDef {
+    world_with(TEST_WEATHER)
+}
+
+/// The whole design rests on this: the same day, hour and place give the same sky on every
+/// machine, for ever, with nothing stored and nothing sent. If it ever stopped being true, two
+/// players standing together would see different skies.
+#[test]
+fn the_same_moment_and_place_always_has_the_same_sky() {
+    let def = weather_world();
+    let sky = |day, hour, region| {
+        def.weather
+            .at(&def.calendar, day, hour, Some(region))
+            .to_owned()
+    };
+    for day in [1u32, 47, 200, 365] {
+        for hour in [0.0f32, 5.9, 6.0, 23.9] {
+            for region in ["wilds", "capital", "village"] {
+                assert_eq!(
+                    sky(day, hour, region),
+                    sky(day, hour, region),
+                    "day {day} at {hour} in {region}"
+                );
+            }
+        }
+    }
+    // Two places governed by the same line still have their own weather, or a region would be
+    // nothing but a way of choosing a line and the whole country would rain at once.
+    assert!(
+        (1..80).any(|day| sky(day, 12.0, "village") != sky(day, 12.0, "lair")),
+        "two places on the same line never once differed in eighty days"
+    );
+    // And one place's spells are not all alike, which is the other half of the same thing.
+    assert!(
+        (0..8).any(|spell| sky(3, spell as f32 * 3.0, "village") != sky(3, 0.0, "village")),
+        "a place's sky never changed through a whole day"
+    );
+    // A place in no region at all still has a sky rather than a panic.
+    assert_eq!(
+        def.weather.at(&def.calendar, 100, 12.0, None),
+        def.weather.at(&def.calendar, 100, 12.0, None),
+    );
+}
+
+/// The first line that fits governs, in the order they are written — not the most particular
+/// one, because nobody can predict whether a season should outrank a region.
+#[test]
+fn the_first_line_that_fits_is_the_one_that_governs() {
+    let def = weather_world();
+    let at = |day, region| def.weather.at(&def.calendar, day, 12.0, Some(region));
+    assert_eq!(
+        at(310, "wilds"),
+        "snow",
+        "the winter-in-the-wilds line is first"
+    );
+    assert_eq!(
+        at(310, "capital"),
+        "rain",
+        "and winter is written above the capital"
+    );
+    assert_eq!(
+        at(100, "capital"),
+        "fog",
+        "out of winter the capital's line is reached"
+    );
+    // A region nothing names falls to the last line, which is mostly clear.
+    let village: Vec<&str> = (1..=40).map(|day| at(day, "village")).collect();
+    assert!(
+        village.contains(&"clear") && village.contains(&"rain"),
+        "{village:?}"
+    );
+    assert!(
+        village.iter().all(|s| *s == "clear" || *s == "rain"),
+        "nothing else is on that line: {village:?}"
+    );
+}
+
+/// The weights are what a designer actually tunes, so they have to mean something over a year.
+#[test]
+fn a_sky_comes_about_as_often_as_its_weight() {
+    let def = weather_world();
+    let mut wet = 0;
+    let mut spells = 0;
+    for day in 1..300 {
+        for hour in [0.0f32, 6.0, 12.0, 18.0] {
+            spells += 1;
+            if def.weather.at(&def.calendar, day, hour, Some("village")) == "rain" {
+                wet += 1;
+            }
+        }
+    }
+    // One part in four, over a year of spells outside winter.
+    let share = wet as f32 / spells as f32;
+    assert!(
+        (0.20..=0.30).contains(&share),
+        "rain fell over {share:.3} of {spells} spells, and the file asks for a quarter"
+    );
+}
+
+/// A spell holds its sky for its hours, and the day it changes is the day the year turns over —
+/// not midnight, or a spell that ran past it would be two.
+#[test]
+fn a_sky_holds_for_its_spell() {
+    let def = weather_world();
+    assert_eq!(def.weather.spell(1, 0.0), 0);
+    assert_eq!(def.weather.spell(1, 5.99), 0);
+    assert_eq!(def.weather.spell(1, 6.0), 1);
+    assert_eq!(
+        def.weather.spell(2, 0.0),
+        4,
+        "the next day carries on counting"
+    );
+    // Four spells in a day, at six hours each, and one of them differs from the one before it
+    // somewhere in the year — or a spell would be a day.
+    let day_of = |day| {
+        (0..4)
+            .map(|q| {
+                def.weather
+                    .at(&def.calendar, day, q as f32 * 6.0, Some("village"))
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        (1..60).any(|day| day_of(day).windows(2).any(|w| w[0] != w[1])),
+        "the sky never changed within a day in two months"
+    );
+    // A spell of a whole day never changes within one.
+    let whole = world_with(&TEST_WEATHER.replace("spell_hours: 6", "spell_hours: 24"));
+    assert!(
+        (1..60).all(|day| {
+            let skies = (0..4)
+                .map(|q| {
+                    whole
+                        .weather
+                        .at(&whole.calendar, day, q as f32 * 6.0, Some("village"))
+                })
+                .collect::<Vec<_>>();
+            skies.windows(2).all(|w| w[0] == w[1])
+        }),
+        "a spell of a whole day changed inside one"
+    );
+}
+
+/// A world that says nothing about the sky has clear weather, not a crash and not a default
+/// downpour.
+#[test]
+fn a_world_with_no_weather_is_clear() {
+    let def = WorldDef::parse(TEST_WORLD).unwrap();
+    assert!(def.weather.is_empty());
+    assert_eq!(
+        def.weather.at(&def.calendar, 40, 12.0, Some("wilds")),
+        CLEAR
+    );
+    assert_eq!(def.weather.at(&def.calendar, 40, 12.0, None), CLEAR);
+    // The whole of it, not only the part that draws: a world saying nothing about the sky still
+    // has to hold a spell length that makes sense, or it is refused the moment it is built —
+    // which is exactly what `#[derive(Default)]` would do, by handing it no hours at all.
+    assert!(
+        (1..=24).contains(&WeatherDef::default().spell_hours),
+        "a spell of {} hours",
+        WeatherDef::default().spell_hours
+    );
+    WorldSim::new(&def, 1).expect("a world with no weather still builds");
+}
+
+/// A file naming a season or a region that does not exist is a mistake worth catching when the
+/// world is built, not a sky that silently never comes.
+#[test]
+fn weather_must_name_seasons_and_regions_that_exist() {
+    let refuses = |from: &str, to: &str| {
+        let def = world_with(&TEST_WEATHER.replace(from, to));
+        assert!(
+            WorldSim::new(&def, 1).is_err(),
+            "{to} should have been refused"
+        );
+    };
+    refuses(
+        r#"season: "winter", region: "wilds""#,
+        r#"season: "monsoon", region: "wilds""#,
+    );
+    refuses(
+        r#"region: "capital", skies"#,
+        r#"region: "atlantis", skies"#,
+    );
+    refuses("spell_hours: 6", "spell_hours: 0");
+    // And the world as written is accepted.
+    WorldSim::new(&weather_world(), 1).expect("the test's own weather is fine");
+}
