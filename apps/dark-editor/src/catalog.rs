@@ -162,6 +162,20 @@ pub fn sheet_files(project: &Project) -> Vec<String> {
     list
 }
 
+/// Every effect file of the project: `fx/*.fx.ron` (`journals/engine/05`).
+pub fn fx_files(project: &Project) -> Vec<String> {
+    files(project, "fx", ".fx.ron")
+}
+
+/// An effect's short name: `fx/rain.fx.ron` is "rain".
+pub fn fx_name(path: &str) -> &str {
+    let file = Path::new(path)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(path);
+    file.strip_suffix(".fx.ron").unwrap_or(file)
+}
+
 /// A scene's short name: `scenes/meadow.ron` is "meadow".
 pub fn scene_name(path: &str) -> &str {
     let file = Path::new(path)

@@ -969,6 +969,35 @@ The first real customer for §16.6, and the biggest thing a player feels in a ye
   moves anything but particles, no lightning, no puddles, no snow that lies; and no interiors to
   be dry in, because the game has none yet.
 
+## 16.8 The Effects workspace (M9, `journals/engine/05` phase 3)
+
+The editor's sixth tab: a form for a `*.fx.ron` and the effect playing beside it. **This is the
+tool** the entry weighed a node graph against and chose instead — a panel of numbers that shows
+the result.
+
+- **The preview runs the game's own code.** The editor runs `dark_fx::Effects` and hands its
+  meshes to `dark_render`, offscreen, through the same `Viewport` the map view draws through
+  (`render_meshes`) — the same blending, ordering and rounding a player gets. A tool whose whole
+  promise is *this is what you will see* cannot afford a second implementation that drifts. Only
+  one workspace draws in a frame, so one renderer serves both.
+- **Tuning does not restart the effect.** `Effects::retune` swaps a definition under its live
+  particles: what is in the air keeps the speed and lifetime it was born with, and everything born
+  after follows the new numbers. Dragging `rate` changes the fall you are watching instead of
+  emptying the screen, which is the difference between a number you can judge and one you cannot.
+  A retune whose art does not fit is refused whole — an effect is never left half-swapped.
+- **A written file must be a file that opens.** `Range` reads as a number or a pair, so it is
+  written back the same way; the derived `Serialize` would emit `(low: 1.0, high: 1.0)`, which its
+  own `Deserialize` refuses, and every file the editor saved would be one it could not open again.
+  A round trip is pinned by a test.
+- Saving loses comments, exactly as `Project::save_sheet_def` does and says.
+- The backgrounds to judge a particle against are written **as they look** and converted to linear
+  for the renderer's `clear`, which is in light rather than in sRGB: handing 0.22 over directly
+  paints a dusk half way to daylight.
+- `EffectDef::plain` is the one starting point, so what the editor makes and what a file leaves
+  out cannot drift apart.
+- Known gaps: `fx/weather.ron` — which sky draws which effect — has no screen of its own; there is
+  no curve editor, because `Fade` is two values and a line between them.
+
 ## 17. Save, storylets and endings (as built in M7)
 
 - The whole world is saved (`dark_world::WorldSave`, one RON file, version 1): the world
@@ -1033,7 +1062,7 @@ The first real customer for §16.6, and the biggest thing a player feels in a ye
   top; the project's maps (with New map, Start here and Delete map) and a palette of every prop
   sheet's pictures on the left; the map in the middle; what is selected (or the map's own
   properties) on the right; a status line below. Workspaces: **Maps**, **Database**, **Story**,
-  **Text** and **Sheets**.
+  **Text**, **Sheets** and **Effects** (§16.8).
 
   Tools: Select (click, drag to move, Delete), Terrain (paint ground, hills 1–3 and walls; the
   right button paints plain ground; a brush one to sixteen tiles wide, and a Fill that floods

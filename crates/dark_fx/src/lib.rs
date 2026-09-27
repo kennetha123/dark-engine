@@ -21,7 +21,7 @@ pub use live::{Art, EffectId, Effects, Handle, Particle};
 pub use weather::{Sky, WeatherArt};
 
 /// A span a value is picked from, evenly. A single number in the file means a fixed value.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Range {
     pub low: f32,
     pub high: f32,
@@ -61,6 +61,22 @@ impl<'de> Deserialize<'de> for Range {
             Written::Fixed(value) => Range::at(value),
             Written::Span(low, high) => Range { low, high },
         })
+    }
+}
+
+/// Written back the way it is read: a number when it does not vary, a pair when it does. The
+/// derived form would emit `(low: 1.0, high: 1.0)`, which [`Range`]'s own `Deserialize` refuses —
+/// the editor would save files it could not open again.
+impl Serialize for Range {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeTuple;
+        if self.low == self.high {
+            return s.serialize_f32(self.low);
+        }
+        let mut pair = s.serialize_tuple(2)?;
+        pair.serialize_element(&self.low)?;
+        pair.serialize_element(&self.high)?;
+        pair.end()
     }
 }
 
@@ -183,6 +199,30 @@ pub enum EffectError {
 }
 
 impl EffectDef {
+    /// The smallest effect there is: the first frame of `sheet`, born at a steady rate, living a
+    /// second, fading out as it goes. What the editor starts a new one from, and what every
+    /// default in this file adds up to.
+    pub fn plain(sheet: impl Into<String>) -> Self {
+        Self {
+            sheet: sheet.into(),
+            frames: vec![0],
+            rate: 20.0,
+            burst: 0,
+            life: a_second(),
+            area: (0.0, 0.0),
+            lift: Range::default(),
+            drift: Drift::default(),
+            gravity: 0.0,
+            drag: 0.0,
+            lands: false,
+            size: one_to_one(),
+            spin: Range::default(),
+            colour: white_to_clear(),
+            layer: default_layer(),
+            cap: default_cap(),
+        }
+    }
+
     /// Reads a `*.fx.ron`, checked. An effect that cannot make sense is refused here rather than
     /// drawing nothing later and leaving somebody to wonder why.
     pub fn load(project: &Project, path: impl AsRef<Path>) -> Result<Self, EffectError> {
@@ -198,6 +238,33 @@ impl EffectDef {
         })?;
         def.check(&shown)?;
         Ok(def)
+    }
+
+    /// Writes it back to `path`. **Comments in the file are not kept**, as
+    /// `Project::save_sheet_def` does not keep them either: an effect file is numbers, and the
+    /// prose about why belongs in `journals/` rather than beside a `gravity:` somebody is about
+    /// to drag.
+    pub fn save(&self, project: &Project, path: impl AsRef<Path>) -> Result<(), EffectError> {
+        let shown = path.as_ref().to_string_lossy().into_owned();
+        self.check(&shown)?;
+        let config = ron::ser::PrettyConfig::default()
+            .extensions(ron::extensions::Extensions::IMPLICIT_SOME)
+            .struct_names(false);
+        let body = ron::ser::to_string_pretty(self, config).map_err(|e| EffectError::Invalid {
+            path: shown.clone(),
+            what: e.to_string(),
+        })?;
+        let full = project.path(&path);
+        if let Some(dir) = full.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| EffectError::Invalid {
+                path: shown.clone(),
+                what: e.to_string(),
+            })?;
+        }
+        std::fs::write(&full, body + "\n").map_err(|e| EffectError::Invalid {
+            path: shown,
+            what: e.to_string(),
+        })
     }
 
     /// Refuses an effect that could never be seen. `named` is what the message calls it: the file
@@ -360,6 +427,46 @@ mod tests {
             .expect("parses")
             .check("t.fx.ron")
             .expect("a one-shot is fine");
+    }
+
+    /// The editor writes these files back, so what comes out has to go back in. A `Range` is the
+    /// trap: it reads as a number or a pair, and the derived `Serialize` would write a struct
+    /// that its own `Deserialize` refuses — every file saved would be a file that no longer opens.
+    #[test]
+    fn a_file_written_back_reads_the_same() {
+        let before = written(
+            "rate: 90.0, burst: 4, life: (0.8, 1.4), area: (320.0, 24.0), lift: 200.0, \
+             drift: (x: (-6.0, 6.0), lift: (-260.0, -220.0), y: 30.0), gravity: -40.0, \
+             drag: 0.2, lands: true, size: (from: 0.5, to: 2.0), spin: (-2.0, 2.0), \
+             colour: (from: (1.0, 1.0, 1.0, 1.0), to: (0.5, 0.5, 0.5, 0.0)), layer: 100, cap: 64",
+        )
+        .expect("the test's own effect parses");
+        let config = ron::ser::PrettyConfig::default()
+            .extensions(ron::extensions::Extensions::IMPLICIT_SOME)
+            .struct_names(false);
+        let text = ron::ser::to_string_pretty(&before, config).expect("it writes");
+        let after: EffectDef = ron::Options::default()
+            .with_default_extension(ron::extensions::Extensions::IMPLICIT_SOME)
+            .from_str(&text)
+            .unwrap_or_else(|e| panic!("what was written does not read back: {e}\n{text}"));
+        assert_eq!(before, after);
+        // And the shorthand survives: a range that does not vary is still written as a number.
+        assert!(text.contains("lift: 200"), "{text}");
+        assert!(
+            text.contains("(-6"),
+            "a range that varies is still a pair: {text}"
+        );
+    }
+
+    /// What a new effect starts as must be one the loader accepts, or the editor's way of making
+    /// one would be a way of making broken files.
+    #[test]
+    fn the_effect_a_new_file_starts_as_is_a_valid_one() {
+        let def = EffectDef::plain("s.sheet.ron");
+        def.check("fx/new.fx.ron").expect("a new effect loads");
+        // And it is the same as a file that says nothing but what it must, so the defaults in
+        // this file and the one the editor starts from cannot drift apart.
+        assert_eq!(def, written("rate: 20.0").expect("parses"));
     }
 
     /// The count a file is asking for, which is what a cap is judged against.

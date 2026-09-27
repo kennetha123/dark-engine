@@ -129,6 +129,28 @@ impl Effects {
     /// nothing later. A def does not only arrive from a file, so the check cannot live in
     /// [`EffectDef::load`] alone.
     pub fn add(&mut self, def: EffectDef, art: Art) -> Result<EffectId, EffectError> {
+        Self::agree(&def, &art)?;
+        self.kinds.push(Kind { def, art });
+        Ok(EffectId(self.kinds.len() as u32 - 1))
+    }
+
+    /// Swaps an effect's definition under its live particles.
+    ///
+    /// For tuning: dragging a number should change the fall being watched, not start it again
+    /// from an empty screen, or there is nothing to judge the number by. What is already in the
+    /// air keeps the speed and lifetime it was born with; everything born from here on follows
+    /// the new definition.
+    ///
+    /// Refused, and nothing changed, if the definition and its art disagree — an effect must
+    /// never be left half-swapped.
+    pub fn retune(&mut self, kind: EffectId, def: EffectDef, art: Art) -> Result<(), EffectError> {
+        Self::agree(&def, &art)?;
+        self.kinds[kind.0 as usize] = Kind { def, art };
+        Ok(())
+    }
+
+    /// What [`Self::add`] and [`Self::retune`] both insist on.
+    fn agree(def: &EffectDef, art: &Art) -> Result<(), EffectError> {
         def.check(&def.sheet)?;
         if art.frames.len() != def.frames.len() {
             return Err(EffectError::Invalid {
@@ -146,8 +168,7 @@ impl Effects {
                 what: "the sheet's page has no size".into(),
             });
         }
-        self.kinds.push(Kind { def, art });
-        Ok(EffectId(self.kinds.len() as u32 - 1))
+        Ok(())
     }
 
     pub fn def(&self, kind: EffectId) -> &EffectDef {
@@ -720,6 +741,61 @@ mod tests {
             .add(def("rate: 0.0"), art(1))
             .expect_err("nothing would ever be born");
         assert!(err.to_string().contains("ever born"), "{err}");
+    }
+
+    /// Tuning a number must change the fall being watched, not start it over: an empty screen on
+    /// every drag tick is nothing to judge a number by.
+    #[test]
+    fn retuning_changes_what_is_born_without_disturbing_what_is_flying() {
+        let (mut fx, id) = with("burst: 3, life: 100.0, rate: 0.0, drift: (x: 10.0)");
+        let handle = fx.standing(id, Vec2::ZERO);
+        fx.update(1.0);
+        let flying: Vec<Vec2> = fx.particles(handle).unwrap().iter().map(|p| p.at).collect();
+        assert_eq!(flying.len(), 3);
+
+        // Twice as fast across, and now giving birth.
+        fx.retune(
+            id,
+            def("burst: 3, life: 100.0, rate: 60.0, drift: (x: 20.0)"),
+            art(1),
+        )
+        .expect("the art still fits");
+        fx.update(1.0);
+        let all = fx.particles(handle).unwrap();
+        assert_eq!(
+            all.len(),
+            63,
+            "sixty born in the second, and the three still up"
+        );
+        for (old, now) in flying.iter().zip(all) {
+            assert!(
+                (now.at.x - old.x - 10.0).abs() < 1e-3,
+                "one already flying kept the speed it was born with: {old:?} -> {:?}",
+                now.at
+            );
+        }
+        assert!(
+            all[3..].iter().all(|p| (p.speed.x - 20.0).abs() < 1e-3),
+            "and the new ones took the new speed"
+        );
+    }
+
+    /// A refused retune must leave the effect exactly as it was. Half-swapping it would draw a
+    /// definition against the wrong pictures.
+    #[test]
+    fn a_retune_that_does_not_fit_changes_nothing() {
+        let (mut fx, id) = with("burst: 1, life: 10.0");
+        fx.standing(id, Vec2::ZERO);
+        let before = fx.def(id).clone();
+        let three: EffectDef =
+            ron::from_str(r#"(sheet: "s.sheet.ron", frames: [0, 1, 2], burst: 1)"#)
+                .expect("parses");
+        fx.retune(id, three, art(1))
+            .expect_err("three frames, one rectangle");
+        assert_eq!(fx.def(id), &before, "it is as it was");
+        fx.retune(id, def("rate: 0.0"), art(1))
+            .expect_err("nothing would ever be born");
+        assert_eq!(fx.def(id), &before, "still as it was");
     }
 
     /// Nothing is drawn or advanced for an effect that is not playing, and a handle that has

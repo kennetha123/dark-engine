@@ -817,6 +817,7 @@ version = "0.1.0"
 dependencies = [
  "dark_assets",
  "dark_combat",
+ "dark_fx",
  "dark_land",
  "dark_life",
  "dark_physics",

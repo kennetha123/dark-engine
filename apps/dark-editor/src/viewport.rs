@@ -195,6 +195,52 @@ impl Viewport {
         Ok(Skeleton { rig, pages, clips })
     }
 
+    /// A loaded sheet's page on the GPU, for anything that draws its frames itself.
+    pub fn texture(&self, sheet: &str) -> Option<TextureId> {
+        self.textures.get(sheet).copied()
+    }
+
+    /// Draws bare meshes — no map, no characters — and points egui at the result. The Effects
+    /// workspace's preview (`journals/engine/05` phase 3): it goes through the game's own
+    /// renderer rather than through egui's shapes, so what an artist tunes is what a player sees.
+    ///
+    /// It borrows this viewport's renderer rather than raising a second one, which is safe
+    /// because only one workspace draws in a frame and the map is not drawn while this is open.
+    pub fn render_meshes(
+        &mut self,
+        egui: &mut egui_wgpu::Renderer,
+        size: (u32, u32),
+        camera: Vec2,
+        clear: [f64; 3],
+        meshes: &[Mesh],
+    ) {
+        self.resize(egui, size);
+        self.renderer.render_scene(dark_render::Scene {
+            camera,
+            clear,
+            sprites: &mut [],
+            meshes,
+            models: &[],
+            model_camera: dark_view::model_camera(camera, size),
+            light: dark_render::Light::default(),
+        });
+    }
+
+    /// Points the renderer and egui at a viewport of this size, if it is not already.
+    fn resize(&mut self, egui: &mut egui_wgpu::Renderer, size: (u32, u32)) {
+        if size == self.size {
+            return;
+        }
+        self.size = size;
+        self.renderer.set_internal_size(size);
+        egui.update_egui_texture_from_wgpu_texture(
+            &self.device,
+            &self.renderer.shared_view(),
+            wgpu::FilterMode::Nearest,
+            self.image,
+        );
+    }
+
     /// Whether figures wearing `sheet` are drawn (a skeleton that did not load is not).
     pub fn draws(&self, sheet: &str) -> bool {
         self.sheets
@@ -270,16 +316,7 @@ impl Viewport {
         figures: &[Figure],
         overlay: bool,
     ) {
-        if size != self.size {
-            self.size = size;
-            self.renderer.set_internal_size(size);
-            egui.update_egui_texture_from_wgpu_texture(
-                &self.device,
-                &self.renderer.shared_view(),
-                wgpu::FilterMode::Nearest,
-                self.image,
-            );
-        }
+        self.resize(egui, size);
         // Only the pieces of the map this view can see (docs/PLAN.md §24.2), so what a frame
         // costs here is the size of the panel and not the size of the map.
         let seen = origin + Vec2::new(size.0 as f32, size.1 as f32);

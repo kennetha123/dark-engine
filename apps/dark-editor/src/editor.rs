@@ -160,6 +160,7 @@ enum Workspace {
     Story,
     Text,
     Sheets,
+    Effects,
 }
 
 /// One language's words for a line: which language, what it says, and whether that language says
@@ -182,6 +183,7 @@ pub struct Editor {
     database: Database,
     story: StoryEditor,
     sheets: SheetEditor,
+    effects: crate::effects::EffectEditor,
     tile: u32,
     catalog: Catalog,
     pub viewport: Viewport,
@@ -294,6 +296,7 @@ impl Editor {
             database,
             story,
             sheets: SheetEditor::new(Vec::new()),
+            effects: crate::effects::EffectEditor::new(Vec::new(), viewport.image),
             tile,
             palette_sheet: first(&catalog.props, "town_props"),
             npc_sheet: first(&catalog.characters, "villager"),
@@ -364,6 +367,7 @@ impl Editor {
             editor.open(start);
         }
         editor.list_sheets();
+        editor.list_effects();
         editor
     }
 
@@ -385,6 +389,7 @@ impl Editor {
             || self.database.dirty()
             || self.story.dirty()
             || self.sheets.dirty()
+            || self.effects.dirty()
             || self.strings.dirty()
     }
 
@@ -441,6 +446,7 @@ impl Editor {
                 );
             }
             Workspace::Text => self.text_workspace(ui),
+            Workspace::Effects => self.effects.ui(ui, &self.project),
             Workspace::Sheets => {
                 self.sheets.ui(ui, &self.project);
                 // A sheet just made reaches the maps at once.
@@ -456,6 +462,12 @@ impl Editor {
 
     /// Draws the map for this frame, after the interface has laid it out.
     pub fn render(&mut self, egui: &mut egui_wgpu::Renderer) {
+        if self.workspace == Workspace::Effects {
+            // The effect's preview goes through the same renderer, since only one of the two is
+            // ever on the screen (`journals/engine/05` phase 3).
+            self.effects.render(&self.project, &mut self.viewport, egui);
+            return;
+        }
         if self.workspace != Workspace::Maps {
             return;
         }
@@ -593,6 +605,11 @@ impl Editor {
             }
             self.reload_sheets();
         }
+        if self.effects.dirty()
+            && let Err(err) = self.effects.save(&self.project)
+        {
+            failed.push(format!("the effect is not saved: {err}"));
+        }
         let mut saved = "Saved.".to_owned();
         if let Some(scene) = self.scene.as_mut().filter(|s| s.dirty) {
             ops::compact_terrain(&mut scene.def, self.tile);
@@ -649,6 +666,11 @@ impl Editor {
             self.prop = None;
         }
         self.stale = true;
+    }
+
+    /// Every effect file of the project.
+    fn list_effects(&mut self) {
+        self.effects.list = crate::catalog::fx_files(&self.project);
     }
 
     /// Every sheet file of the project, loading or not (one that does not is to be fixed).
@@ -891,6 +913,7 @@ impl Editor {
             Workspace::Story => self.story.undo_step(),
             Workspace::Text => {}
             Workspace::Sheets => self.sheets.undo_step(&self.project),
+            Workspace::Effects => self.effects.undo_step(),
         }
     }
 
@@ -902,6 +925,7 @@ impl Editor {
             // Text has no steps of its own: a line is written where it stands.
             Workspace::Text => {}
             Workspace::Sheets => self.sheets.redo_step(&self.project),
+            Workspace::Effects => self.effects.redo_step(),
         }
     }
 
@@ -1334,6 +1358,11 @@ impl Editor {
                     "Sheets",
                     "How pictures are cut into frames and clips, and where attacks hit",
                 ),
+                (
+                    Workspace::Effects,
+                    "Effects",
+                    "Rain, snow, smoke and sparks: tune the numbers and watch the result",
+                ),
             ] {
                 let chosen = self.workspace == workspace;
                 let tab = egui::Button::new(egui::RichText::new(label).strong()).selected(chosen);
@@ -1355,6 +1384,7 @@ impl Editor {
                 Workspace::Story => (self.story.can_undo(), self.story.can_redo()),
                 Workspace::Text => (false, false),
                 Workspace::Sheets => (self.sheets.can_undo(), self.sheets.can_redo()),
+                Workspace::Effects => (self.effects.can_undo(), self.effects.can_redo()),
             };
             if ui
                 .add_enabled(can_undo, egui::Button::new("Undo"))

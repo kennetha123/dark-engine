@@ -267,6 +267,92 @@ emitter — its last drops fall — and starts the new one, with the tint slidin
 - Wind that moves anything but particles; lightning; puddles; snow that lies.
 - Interiors, because there are none.
 
+## Phase 3 in detail — the Effects workspace (planned 2026-09-27)
+
+The entry calls this **the tool**. One line is not enough to build a tool from.
+
+### What is already there
+
+| Piece | Where |
+|---|---|
+| A workspace is an enum variant, a tab, a dispatch arm, two undo arms and a module | `editor.rs` |
+| The closest model: a `.ron` editor with undo, a picture and a save | `sheets.rs` |
+| Undo that groups a drag into one step | `widgets.rs` — `Tracker` |
+| Listing a project's files of a kind | `catalog::sheet_files` |
+| **An offscreen `dark_render::Renderer` already shown inside egui** | `viewport.rs` |
+
+### Decisions
+
+**The preview runs the game's own code.** Not egui shapes approximating particles: the editor
+runs `dark_fx::Effects` and hands its `Mesh`es to `dark_render`, offscreen, exactly as the player
+does — the same blending, the same ordering, the same rounding. A tool whose whole promise is
+*this is what you will see* cannot afford a second implementation that drifts. `viewport.rs`
+already proved the pattern for maps; effects reuse its renderer rather than raising a second one,
+because only one workspace draws in a frame and the map is not one of them while this is open.
+
+**Tuning does not restart the effect.** Dragging `rate` should change the fall you are watching,
+not start it again from nothing — otherwise every drag tick is a fresh empty screen and the
+number cannot be judged. So `dark_fx` gains `Effects::retune`, which swaps an effect's definition
+under its live particles.
+
+**The form is the project's ordinary form.** `Tracker` number fields, as the sheet and database
+editors use, so undo, redo and the one-step-per-drag behaviour are the ones a designer already
+knows here, and Ctrl+Z means the same thing in every workspace.
+
+**Saving loses the comments**, exactly as `save_sheet_def` already does and says. An effect file
+is numbers; the prose about *why* belongs in `journals/` and `docs/PLAN.md`, not beside a
+`gravity:` an artist is about to drag.
+
+### Shapes
+
+```
+apps/dark-editor/src/effects.rs   EffectEditor: the list, the form, the preview, save
+```
+
+`dark_fx` gains two things, both small:
+
+```rust
+/// Swaps an effect's definition under its live particles.
+pub fn retune(&mut self, kind: EffectId, def: EffectDef, art: Art) -> Result<(), EffectError>;
+/// Writes a `*.fx.ron` back. Comments in the file are not kept.
+pub fn save(&self, project: &Project, path: impl AsRef<Path>) -> Result<(), EffectError>;
+```
+
+`viewport.rs` gains two accessors so the workspace can borrow its renderer:
+
+```rust
+pub fn texture(&self, sheet: &str) -> Option<TextureId>;
+pub fn render_meshes(&mut self, egui, size, camera, clear, meshes: &[Mesh]);
+```
+
+And `catalog::fx_files` lists `fx/*.fx.ron` as `sheet_files` lists sheets.
+
+### The panel
+
+Left: the project's effect files, and a field to make a new one. Middle: the form, every field of
+`EffectDef` with the range it may take. Right: the preview — the effect playing, with
+
+- **a background** to choose, because a pale particle on a pale background cannot be judged, and
+  the renderer's `clear` colour gives it for free;
+- **play, pause and burst**, so a one-shot can be watched as a one-shot;
+- **what it costs**: how many are alive against the file's `cap`, so a file asking for more than
+  it is allowed says so rather than quietly thinning out.
+
+### Verification
+
+- The four gates, and the commit built out of the index in a worktree.
+- Unit tests: `retune` keeps the particles that are alive and changes what the next ones do; it
+  refuses art that does not match, leaving the effect as it was rather than half-changed; a
+  round trip through `save` and `load` gives back the same definition.
+- A scripted editor run into the workspace, screenshotted and looked at.
+
+### Not in phase 3
+
+- Editing `fx/weather.ron` — which sky draws which effect is its own screen.
+- A curve editor. `Fade` is two values and a straight line between them; if that is ever not
+  enough it is a change to the data, not to the form.
+- Making art. The frames come from a sheet, and sheets have a workspace already.
+
 ## Non-goals
 
 - A node-graph shader editor. See Decisions.
@@ -401,3 +487,43 @@ Two lessons, in order of importance:
    the index into a worktree and built there before it is made. Nothing else can see this, and in
    a shared tree it is not an edge case — it happened three times in one session.
 2. Staging a shared file whole is the mistake, every time. Only hunks.
+
+### Phase 3 — the Effects workspace (2026-09-27)
+
+Built to the design above. The editor has a sixth tab, and an effect can be made, tuned and
+saved without touching a file by hand — which is what this entry set out to be able to say.
+
+**What landed.** `apps/dark-editor/src/effects.rs` (the list, the form, the preview, save);
+`Viewport::render_meshes` and `Viewport::texture`, so the preview goes through the renderer the
+map view already uses; `catalog::fx_files` and `fx_name`; the workspace wired into `editor.rs` in
+eleven small insertions. In `dark_fx`: `Effects::retune`, `EffectDef::save`, `EffectDef::plain`,
+and a hand-written `Serialize` for `Range`. `docs/PLAN.md` §16.8, and §18's list of workspaces.
+
+**Where it differs from the design above.**
+
+- **`Range` needed a `Serialize` of its own**, which the plan did not foresee. It reads as a
+  number *or* a pair and the derived form writes a struct — so the first file the editor saved
+  would have been a file it could not open again. Found by writing the round-trip test the plan
+  did ask for, before any of the editor existed.
+- **The backgrounds had to be converted.** The renderer's `clear` is a colour in light, not in
+  sRGB, so the first run painted "Dusk" a pale lavender. Found by looking at it. `linear()`
+  converts, and a test pins middle grey.
+- **The preview's frame length is taken during layout**, not in `render`, which runs after the
+  interface is built and has no context to ask. Clamped, so a window that was not drawn for a
+  while does not advance an effect by a minute when it comes back.
+- Otherwise the shapes are as sketched.
+
+**Verified.**
+
+- Six sabotages, each against the test that pins it, all caught: the `Range` round trip, the
+  starting effect drifting from the file defaults, a retune that throws away what is in the air,
+  a retune that half-applies a definition its art does not fit, a background handed over unconverted,
+  and backgrounds too alike to tell apart.
+- Scripted editor runs, looked at: the tab, `rain` and `smoke` playing against Dusk, and the whole
+  loop of **making** an effect through the interface, **dragging** a number and **saving** it with
+  Ctrl+S — the file came out with `rate: 105`, and `dark-cli preview-fx` loaded it, which is the
+  proof that what this workspace writes is what the game reads. The test file was then removed.
+- The four gates, and the commit built out of the index in a worktree.
+
+**Still owed:** phases 4–6, and `fx/weather.ron` still has no screen — a designer can tune what an
+effect looks like but must still write by hand which sky plays it.
