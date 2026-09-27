@@ -25,6 +25,7 @@ dark_combat = { path = "crates/dark_combat" }
 dark_audio = { path = "crates/dark_audio" }
 dark_spine = { path = "crates/dark_spine" }
 dark_model = { path = "crates/dark_model" }
+dark_fx = { path = "crates/dark_fx" }
 dark_story = { path = "crates/dark_story" }
 dark_view = { path = "crates/dark_view" }
 dark_life = { path = "crates/dark_life" }

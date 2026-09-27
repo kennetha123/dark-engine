@@ -24,6 +24,10 @@
 //! draws a posed model from the angle a top-down game looks at it: filled by hand, or with
 //! `--gpu` through the renderer's own mesh pipeline. The two should agree.
 //!
+//! `dark-cli preview-fx <project-dir> <effect.fx.ron> <seconds> <out.png>` runs one emitter of an
+//! effect and draws it at five evenly spaced moments, side by side. An effect is a thing that
+//! happens over time, so one moment would tell you nothing.
+//!
 //! `dark-cli bake-spine <project-dir> <sheet.spine.ron>` measures a Spine skeleton for the host
 //! (clip lengths, events, hitboxes) and writes the sheet's `baked` file. Run it after every
 //! export from Spine. `dark-cli preview-spine <project-dir> <sheet.spine.ron> <clip> <tick>
@@ -33,6 +37,7 @@ mod bake_model;
 mod gpu_model;
 mod land;
 mod package;
+mod preview_fx;
 mod preview_model;
 mod simulate;
 
@@ -125,6 +130,15 @@ fn main() -> ExitCode {
                 }
             }
         }
+        [cmd, project, effect, seconds, out] if cmd == "preview-fx" => {
+            match preview_fx::preview_fx(project, effect, seconds, out) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         [cmd, project, model] if cmd == "bake-model" => {
             match bake_model::bake_model(project, model) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -187,6 +201,9 @@ fn main() -> ExitCode {
             eprintln!("       dark-cli bake-spine <project-dir> <sheet.spine.ron>");
             eprintln!(
                 "       dark-cli preview-spine <project-dir> <sheet.spine.ron> <clip> <tick> <out.png>"
+            );
+            eprintln!(
+                "       dark-cli preview-fx <project-dir> <effect.fx.ron> <seconds> <out.png>"
             );
             eprintln!("       dark-cli image-info <image.png>");
             eprintln!("       dark-cli zoom <in.png> <out.png> <x> <y> <w> <h> <scale>");

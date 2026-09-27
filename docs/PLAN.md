@@ -197,6 +197,7 @@ crates/
   dark_platform  winit window + input                      (presentation)
   dark_render    wgpu renderer (window or offscreen)       (presentation)
   dark_view      a map's sprites, shared by game and editor (presentation)
+  dark_fx        particle effects read from `*.fx.ron`      (presentation, §16.6)
   … added per milestone: dark_assets, dark_sprite, dark_tilemap, dark_physics, dark_combat,
     dark_ai, dark_world, dark_life, dark_ui, dark_audio, dark_spine, dark_script, dark_data
 apps/
@@ -861,6 +862,70 @@ prop standing in front of a character covers them and one standing behind does n
   plays one clip and does not follow what the character is doing; a model is still outside the
   silhouette system (§16.4); `dark-cli package` and `Project::fingerprint` still do not know
   about models, and a model is now reachable, so they are due.
+
+## 16.6 Effects that are data (M9, `journals/engine/05` phase 1)
+
+`dark_fx` is the particle system: rain, snow, smoke, sparks, dust, written as `*.fx.ron` files an
+artist tunes without a compiler. **Not a node graph** — see `journals/engine/05` for why that was
+weighed and refused.
+
+- **An effect the world reacts to is not an effect.** A campfire's warmth is a climate in
+  `life.ron` and lives in the simulation; the flame is `dark_fx` and lives in presentation. Rain
+  making you cold is a climate, not a particle. This is what keeps rule 1 true, and it is why an
+  effect may read frame delta where gameplay may not (rule 3): nothing in the simulation can see
+  one, so nothing depends on how fast the frames come.
+- **Effects are not networked and not deterministic.** Two players seeing different raindrops is
+  not a problem. Each emitter carries its own seed, so one emitter's variation does not depend on
+  how many others are alive; nothing more is promised.
+- `dark_fx` is in `FORBIDDEN` in `tools/check-sim-deps.sh`, as `dark_model` is.
+- **`EffectDef` is not in `dark_assets`.** Sheets, skeletons and models are, because the
+  simulation reads them — clip lengths drive attack recovery. Nothing in the simulation ever reads
+  an effect.
+- **A particle is drawn as a mesh, not a sprite.** `Sprite` has a colour and a lift but no
+  rotation and no free scale, and a particle needs both. One mesh per emitter, sorted where the
+  emitter stands, riding the stream §16.4 built. Weather covers the screen, so it sits on a high
+  `layer` instead of being sorted.
+- **Bounded by construction.** Every file has a `cap`; a rate and a lifetime asking for more drop
+  the newcomers. A wrong number in a file cannot take the frame rate with it.
+- Fractional births are carried between frames, so a rate is what the file says at any frame rate,
+  and `drag` is a fraction of speed lost *a second*, applied as `(1 - drag)^dt`.
+- `lands: true` is a particle that stops at the ground: rain lands, smoke does not.
+- `dark_fx` never opens a file or touches the GPU. Whoever loaded the sheet hands in an `Art`
+  (the page, its size in texels, one rectangle per frame the file names), and a def and its art
+  that disagree are refused when the effect is added, not when it fails to draw.
+- A file, in full. Everything but `sheet` and `frames` may be left out, and a number that never
+  varies is written as a number where a span would do:
+
+  ```ron
+  (
+      sheet: "sheets/fx.sheet.ron",
+      frames: [3],                 // into the sheet's frames; one is picked at birth and kept
+      rate: 220.0,                 // born a second; with none, `burst` alone is a one-shot
+      burst: 0,                    // born at once when it starts
+      life: (0.7, 0.95),           // seconds
+      area: (200.0, 120.0),        // half-extents of the box they are born in
+      lift: (200.0, 260.0),        // how high off the ground they start
+      drift: (x: (-24.0, -10.0), lift: (-320.0, -280.0), y: (40.0, 70.0)),  // px a second
+      gravity: 0.0,                // on lift, px a second squared; negative falls
+      drag: 0.0,                   // fraction of speed lost a second
+      lands: true,                 // gone when it reaches the ground
+      size: (from: 1.0, to: 1.0),  // scale at birth and at death
+      spin: (-2.0, 2.0),           // turns a second
+      colour: (from: (0.62, 0.72, 0.92, 0.7), to: (0.62, 0.72, 0.92, 0.3)),  // linear RGBA
+      layer: 100,
+      cap: 400,
+  )
+  ```
+
+- **`dark-cli preview-fx <project> <effect.fx.ron> <seconds> <out.png>`** runs one emitter and
+  draws five evenly spaced moments side by side, filled on the CPU. An effect is a thing that
+  happens over time, so one moment would say nothing.
+- Known gaps, each its own phase in `journals/engine/05`: nothing in the game plays an effect yet
+  (weather is next); the editor has no Effects workspace; `apps/dark-player/src/fx.rs` still
+  hand-writes its sparks; there are no lights and no additive drawing, so `Mesh` alpha blending is
+  all an effect has. `dark-cli package` and `Project::fingerprint` do not know about `*.fx.ron`
+  either — the same debt models carry (§16.5), and it comes due for both the moment a scene can
+  name one.
 
 ## 17. Save, storylets and endings (as built in M7)
 
