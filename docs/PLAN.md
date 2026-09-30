@@ -138,7 +138,7 @@ Built (M0):
 - **The handshake checks that both sides hold the same world**, not only the same wire version.
   `Project::fingerprint` folds the scene the game starts in, every scene it can walk into from
   there, the tile size they are built on and the definitions the simulation reads (`combat.ron`,
-  `life.ron`) into one number; the client sends it in `Hello` and a host with a world of its own
+  `life.ron`, `world.ron`) into one number; the client sends it in `Hello` and a host with a world of its own
   refuses any other with `DifferentWorld`. `combat.ron` is in it because the looks a snapshot
   names are a list built from it, so an enemy added on one side renames everybody. A scene nothing
   can walk into is left out, so a packaged build — which carries only what the game can reach — is
@@ -681,6 +681,13 @@ yet.
   `Project::fingerprint` does not cover a bake — whose clip ticks drive attack recovery, so two
   machines with different bakes would fight differently and the handshake would not see it.
   (`fingerprint` does not follow a sheet to its Spine bake either; that gap predates models.)
+  **Why it is still open**, worked out in `journals/engine/06`: the fingerprint must give a
+  packaged build and its project the same number, and a build carries only the sheets the game
+  can reach. So the bakes it may hash are the reachable ones — and reaching them means walking
+  `combat.ron` for its enemies' looks, which `dark_assets` cannot do, because `dark_combat` is
+  built on top of it. Hashing every bake in the project instead would make `models/`, which no
+  build carries, change the number. The walk has to move somewhere both `package` and the
+  handshake can call before a bake can join.
 
 ## 16.2 Models in the round (M9, phase 2a: loading and posing)
 
@@ -923,9 +930,8 @@ weighed and refused.
 - Known gaps, each its own phase in `journals/engine/05`: nothing in the game plays an effect yet
   (weather is next); the editor has no Effects workspace; `apps/dark-player/src/fx.rs` still
   hand-writes its sparks; there are no lights and no additive drawing, so `Mesh` alpha blending is
-  all an effect has. `dark-cli package` and `Project::fingerprint` do not know about `*.fx.ron`
-  either — the same debt models carry (§16.5), and it comes due for both the moment a scene can
-  name one.
+  all an effect has. (`dark-cli package` and `Project::fingerprint` did not know about effects
+  either; `journals/engine/06` fixed both — see §19.)
 
 ## 16.7 Weather (M9, `journals/engine/05` phase 2)
 
@@ -935,7 +941,9 @@ The first real customer for §16.6, and the biggest thing a player feels in a ye
   function of the day, the hour and the region: `dark_sim::WeatherDef::at`, hashing the spell and
   the region's name and picking from weights a designer wrote. Nothing is rolled, nothing is
   saved, and **nothing is sent** — two players standing together see the same sky because they
-  computed the same answer from a project the handshake already made them agree on.
+  computed the same answer from a project the handshake made them agree on. That last part was
+  not true when it was written: `world.ron` was outside `Project::fingerprint` until
+  `journals/engine/06` put it in.
 - So the same day of the year is the same weather in every year. That is the trade, and it is a
   deliberate one: the calendar already fixes the seasons, and a player who learns that the rains
   come in the ninth week has learned something about the world. Mixing in the world seed would
@@ -1214,6 +1222,12 @@ commands in AGENTS.md go through `cargo run`, which waits.
   ground, props, scatter, people and enemies name, the set-down structures' sheets, items'
   icons, faces, and each sheet's picture — or, for a skeleton, its export, atlas, the atlas's
   pages as Spine's own reader names them, and the bake.
+- **And the weather**: `world.ron`'s skies are followed to `fx/weather.ron`, to each sky's
+  `*.fx.ron`, to the sheet that effect draws (`journals/engine/06`). Nothing else in a project
+  refers to an effect, and a sky that will not load is logged and stepped over — so before this,
+  a packaged build simply never rained and never said why. Models are not collected, and that is
+  right: nothing in a project can name one yet (§16.5). `DARK_MODEL` is a developer's env var,
+  not content.
   A project folder holds whole art packs; Adventurer packages to about 24 MB of a 175 MB folder.
 - Anything named but missing stops the package: a build broken that way only shows itself in
   play. So does a path that leads out of the project, which would be copied from, or over,

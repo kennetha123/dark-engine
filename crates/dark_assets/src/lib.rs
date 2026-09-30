@@ -180,7 +180,11 @@ impl Project {
         // And what else the simulation is built from. A client reads `combat.ron` to build the
         // same list of looks the host names in its snapshots; `life.ron` is what its needs and
         // its things are.
-        for def in ["combat.ron", "life.ron"] {
+        // `world.ron` is the world: its regions, its factions, its calendar, and the weather that
+        // is worked out from all three (docs/PLAN.md §16.7). Two people holding different ones are
+        // in different worlds, which is the question this number exists to answer. A build carries
+        // it whole, so a package and its project still agree.
+        for def in ["combat.ron", "life.ron", "world.ron"] {
             mix_bytes(&mut all, def.as_bytes());
             mix_file(&mut all, &self.path(def));
         }
@@ -1699,6 +1703,11 @@ mod tests {
         );
         write("combat.ron", r#"(kinds: {})"#);
         write("life.ron", r#"(items: {})"#);
+        write(
+            "world.ron",
+            r#"(regions: [], roads: [], factions: [], titles: [], actors: [],
+                hero_party: (role: "hero", companions: []))"#,
+        );
         dir.to_path_buf()
     }
 
@@ -1860,6 +1869,24 @@ mod tests {
         write("life.ron", r#"(items: {"bread": (fills: 3)})"#);
         assert_ne!(world, of("scenes/a.ron"), "life.ron changed");
         write("life.ron", r#"(items: {})"#);
+
+        // `world.ron` is the world: its regions, its calendar, and the weather worked out from
+        // them. Two players holding different ones would stand together under different skies
+        // (docs/PLAN.md §16.7), which is exactly what this number is for.
+        let world_file = std::fs::read_to_string(dir.join("world.ron")).unwrap();
+        write(
+            "world.ron",
+            &world_file.replace(
+                "regions: []",
+                r#"regions: [(id: "wilds", name: "Wilds", kind: Wilds, danger: 1)]"#,
+            ),
+        );
+        assert_ne!(world, of("scenes/a.ron"), "world.ron changed");
+        write("world.ron", &world_file);
+        assert_eq!(world, of("scenes/a.ron"), "and changed back");
+        std::fs::remove_file(dir.join("world.ron")).unwrap();
+        assert_ne!(world, of("scenes/a.ron"), "the world went missing");
+        write("world.ron", &world_file);
 
         // The tile size, which every collision grid is built on; and where the game starts,
         // because the maps are numbered from there.

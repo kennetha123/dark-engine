@@ -139,6 +139,29 @@ fn copy(from: &Path, to: &Path) -> Result<u64, String> {
     std::fs::copy(from, to).map_err(|e| format!("{}: {e}", from.display()))
 }
 
+/// The weather's own files: `fx/weather.ron` and the `*.fx.ron` each sky draws. Their sheets go
+/// into `sheets`, which is walked later for the pictures.
+///
+/// A project with no weather has none of these, and that is not an error — a game without rain is
+/// a game. An effect that is *named* and missing is, for the reason the rest of `collect` refuses
+/// one: the build would be broken in a way only playing it would show.
+fn weather(project: &Project, sheets: &mut BTreeSet<String>) -> Result<Vec<String>, String> {
+    const ART: &str = "fx/weather.ron";
+    if !project.path(ART).exists() {
+        return Ok(Vec::new());
+    }
+    let art = dark_fx::WeatherArt::load_or_default(project, ART).map_err(|e| e.to_string())?;
+    let mut needed = vec![ART.to_owned()];
+    for path in art.effects() {
+        stays_in(path)?;
+        // Loaded rather than merely counted, so a build refuses an effect the game could not play.
+        let def = dark_fx::EffectDef::load(project, path).map_err(|e| e.to_string())?;
+        needed.push(path.to_owned());
+        sheets.insert(def.sheet);
+    }
+    Ok(needed)
+}
+
 /// Every file the game reads, as paths inside the project. Anything referred to but missing is
 /// an error: the package would be broken in a way only playing it would show.
 fn collect(project: &Project, start: &str) -> Result<BTreeSet<String>, String> {
@@ -187,6 +210,10 @@ fn collect(project: &Project, start: &str) -> Result<BTreeSet<String>, String> {
             needed.insert(file.to_owned());
         }
     }
+    // The skies `world.ron` names, and what each one draws (`journals/engine/06`). Nothing else
+    // in the project refers to an effect, so without this a build has no weather at all — and it
+    // would say nothing about it, because a sky that will not load is logged and stepped over.
+    needed.extend(weather(project, &mut sheets)?);
 
     let combat = dark_combat::CombatDef::load_or_default(&project.path("combat.ron"))
         .map_err(|e| e.to_string())?;
@@ -385,6 +412,26 @@ mod tests {
             );
             write(&format!("art/{sheet}.png"), "");
         }
+        // A world with weather, and the sky it draws. Nothing else in a project names an effect.
+        write(
+            "world.ron",
+            r#"(regions: [], roads: [], factions: [], titles: [], actors: [],
+                hero_party: (role: "hero", companions: []),
+                weather: (chances: [(skies: {"rain": 1})]))"#,
+        );
+        write(
+            "fx/weather.ron",
+            r#"(skies: {"rain": (effect: "fx/rain.fx.ron", tint: (0.6, 0.7, 0.9, 0.2))})"#,
+        );
+        write(
+            "fx/rain.fx.ron",
+            r#"(sheet: "sheets/weather.sheet.ron", frames: [0], rate: 60.0)"#,
+        );
+        write(
+            "sheets/weather.sheet.ron",
+            r#"(image: "art/weather.png", slicing: Grid(cell: (16, 16)))"#,
+        );
+        write("art/weather.png", "");
         for file in [
             "fonts/f.ttf",
             "fonts/OFL.txt",
@@ -436,6 +483,13 @@ mod tests {
             "sheets/grunt.sheet.ron",
             "art/grunt.png",
             "sheets/tent.sheet.ron",
+            // The weather `world.ron` names, which nothing else in a project refers to: without
+            // it a build has no rain and never says so (`journals/engine/06`).
+            "world.ron",
+            "fx/weather.ron",
+            "fx/rain.fx.ron",
+            "sheets/weather.sheet.ron",
+            "art/weather.png",
         ] {
             assert!(needed.contains(file), "{file} is missing from {needed:?}");
         }
@@ -444,6 +498,13 @@ mod tests {
         std::fs::remove_file(root.join("art/grunt.png")).unwrap();
         let err = collect(&project, "scenes/one.ron").unwrap_err();
         assert!(err.contains("art/grunt.png"), "{err}");
+        std::fs::write(root.join("art/grunt.png"), "").unwrap();
+        // An effect a sky names and the project does not have is the same kind of mistake, and
+        // the worse one to let through: weather that will not load is logged and stepped over, so
+        // a build missing it would simply never rain.
+        std::fs::remove_file(root.join("fx/rain.fx.ron")).unwrap();
+        let err = collect(&project, "scenes/one.ron").unwrap_err();
+        assert!(err.contains("rain.fx.ron"), "{err}");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
