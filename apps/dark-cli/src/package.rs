@@ -275,6 +275,17 @@ fn collect(project: &Project, start: &str) -> Result<BTreeSet<String>, String> {
     for sheet in &sheets {
         stays_in(sheet)?;
         needed.insert(sheet.clone());
+        if sheet.ends_with(".model.ron") {
+            // A look may name a model where it names a sheet (`journals/engine/07`), and §16.1
+            // recorded this as due the moment one could: a build without the mesh would start
+            // and then draw nobody.
+            let def = project.load_model_def(sheet).map_err(|e| e.to_string())?;
+            needed.insert(def.mesh.clone());
+            needed.insert(def.baked.clone());
+            // The artist's export is not read at run time and does not go in: it is the source,
+            // and often larger than everything else in the build put together.
+            continue;
+        }
         if sheet.ends_with(".spine.ron") {
             let def = project.load_spine_def(sheet).map_err(|e| e.to_string())?;
             needed.insert(def.skeleton.clone());

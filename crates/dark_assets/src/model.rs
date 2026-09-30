@@ -16,9 +16,11 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use dark_sprite::{Clip, ClipTiming, Facing, Frame, Rect, SpriteSheet};
+use glam::Vec2;
 use serde::{Deserialize, Serialize};
 
-use crate::{AssetError, Project, invalid, read_ron};
+use crate::{AssetError, Image, LoadedSheet, Project, invalid, read_ron};
 
 /// A `*.model.ron` file.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -136,6 +138,64 @@ pub struct MeasuredClip {
     pub events: Vec<(String, f32)>,
 }
 
+/// The name a clip takes for one action and one facing: `idle_down`, `attack_up_left`.
+///
+/// A model has one animation per action, because the mesh is turned to face rather than drawn
+/// eight times (docs/PLAN.md §16.1). The simulation asks for clips by action *and* facing, as it
+/// does of every other kind of character, so each action is offered under all eight names.
+pub fn clip_name(action: &str, facing: Facing) -> String {
+    format!("{action}_{}", facing.name())
+}
+
+impl ModelBake {
+    /// The bake as a sheet the simulation can read: one frame per tick, and each action under
+    /// all eight facings.
+    ///
+    /// The same fiction `SpineBake::sheet` tells, and for the same reason — clip lengths drive
+    /// attack recovery, and nothing in the simulation should have to learn that a character is
+    /// made of triangles.
+    pub fn sheet(&self) -> SpriteSheet {
+        let mut sheet = SpriteSheet::default();
+        for (action, clip) in &self.clips {
+            let ticks = clip.ticks.max(1);
+            for facing in Facing::ALL {
+                let first = sheet.frames.len() as u32;
+                sheet.frames.extend((0..ticks).map(|_| Frame {
+                    rect: Rect::new(0, 0, 1, 1),
+                    pivot: Vec2::ZERO,
+                }));
+                sheet.clips.push(Clip {
+                    name: clip_name(action, facing),
+                    frames: (first..first + ticks).collect(),
+                    ticks_per_frame: 1,
+                    looping: clip.looping,
+                    flip_x: false,
+                });
+                sheet.timing.push(ClipTiming {
+                    events: clip.events.clone(),
+                    // A model carries no boxes: its attacks are measured from the clip's events,
+                    // and where they land is the character's reach, not a circle on a frame.
+                    hitboxes: Vec::new(),
+                    hurtboxes: Vec::new(),
+                });
+            }
+        }
+        sheet
+    }
+
+    /// The animation to play for `action`, falling back to `idle`.
+    ///
+    /// A model arrives one animation at a time — a Mixamo download is one clip — so a model that
+    /// cannot yet walk is the ordinary case and not a broken one. Sliding along in an idle is
+    /// what lets the art be judged while the rest is exported; drawing nothing would not.
+    pub fn action_or_idle(&self, action: &str) -> Option<(&str, &BakedModelClip)> {
+        self.clips
+            .get_key_value(action)
+            .or_else(|| self.clips.get_key_value("idle"))
+            .map(|(name, clip)| (name.as_str(), clip))
+    }
+}
+
 impl ModelMeasure {
     pub fn read(path: &Path) -> Result<Self, AssetError> {
         read_ron(path)
@@ -239,6 +299,24 @@ impl Project {
     /// A model and its bake. The bake must exist and hold every clip the definition names; that
     /// the source has not changed underneath it is the project smoke test's business, because
     /// reading a whole export to check a hash is not something loading should do.
+    /// A `*.model.ron` loaded as a sheet, so a look may name one wherever it names a sheet
+    /// (`journals/engine/07`). The picture is a transparent pixel: nothing samples it, because
+    /// the character is drawn from the mesh.
+    pub(crate) fn load_model_sheet(&self, def_path: &Path) -> Result<LoadedSheet, AssetError> {
+        let loaded = self.load_model(def_path)?;
+        Ok(LoadedSheet {
+            image_path: self.path(&loaded.def.mesh),
+            image: Image {
+                width: 1,
+                height: 1,
+                rgba: vec![0; 4],
+            },
+            sheet: loaded.bake.sheet(),
+            spine: None,
+            model: Some(loaded),
+        })
+    }
+
     pub fn load_model(&self, model: impl AsRef<Path>) -> Result<LoadedModel, AssetError> {
         let def_path = self.path(&model);
         let def = self.load_model_def(&model)?;
@@ -278,6 +356,71 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bake(actions: &[(&str, u32)]) -> ModelBake {
+        ModelBake {
+            source_hash: "h".into(),
+            height: 40.0,
+            bones: 3,
+            clips: actions
+                .iter()
+                .map(|(name, ticks)| {
+                    (
+                        (*name).to_owned(),
+                        BakedModelClip {
+                            animation: format!("{name}Action"),
+                            ticks: *ticks,
+                            looping: *name == "idle",
+                            events: Vec::new(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// A model has one animation per action, because the mesh is turned rather than drawn eight
+    /// times — but the simulation asks for clips by action *and* facing, as it does of every
+    /// other character. So each action is offered under all eight names, and nothing in the
+    /// simulation has to learn that this character is made of triangles.
+    #[test]
+    fn every_action_is_offered_under_all_eight_facings() {
+        let sheet = bake(&[("idle", 130), ("attack", 24)]).sheet();
+        assert_eq!(sheet.clips.len(), 16, "two actions, eight ways each");
+        for facing in Facing::ALL {
+            let idle = sheet
+                .clip_id(&clip_name("idle", facing))
+                .expect("every facing idles");
+            let attack = sheet
+                .clip_id(&clip_name("attack", facing))
+                .expect("and attacks");
+            // The length is the action's, whichever way it is faced: an attack that recovered
+            // sooner facing north would be a different game depending on where you stood.
+            assert_eq!(sheet.clips[idle.0 as usize].frames.len(), 130);
+            assert_eq!(sheet.clips[attack.0 as usize].frames.len(), 24);
+            assert!(sheet.clips[idle.0 as usize].looping);
+            assert!(!sheet.clips[attack.0 as usize].looping);
+        }
+    }
+
+    /// A model arrives one animation at a time — a Mixamo download is one clip — so a model that
+    /// cannot yet walk is the ordinary case. Sliding along in an idle is what lets the art be
+    /// judged while the rest is exported; drawing nothing would not.
+    #[test]
+    fn an_action_a_model_does_not_have_falls_back_to_idle() {
+        let bake = bake(&[("idle", 130)]);
+        let (name, clip) = bake.action_or_idle("walk").expect("it falls back");
+        assert_eq!(name, "idle");
+        assert_eq!(clip.ticks, 130);
+        assert_eq!(bake.action_or_idle("idle").expect("its own").0, "idle");
+        // And a model with no idle at all has nothing to fall back on, which is said rather
+        // than guessed at.
+        assert!(bake_without_idle().action_or_idle("walk").is_none());
+    }
+
+    fn bake_without_idle() -> ModelBake {
+        bake(&[("attack", 24)])
+    }
 
     fn def() -> ModelDef {
         ron::from_str(

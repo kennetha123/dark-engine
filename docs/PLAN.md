@@ -1039,6 +1039,36 @@ night first, and phase 5 is both.
   to carry is an item; the editor's map view has no night; and a sky does not darken the day
   further, though the field is there to grow into.
 
+## 16.10 A character made of triangles (M9, `journals/engine/07`)
+
+A character is drawn as a 3D model **instead of** their sprite, chosen by the project. This is the
+gap §16.5 named as the reason everything else about models was dev-only.
+
+- **A look names a model through its sheet.** What the file *is* decides how the character is
+  drawn: `*.sheet.ron` is sprites, `*.spine.ron` is a Spine skeleton, `*.model.ron` is a model. No
+  new field on `LookDef`, no new plumbing through `CharacterSheets` or the snapshots — every path
+  that resolves a look already carries a string and the extension already means something.
+- **A model's bake becomes a sheet the simulation reads**, as a Spine bake does: one frame per
+  tick, so clip lengths still drive attack recovery and nothing in the simulation learns that a
+  character is made of triangles.
+- **Each action is offered under all eight facings.** A model has one animation per action because
+  the mesh is turned (§16.1), while the simulation asks by action *and* facing. The clips are a
+  fiction it consumes; the turning is the view's. An attack is the same length whichever way it is
+  faced, or where you stood would change the game.
+- **A missing action falls back to `idle`**, said once in the log. A Mixamo download is one
+  animation at a time, so a part-finished model is the ordinary case; sliding along in an idle is
+  what lets the art be judged while the rest is exported.
+- **`dark_view::turn_to`**: a turn of θ about the up axis sends the model's front, `-Z`, to
+  `(-sin θ, 0, -cos θ)`, and that must equal the direction the character looks. Getting the two
+  arguments of the `atan2` the other way round mirrors it — a model walking right faces left — and
+  **nothing on the screen gives that away**. A test caught it; two screenshots did not.
+- `dark-cli package` collects a look's model, its mesh and its bake, but not the artist's export:
+  the `.fbx` is the source, is never read at run time, and is often larger than the rest of the
+  build together. The debt §16.1 recorded came due here, and is paid.
+- Known gaps: a model takes no tint, so the flash when a character is hit and the fade of a corpse
+  are lost on one; models are still outside the silhouette system (§16.4); `Project::fingerprint`
+  still does not cover a bake, for `journals/engine/06`'s reason; and nothing blends between clips.
+
 ## 17. Save, storylets and endings (as built in M7)
 
 - The whole world is saved (`dark_world::WorldSave`, one RON file, version 1): the world

@@ -59,6 +59,8 @@ pub struct DemoScene {
     icons: Vec<(String, Image)>,
     /// Skeletons, by the `*.spine.ron` sheet path they are loaded from.
     rigs: HashMap<String, Rig>,
+    /// Geometry of every model a look names, by the `*.model.ron` that named it.
+    models: HashMap<String, dark_model::Model>,
     story: dark_story::StoryDef,
     /// The sky, as read off disk (`journals/engine/05` phase 2). All of it is in
     /// [`crate::weather`]; this is the only place the rest of the view knows about it.
@@ -107,17 +109,67 @@ struct StandIn {
     pose: dark_model::Pose,
     animation: String,
     looping: bool,
-    /// Each part ready to draw: the renderer's vertex layout, its indices, its picture and
-    /// whether it is drawn from both faces. Built once — skinning happens in the shader, so
-    /// nothing here changes from frame to frame.
     parts: Vec<StandInPart>,
 }
 
+/// A model a look names, uploaded once: the geometry, and the animation each action plays
+/// (`journals/engine/07`).
+struct ModelView {
+    model: dark_model::Model,
+    /// Engine action to the animation in the mesh file, and whether it loops.
+    clips: std::collections::BTreeMap<String, (String, bool)>,
+    parts: Vec<StandInPart>,
+}
+
+/// One part of a model, ready for the renderer. Built once — skinning happens in the shader, so
+/// nothing here changes from frame to frame.
 struct StandInPart {
     vertices: Vec<dark_render::ModelVertex>,
     indices: Vec<u32>,
     texture: TextureId,
     double_sided: bool,
+}
+
+/// A model's parts in the renderer's layout, its pictures uploaded. Shared by the stand-in and
+/// by any look that names a model.
+fn upload_model(
+    model: &dark_model::Model,
+    renderer: &mut Renderer,
+    white: TextureId,
+    named: &str,
+) -> Result<Vec<StandInPart>, RenderError> {
+    let mut textures = Vec::new();
+    for (nth, image) in model.images.iter().enumerate() {
+        textures.push(renderer.create_texture_smooth(
+            &format!("{named} image {nth}"),
+            image.width,
+            image.height,
+            &image.rgba,
+        )?);
+    }
+    Ok(model
+        .parts
+        .iter()
+        .map(|part| StandInPart {
+            vertices: part
+                .vertices
+                .iter()
+                .map(|v| dark_render::ModelVertex {
+                    position: v.position.to_array(),
+                    normal: v.normal.to_array(),
+                    uv: v.uv,
+                    joints: v.joints,
+                    weights: v.weights.to_array(),
+                })
+                .collect(),
+            indices: part.indices.clone(),
+            texture: part
+                .image
+                .and_then(|i| textures.get(i).copied())
+                .unwrap_or(white),
+            double_sided: part.double_sided,
+        })
+        .collect())
 }
 
 /// Loads what `DARK_MODEL` points at, if anything. A model that will not load is said about and
@@ -229,6 +281,31 @@ impl DemoScene {
                 rigs.insert(path.clone(), rig);
             }
         }
+        // A model sheet carries geometry, not an image: load it for the view, as a rig is
+        // (`journals/engine/07`). A model that will not load leaves its look drawing nothing, so
+        // it is refused here rather than at the first frame.
+        let mut models = HashMap::new();
+        for (path, loaded) in &sheets {
+            if let Some(model) = &loaded.model {
+                let geometry = dark_model::Model::load(project, &model.def).map_err(|e| {
+                    AssetError::Invalid {
+                        path: project.path(path),
+                        message: e.to_string(),
+                    }
+                })?;
+                let missing: Vec<&str> = ["walk", "run", "attack"]
+                    .into_iter()
+                    .filter(|a| !model.bake.clips.contains_key(*a))
+                    .collect();
+                if !missing.is_empty() {
+                    tracing::info!(
+                        "{path}: no {} animation — it will play its idle for those until one is                          exported and named in `actions`",
+                        missing.join(", ")
+                    );
+                }
+                models.insert(path.clone(), geometry);
+            }
+        }
         // The same looks the headless host loads, from the sheets loaded here.
         let characters = CharacterSheets::build(&maps, &combat, project, |path| {
             Ok(sheets[path].sheet.clone())
@@ -267,6 +344,7 @@ impl DemoScene {
             life,
             icons,
             rigs,
+            models,
             story,
             weather: crate::weather::WeatherLoad::read(project),
         })
@@ -367,6 +445,29 @@ impl DemoScene {
                 clips,
             });
         }
+        // Every model a look names, uploaded once each (`journals/engine/07`). The geometry was
+        // read when the scene loaded, where the project was to hand.
+        let mut models: Vec<ModelView> = Vec::new();
+        let mut model_of = HashMap::new();
+        let mut geometries = self.models;
+        for (path, loaded) in &self.sheets {
+            let Some(model) = &loaded.model else { continue };
+            let Some(geometry) = geometries.remove(path) else {
+                continue;
+            };
+            let parts = upload_model(&geometry, renderer, white, path)?;
+            model_of.insert(path.clone(), models.len());
+            models.push(ModelView {
+                clips: model
+                    .bake
+                    .clips
+                    .iter()
+                    .map(|(action, c)| (action.clone(), (c.animation.clone(), c.looping)))
+                    .collect(),
+                model: geometry,
+                parts,
+            });
+        }
         let mut looks = Vec::with_capacity(self.looks.len());
         for (i, (look, face)) in self.looks.iter().enumerate() {
             let base = textures[&look.sheet];
@@ -385,43 +486,12 @@ impl DemoScene {
                 face,
                 name: look.name.clone(),
                 skeleton: skeleton_of.get(&look.sheet).copied(),
+                model: model_of.get(&look.sheet).copied(),
             });
         }
         let stand_in = match self.stand_in {
             Some(mut stand) => {
-                let mut textures = Vec::new();
-                for (nth, image) in stand.model.images.iter().enumerate() {
-                    textures.push(renderer.create_texture_smooth(
-                        &format!("model image {nth}"),
-                        image.width,
-                        image.height,
-                        &image.rgba,
-                    )?);
-                }
-                stand.parts = stand
-                    .model
-                    .parts
-                    .iter()
-                    .map(|part| StandInPart {
-                        vertices: part
-                            .vertices
-                            .iter()
-                            .map(|v| dark_render::ModelVertex {
-                                position: v.position.to_array(),
-                                normal: v.normal.to_array(),
-                                uv: v.uv,
-                                joints: v.joints,
-                                weights: v.weights.to_array(),
-                            })
-                            .collect(),
-                        indices: part.indices.clone(),
-                        texture: part
-                            .image
-                            .and_then(|i| textures.get(i).copied())
-                            .unwrap_or(white),
-                        double_sided: part.double_sided,
-                    })
-                    .collect();
+                stand.parts = upload_model(&stand.model, renderer, white, "model")?;
                 Some(stand)
             }
             None => None,
@@ -454,6 +524,8 @@ impl DemoScene {
             seconds: 0.0,
             skeletons,
             poses: HashMap::new(),
+            models,
+            model_poses: HashMap::new(),
             frame_meshes: Vec::new(),
             weather: self.weather.upload(renderer)?,
             faded: None,
@@ -631,6 +703,8 @@ struct LookView {
     name: Option<String>,
     /// A Spine skeleton instead of sprites: index into [`DemoView::skeletons`].
     skeleton: Option<usize>,
+    /// A 3D model instead of sprites: index into [`DemoView::models`] (`journals/engine/07`).
+    model: Option<usize>,
 }
 
 /// A loaded skeleton for drawing.
@@ -696,6 +770,9 @@ pub struct DemoView {
     skeletons: Vec<SkeletonView>,
     /// Each skeletal character's posed skeleton, by who it is.
     poses: HashMap<NetId, (usize, Pose)>,
+    models: Vec<ModelView>,
+    /// Each model character's posed skeleton, by who it is.
+    model_poses: HashMap<NetId, (usize, dark_model::Pose)>,
     frame_meshes: Vec<Mesh>,
     /// The sky overhead: which one it is, its particles and its wash (`crate::weather`).
     weather: crate::weather::Weather,
@@ -851,7 +928,10 @@ impl DemoView {
                 1.0 - 0.7 * flash,
                 fx::corpse_alpha(c),
             ];
-            if let Some(skeleton) = look.skeleton {
+            if look.model.is_some() {
+                // Drawn from its mesh, below, once every pose is worked out: a model
+                // replaces the sprite rather than standing beside it (`journals/engine/07`).
+            } else if let Some(skeleton) = look.skeleton {
                 let feet = (c.ground - Vec2::new(0.0, c.elevation)).round();
                 self.draw_skeleton(c, skeleton, feet, sort_y, tint);
             } else if let Some(frame) = c
@@ -948,23 +1028,103 @@ impl DemoView {
         self.poses
             .retain(|id, _| characters.iter().any(|c| c.id == *id));
 
+        self.model_poses
+            .retain(|id, _| characters.iter().any(|c| c.id == *id));
+
+        // Characters whose look names a model, drawn from their mesh (`journals/engine/07`).
+        //
+        // In two passes on purpose: every palette goes into one buffer, and a draw borrows a
+        // slice of it — so nothing may be pushed to it while a draw is holding one.
+        let mut model_draws = Vec::new();
+        let mut palette: Vec<glam::Mat4> = Vec::new();
+        let mut posed: Vec<(usize, std::ops::Range<usize>, f32)> = Vec::new();
+        {
+            let (models, poses) = (&self.models, &mut self.model_poses);
+            for c in characters {
+                let Some(index) = self
+                    .looks
+                    .get(usize::from(c.state.look.0))
+                    .and_then(|look| look.model)
+                else {
+                    continue;
+                };
+                let view = &models[index];
+                let sheet = sheet_of(&c.state, &self.sheets);
+                // The clip the character is playing names an action and a facing; a model has
+                // one animation per action and is turned to the facing instead.
+                let action = sheet
+                    .clips
+                    .get(usize::from(c.state.anim.clip().0))
+                    .map(|clip| clip.name.as_str())
+                    .and_then(|name| name.rsplit_once('_').map(|(action, _)| action))
+                    .unwrap_or("idle");
+                let (animation, looping) = view
+                    .clips
+                    .get(action)
+                    .or_else(|| view.clips.get("idle"))
+                    .map(|(a, l)| (a.clone(), *l))
+                    .unwrap_or_default();
+                let entry = poses
+                    .entry(c.id)
+                    .or_insert_with(|| (index, dark_model::Pose::new(&view.model)));
+                if entry.0 != index {
+                    *entry = (index, dark_model::Pose::new(&view.model));
+                }
+                entry.1.pose(
+                    &view.model,
+                    &animation,
+                    looping,
+                    c.state.anim.step() as f32 / 60.0,
+                );
+                let place = dark_view::stand_at(
+                    c.ground,
+                    c.body.elevation,
+                    view.model.scale,
+                    c.state.facing,
+                );
+                let start = palette.len();
+                palette.extend(entry.1.palette().iter().map(|bone| place * *bone));
+                // A model has no tint yet: the flash when a character is hit and the fade of a
+                // corpse are the sprite pass's, and the mesh pass has no colour of its own.
+                posed.push((index, start..palette.len(), c.ground.y));
+            }
+        }
+        for (index, range, sort_y) in &posed {
+            for part in &self.models[*index].parts {
+                model_draws.push(dark_render::ModelDraw {
+                    vertices: &part.vertices,
+                    indices: &part.indices,
+                    palette: &palette[range.clone()],
+                    texture: part.texture,
+                    double_sided: part.double_sided,
+                    layer: layer::WORLD,
+                    sort_y: *sort_y,
+                });
+            }
+        }
+
+        let mut stand_palette: Vec<glam::Mat4> = Vec::new();
         // A model standing in for the player, if one was asked for. Its palette carries where it
         // stands, so the shader multiplies one matrix a vertex (docs/PLAN.md §16.3).
-        let mut model_draws = Vec::new();
-        let mut palette = Vec::new();
         if let Some(stand) = &mut self.stand_in
             && let Some(you) = characters.iter().find(|c| c.you)
         {
             stand
                 .pose
                 .pose(&stand.model, &stand.animation, stand.looping, self.seconds);
-            let place = dark_view::stand_at(you.ground, you.body.elevation, stand.model.scale);
-            palette.extend(stand.pose.palette().iter().map(|bone| place * *bone));
+            let place = dark_view::stand_at(
+                you.ground,
+                you.body.elevation,
+                stand.model.scale,
+                dark_sprite::Facing::Down,
+            );
+            // Its own buffer: the characters' draws above are holding slices of theirs.
+            stand_palette.extend(stand.pose.palette().iter().map(|bone| place * *bone));
             for part in &stand.parts {
                 model_draws.push(dark_render::ModelDraw {
                     vertices: &part.vertices,
                     indices: &part.indices,
-                    palette: &palette,
+                    palette: &stand_palette,
                     texture: part.texture,
                     double_sided: part.double_sided,
                     layer: layer::WORLD,

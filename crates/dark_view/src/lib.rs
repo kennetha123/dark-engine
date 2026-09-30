@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use dark_assets::LoadedSheet;
 use dark_physics::{Cell, Shape};
 use dark_render::{Outline, Sprite, TextureId, layer};
-use dark_sprite::Rect;
+use dark_sprite::{Facing, Rect};
 use dark_world::Map;
 use glam::{Mat4, Vec2, Vec3, Vec4};
 
@@ -1258,9 +1258,30 @@ mod tests {
 /// ground, and `Z` runs south. The ground plane `XZ` is the map's own, pixel for pixel.
 ///
 /// glTF is Y-up, so a model loads into this frame already (`dark_model::Model::UP`).
-pub fn stand_at(feet: Vec2, elevation: f32, scale: f32) -> Mat4 {
+pub fn stand_at(feet: Vec2, elevation: f32, scale: f32, facing: Facing) -> Mat4 {
     Mat4::from_translation(Vec3::new(feet.x, elevation, feet.y))
+        * Mat4::from_rotation_y(turn_to(facing))
         * Mat4::from_scale(Vec3::splat(scale))
+}
+
+/// How far a model is turned to face `facing`, in radians about the up axis.
+///
+/// A model has one clip per action and is turned rather than drawn eight times (docs/PLAN.md
+/// §16.1), so this is what stands in for the seven sheets a sprite would need.
+///
+/// glTF's convention is that a character faces **-Z**, and the world's Z runs *down* the map, so
+/// a model left unturned faces up the screen — away. Facing the player is therefore half a turn,
+/// and everything else is measured from there.
+pub fn turn_to(facing: Facing) -> f32 {
+    let towards = facing.vector();
+    // A turn of θ about Y sends the model's front, -Z, to `(-sin θ, 0, -cos θ)`. That has to come
+    // out as the direction the character is looking — `(x, 0, y)` of the screen-space vector,
+    // since the world's Z runs down the map — so `sin θ = -x` and `cos θ = -y`.
+    //
+    // Getting the two arguments the other way round mirrors it, and nothing on the screen gives
+    // that away: a model walking right simply faces left, which reads as walking backwards only
+    // if you already suspect it. The test is what catches this, not a screenshot.
+    (-towards.x).atan2(-towards.y)
 }
 
 /// The camera a model is drawn through, agreeing pixel for pixel with the flat one the sprites
@@ -1407,15 +1428,59 @@ mod camera_tests {
         }
     }
 
-    /// A model stands where its feet are put, at the scale it is given.
+    /// A model stands where its feet are put, at the scale it is given, however it is turned.
     #[test]
     fn standing_puts_the_feet_where_they_were_asked_for() {
-        let at = stand_at(Vec2::new(300.0, 200.0), 0.0, 20.0);
-        assert_eq!(
-            at.transform_point3(Vec3::ZERO),
-            Vec3::new(300.0, 0.0, 200.0)
+        for facing in Facing::ALL {
+            let at = stand_at(Vec2::new(300.0, 200.0), 0.0, 20.0, facing);
+            assert_eq!(
+                at.transform_point3(Vec3::ZERO),
+                Vec3::new(300.0, 0.0, 200.0),
+                "facing {}",
+                facing.name()
+            );
+            // A model one unit tall stands twenty pixels tall: turning is about the up axis, so
+            // it can never make anyone shorter.
+            let head = at.transform_point3(Vec3::Y);
+            assert!(
+                (head.y - 20.0).abs() < 1e-4,
+                "facing {}: {head:?}",
+                facing.name()
+            );
+        }
+    }
+
+    /// A model is turned to face rather than drawn eight times (docs/PLAN.md §16.1), so the turn
+    /// has to put its front where the character is looking.
+    ///
+    /// glTF's convention is that a character faces -Z and the world's Z runs *down* the map, so
+    /// a model left unturned faces away from the player.
+    #[test]
+    fn a_model_is_turned_to_face_the_way_the_character_looks() {
+        // Where the model's own front ends up, for each facing.
+        let front = |facing| Mat4::from_rotation_y(turn_to(facing)).transform_vector3(Vec3::NEG_Z);
+        // Facing the player is down the map, which is +Z.
+        let down = front(Facing::Down);
+        assert!((down.z - 1.0).abs() < 1e-5, "facing down is +Z: {down:?}");
+        let up = front(Facing::Up);
+        assert!((up.z + 1.0).abs() < 1e-5, "facing up is -Z: {up:?}");
+        let right = front(Facing::Right);
+        assert!(
+            (right.x - 1.0).abs() < 1e-5,
+            "facing right is +X: {right:?}"
         );
-        // A model one unit tall stands twenty pixels tall.
-        assert_eq!(at.transform_point3(Vec3::Y), Vec3::new(300.0, 20.0, 200.0));
+        let left = front(Facing::Left);
+        assert!((left.x + 1.0).abs() < 1e-5, "facing left is -X: {left:?}");
+        // Eight facings, eight different ways to be turned.
+        for (i, a) in Facing::ALL.iter().enumerate() {
+            for b in &Facing::ALL[i + 1..] {
+                assert!(
+                    front(*a).distance(front(*b)) > 0.1,
+                    "{} and {} face the same way",
+                    a.name(),
+                    b.name()
+                );
+            }
+        }
     }
 }

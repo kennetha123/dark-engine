@@ -227,8 +227,14 @@ impl Project {
     /// clips instead (see [`SpineDef`]).
     pub fn load_sheet(&self, definition: impl AsRef<Path>) -> Result<LoadedSheet, AssetError> {
         let def_path = self.path(definition);
-        if def_path.to_string_lossy().ends_with(".spine.ron") {
+        // What the file is decides how the character is drawn: sprites, a Spine skeleton, or a
+        // 3D model. A look names a sheet and the extension carries the rest (`journals/engine/07`).
+        let named = def_path.to_string_lossy().into_owned();
+        if named.ends_with(".spine.ron") {
             return self.load_spine_sheet(&def_path);
+        }
+        if named.ends_with(".model.ron") {
+            return self.load_model_sheet(&def_path);
         }
         let def: SheetDef = read_ron(&def_path)?;
         let image_path = self.path(&def.image);
@@ -251,6 +257,7 @@ impl Project {
             image,
             sheet,
             spine: None,
+            model: None,
         })
     }
 }
@@ -346,6 +353,8 @@ pub struct LoadedSheet {
     pub sheet: SpriteSheet,
     /// A skeleton instead of an image (`image` is then a transparent pixel).
     pub spine: Option<SpineSheet>,
+    /// A 3D model instead of an image, likewise (`journals/engine/07`).
+    pub model: Option<LoadedModel>,
 }
 
 /// A `*.sheet.ron` file.

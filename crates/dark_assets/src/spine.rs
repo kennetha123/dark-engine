@@ -222,6 +222,7 @@ impl Project {
             },
             sheet: bake.sheet(),
             spine: Some(SpineSheet { def, bake }),
+            model: None,
         })
     }
 }
