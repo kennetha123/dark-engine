@@ -353,6 +353,109 @@ Left: the project's effect files, and a field to make a new one. Middle: the for
   enough it is a change to the data, not to the form.
 - Making art. The frames come from a sheet, and sheets have a workspace already.
 
+## Phase 5 in detail — night, and the lights that push back (planned 2026-09-30)
+
+The entry's phase 5 reads "**Lights** — a campfire glow, a torch." Investigating it turned up the
+thing that line assumes and the game does not have.
+
+### What is already there, and what is not
+
+**There is no night.** The world is the same colour at midnight as at noon: screenshots taken at
+hours 0, 6, 12 and 18 in `journals/engine/05` phase 2 came out *byte-identical* apart from the
+weather. Shipping lights on their own would be shipping something invisible — a glow against a
+fully lit field is nothing. So phase 5 is two things: a night, and the lights that push back
+against it.
+
+| Piece | Where | What it gives |
+|---|---|---|
+| `Renderer::pipeline` takes a blend state | `dark_render/src/lib.rs` | Another blend mode is a parameter, not a rewrite |
+| A non-standard blend already exists (`max`, for the occlusion mask) | same | The precedent, and where to put it |
+| `MODE_BLOB` — a filled ellipse over a quad | `sprite.wgsl` | A light is this with a soft edge |
+| Passes: world → mask → silhouettes → **interface** → blit | `render_with` | Where a light pass goes |
+| `layer >= layer::UI` splits world from interface | `sprite.rs` | So night lands over the world and under the writing |
+| The hour, replicated | `Frame::time` | What decides how dark it is |
+| Campfires, with where they stand | `Frame::structures` | What holds a light |
+
+### Decisions
+
+**Darkness multiplies, light adds, and there is no light buffer.** The usual 2D answer renders
+lights into an offscreen target and composites. This does not need one: a full-screen quad that
+*multiplies* the world by the night's colour, then each light as a quad that *adds* to it. Two
+blend states over the existing instance machinery, no second target, no composite pass, and one
+more reason the pipeline builder already takes its blend as an argument.
+
+**A light is a sprite mode, not a new kind of thing.** `mode::LIGHT` is `MODE_BLOB` with a soft
+radial falloff. No new vertex format, no new buffer, no new batching — the same trick that let a
+particle be a mesh in phase 1. A light carries its colour in `Sprite::color` and its reach in the
+quad's size, which is what every other mode already does.
+
+**Between the world and the interface.** The night pass runs after the world and before the
+overlay batches, which is where `layer::UI` already cuts. So the HUD stays readable at midnight,
+and phase 2's weather wash — drawn on `layer::UI` — lies over the night rather than under it,
+which is right: fog is between you and the world, so it is not something a campfire burns through.
+
+**Lights are presentation, and this is the same rule as everything else in this entry.** A
+campfire's warmth is a climate in `life.ron` and lives in the simulation; its glow is this and
+does not. Nothing in the simulation reads a light. If *seeing* in the dark ever becomes a rule of
+the game — a torch that lets you find your way — that is a value in the simulation, and this
+stays the picture of it.
+
+**The night is data, and it belongs in `fx/weather.ron`.** That file already says what the sky
+looks like; how dark the sky is at three in the morning is the same question. It gains a `night`
+curve of hour → colour, so a project says what midnight is rather than the engine deciding.
+
+### Shapes
+
+`fx/weather.ron` grows one field:
+
+```ron
+(
+    change_secs: 6.0,
+    // What the world is multiplied by, through the day. Between the hours given, evenly;
+    // white is full daylight, and the darkest entry is midnight. Wraps around the day.
+    night: [
+        (0.0,  (0.24, 0.26, 0.42)),
+        (5.0,  (0.30, 0.31, 0.46)),
+        (7.0,  (0.85, 0.82, 0.78)),
+        (17.0, (1.00, 0.97, 0.90)),
+        (20.0, (0.55, 0.45, 0.45)),
+        (22.0, (0.28, 0.29, 0.45)),
+    ],
+    skies: { … },
+)
+```
+
+`dark_render::Scene` gains two fields, both of which an empty frame may leave alone:
+
+```rust
+/// What the world is multiplied by before the interface is drawn. White is daylight.
+pub darkness: [f32; 3],
+/// Drawn additively over the darkened world: `SpriteKind::Light`.
+pub lights: &'a [Sprite],
+```
+
+### The player
+
+`apps/dark-player/src/weather.rs` already owns the sky and already has the hour, so it owns this
+too: `Weather::darkness(time)` reads the curve, and the view places a light on every campfire that
+is burning. One more field on the `draw` call, not a new system.
+
+### Verification
+
+- The four gates, and the commit built out of the index in a worktree.
+- Unit tests on the curve: it wraps around midnight; between two hours it is between their
+  colours; a project with no `night` is daylight all day, so nothing changes for a game that does
+  not ask for one.
+- Screenshots at several hours — **which are currently byte-identical and must stop being so** —
+  and one of a campfire at midnight, which is the whole point of the phase.
+
+### Not in phase 5
+
+- Lights that cast shadows, or that anything occludes. A light here is a glow, not a light source.
+- A light on anything but a campfire: a torch to carry is an item, and items are their own work.
+- Night in the editor's map view. The Effects workspace's backgrounds already stand in for it.
+- The weather darkening the day further (a storm at noon). The field is there to grow into.
+
 ## Non-goals
 
 - A node-graph shader editor. See Decisions.
@@ -527,3 +630,41 @@ and a hand-written `Serialize` for `Range`. `docs/PLAN.md` §16.8, and §18's li
 
 **Still owed:** phases 4–6, and `fx/weather.ron` still has no screen — a designer can tune what an
 effect looks like but must still write by hand which sky plays it.
+
+### Phase 5 — night, and the lights that push back (2026-09-30)
+
+Built to the design above. `docs/PLAN.md` §16.9.
+
+**What landed.** `dark_render`: `SpriteKind::Light`, `fs_light` and `fs_darkness`, a darkness
+pipeline (multiply) and a light pipeline (add), and a `night` pass between the world and the
+interface. `dark_fx::WeatherArt::darkness` reads a `night` curve from `fx/weather.ron`.
+`apps/dark-player/src/weather.rs` works out the hour's darkness and puts a flickering glow on every
+campfire still burning. The test project got a night.
+
+**Where it differs from the plan above.** Nowhere in shape — but twice in what the numbers mean:
+
+- **`darkness` is a multiplier on light, and I first wrote the project's curve as though it were a
+  colour.** `0.72` at seven in the evening looked like no night at all, because 0.72 of the light
+  reads as 0.86 of the brightness. The second time this crate has caught me on that (the editor's
+  backgrounds in phase 3 were the first), so it is now in the doc comment on both sides, with the
+  number a designer actually wants written next to it.
+- **The glow was far too strong at first** — 0.85 blew the middle out to white and took the fire's
+  own picture with it. An additive pass wants a small number: 0.30.
+
+**Verified.**
+
+- Screenshots at hours 2, 12 and 19, **which used to be byte-identical and no longer are**: the
+  average colour of the world goes (40, 52, 16) at first light, (130, 146, 115) at noon, (53, 52,
+  13) at dusk.
+- `--autopilot-camp --hour 20`, looked at: a warm pool of light around the fire, the tent and the
+  fire both readable inside it, and the dusk intact around it.
+- Four sabotages. **Two passed at first and had to be strengthened**: the night curve's test used
+  a curve beginning at hour 0, so it could never ask what happens *before* the first entry — which
+  is the whole of the night and the only place the wrap shows; and the light-occlusion test had
+  the glow sorted *before* the character, so a plain sprite in its place would not have hidden
+  them either. Both now fail when broken.
+- The four gates, and the commit built out of the index in a worktree.
+
+**Found on the way, not a bug.** `--hour 2` does not start the game at two: a lone player is
+asleep then, the night passes at once, and the clock is at the waking hour. Worth knowing before
+somebody hunts it.

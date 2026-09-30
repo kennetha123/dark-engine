@@ -69,6 +69,10 @@ pub enum RenderError {
 }
 
 /// RGBA8 (sRGB) pixels read back from the internal target.
+/// Full daylight: the world drawn as it is. [`Scene::darkness`] multiplies by this to change
+/// nothing, and a project that says nothing about the night gets it all day.
+pub const DAYLIGHT: [f32; 3] = [1.0, 1.0, 1.0];
+
 /// Everything one frame draws. Sprites and meshes are laid out flat by the 2D camera; models
 /// are placed by `model_camera`, which is world to clip with near at 0.
 pub struct Scene<'a> {
@@ -80,6 +84,17 @@ pub struct Scene<'a> {
     pub models: &'a [ModelDraw<'a>],
     pub model_camera: glam::Mat4,
     pub light: Light,
+    /// What the world is multiplied by before the interface is drawn: white is full daylight,
+    /// and a dim blue is midnight (`journals/engine/05` phase 5). The interface is drawn after,
+    /// so the writing stays readable however dark the world is.
+    ///
+    /// **In light, not as it looks.** This multiplies the light in the scene, so a half here is
+    /// genuinely half the light — which the eye reads as about 73% as bright, not 50%. A night
+    /// that should *look* a fifth as bright is about `0.03`, not `0.2`.
+    pub darkness: [f32; 3],
+    /// Glows added over the darkened world, each a [`SpriteKind::Light`]. Their layer and sort
+    /// are ignored: a light is not in the world's order, it is over all of it.
+    pub lights: &'a [Sprite],
 }
 
 pub struct Capture {
@@ -150,12 +165,23 @@ pub struct Renderer {
 
     globals: wgpu::Buffer,
     globals_bind_group: wgpu::BindGroup,
+    /// The world position of the target's top-left this frame, as `globals` holds it. The night's
+    /// full-screen quad is placed with it, so it covers the view exactly however the camera was
+    /// rounded.
+    origin: Vec2,
     instances: wgpu::Buffer,
     instance_capacity: usize,
     mesh_vertices: wgpu::Buffer,
     mesh_capacity: usize,
     main_pipeline: wgpu::RenderPipeline,
     mesh_pipeline: wgpu::RenderPipeline,
+    /// Multiplies the world by the night's colour, between the world and the interface.
+    darkness_pipeline: wgpu::RenderPipeline,
+    /// Adds a glow over it.
+    light_pipeline: wgpu::RenderPipeline,
+    /// The night's own instances: the darkness quad, then each light.
+    night_instances: wgpu::Buffer,
+    night_capacity: usize,
     /// The mesh pass: skinned models drawn against a depth buffer (`model.rs`).
     models: Models,
     /// `None` where the GPU cannot blend into the occlusion mask.
@@ -504,6 +530,49 @@ impl Renderer {
             wgpu::BlendState::ALPHA_BLENDING,
             true,
         );
+        // Night, and the lights that push back against it (`journals/engine/05` phase 5).
+        // Darkness multiplies what is already drawn; a light adds to it. Two blend states over
+        // the instance machinery already here, and no light buffer to composite.
+        let darkness_pipeline = sprite_pipeline(
+            "darkness",
+            "fs_darkness",
+            &base_layouts,
+            TARGET_FORMAT,
+            wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Zero,
+                    dst_factor: wgpu::BlendFactor::Src,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                // The target's alpha is left alone: darkening the world must not make it
+                // transparent to whatever the frame is blitted onto.
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Zero,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+            },
+            false,
+        );
+        let light_pipeline = sprite_pipeline(
+            "light",
+            "fs_light",
+            &base_layouts,
+            TARGET_FORMAT,
+            wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Zero,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+            },
+            false,
+        );
         let mesh_pipeline = pipeline(
             "mesh",
             "vs_mesh",
@@ -514,6 +583,7 @@ impl Renderer {
             wgpu::BlendState::ALPHA_BLENDING,
             true,
         );
+        let night_instances = create_instance_buffer(&device, 64);
         let models = build_models(&device, internal_size, &texture_layout);
         let silhouettes = mask_supported.then(|| {
             let mask_view = create_mask(&device, internal_size);
@@ -624,6 +694,11 @@ impl Renderer {
             mesh_capacity: MIN_INSTANCE_CAPACITY,
             main_pipeline,
             mesh_pipeline,
+            darkness_pipeline,
+            light_pipeline,
+            night_instances,
+            night_capacity: 64,
+            origin: Vec2::ZERO,
             models,
             silhouettes,
             blit_bind_group,
@@ -649,6 +724,8 @@ impl Renderer {
             models: draws,
             model_camera: camera,
             light,
+            darkness: DAYLIGHT,
+            lights: &[],
         });
     }
 
@@ -822,6 +899,8 @@ impl Renderer {
             models: &[],
             model_camera: glam::Mat4::IDENTITY,
             light: Light::default(),
+            darkness: DAYLIGHT,
+            lights: &[],
         });
     }
 
@@ -839,6 +918,8 @@ impl Renderer {
             models,
             model_camera,
             light,
+            darkness,
+            lights,
         } = scene;
         let textures = &self.textures;
         let frame_batches =
@@ -916,6 +997,7 @@ impl Renderer {
         };
         self.queue
             .write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        self.origin = Vec2::from(globals.origin);
 
         let mut encoder = self
             .device
@@ -996,6 +1078,9 @@ impl Renderer {
                 &sil.silhouette_mesh_pipeline,
             );
         }
+        // Night over the world, before any of the interface: the writing stays readable
+        // however dark it is (`journals/engine/05` phase 5).
+        self.draw_night(&mut encoder, darkness, lights);
         // The interface last: nothing shows through it.
         if !frame_batches.overlay.is_empty() {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1266,6 +1351,86 @@ impl Renderer {
                     pass.set_bind_group(2, &self.models.bones_bind_group, &[palette]);
                     pass.draw_indexed(batch.start..batch.end, base, 0..1);
                 }
+            }
+        }
+    }
+
+    /// Night, and the lights that push back against it (`journals/engine/05` phase 5).
+    ///
+    /// Between the world and the interface, so the writing stays readable however dark it is.
+    /// The darkness multiplies what is drawn; each light adds to it. Order does not matter among
+    /// the lights, because adding is adding.
+    fn draw_night(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        darkness: [f32; 3],
+        lights: &[Sprite],
+    ) {
+        let night = darkness != DAYLIGHT;
+        if (!night && lights.is_empty()) || self.textures.is_empty() {
+            return;
+        }
+        let internal = Vec2::new(self.internal_size.0 as f32, self.internal_size.1 as f32);
+        let mut sprites = lights.to_vec();
+        let batches = {
+            let textures = &self.textures;
+            sprite::build_batches(&mut sprites, &[], &[], |id| textures[id.0 as usize].size)
+        };
+        let mut instances: Vec<sprite::Instance> = Vec::with_capacity(batches.instances.len() + 1);
+        if night {
+            let [r, g, b] = darkness;
+            instances.push(sprite::Instance {
+                // The world position of the target's top-left, which is what globals names too,
+                // so this quad covers the view exactly however the camera has been rounded.
+                pos: self.origin.to_array(),
+                size: internal.to_array(),
+                uv_min: [0.0, 0.0],
+                uv_size: [0.0, 0.0],
+                repeat: [1.0, 1.0],
+                color: [r, g, b, 1.0],
+                order: 0.0,
+                // `fs_darkness` samples nothing, so the mode and the texture are both unread.
+                mode: sprite::mode::PLAIN,
+            });
+        }
+        instances.extend_from_slice(&batches.instances);
+        if instances.len() > self.night_capacity {
+            self.night_capacity = instances.len().next_power_of_two();
+            self.night_instances = create_instance_buffer(&self.device, self.night_capacity);
+        }
+        self.queue
+            .write_buffer(&self.night_instances, 0, bytemuck::cast_slice(&instances));
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("night"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.target_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_bind_group(0, &self.globals_bind_group, &[]);
+        pass.set_vertex_buffer(0, self.night_instances.slice(..));
+        let shift = u32::from(night);
+        if night {
+            pass.set_pipeline(&self.darkness_pipeline);
+            pass.set_bind_group(1, &self.textures[0].bind_group, &[]);
+            pass.draw(0..6, 0..1);
+        }
+        if !lights.is_empty() {
+            pass.set_pipeline(&self.light_pipeline);
+            // A light's layer is ignored, so both lists are drawn: whichever bucket it fell in.
+            for batch in batches.main.iter().chain(batches.overlay.iter()) {
+                let Some(gpu) = self.textures.get(batch.texture.0 as usize) else {
+                    continue;
+                };
+                pass.set_bind_group(1, &gpu.bind_group, &[]);
+                pass.draw(0..6, batch.start + shift..batch.end + shift);
             }
         }
     }

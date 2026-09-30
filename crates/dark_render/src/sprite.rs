@@ -26,6 +26,10 @@ pub enum SpriteKind {
     Blob,
     /// A 1 px outline of the sprite's quad in its colour (debug shapes).
     Outline(Outline),
+    /// A glow, added over the darkened world rather than drawn into it: a campfire, a torch
+    /// (`journals/engine/05` phase 5). Its colour's alpha is how strong it is, its quad is how
+    /// far it reaches, and it is drawn from `Scene::lights` rather than among the sprites.
+    Light,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,6 +159,8 @@ pub(crate) mod mode {
     pub const BODY: u32 = 2;
     pub const CIRCLE: u32 = 3;
     pub const RECT: u32 = 4;
+    /// A soft round glow, drawn only in the light pass.
+    pub const LIGHT: u32 = 5;
 }
 
 /// GPU instance data; layout matches `sprite.wgsl`.
@@ -392,6 +398,7 @@ pub(crate) fn build_batches(
             SpriteKind::Blob => mode::BLOB,
             SpriteKind::Outline(Outline::Circle) => mode::CIRCLE,
             SpriteKind::Outline(Outline::Rect) => mode::RECT,
+            SpriteKind::Light => mode::LIGHT,
         };
         let index = frame.instances.len() as u32;
         seq += 1;
@@ -422,7 +429,9 @@ pub(crate) fn build_batches(
             // Characters do not occlude each other: a ghost painted over a character in front
             // would hide the one the player can already see.
             SpriteKind::Character => bodies.push(drawn),
-            SpriteKind::Blob | SpriteKind::Outline(_) => {}
+            // A blob shadow, a debug outline and a light hide nothing: a glow is drawn in a
+            // pass of its own, after everything that could have been behind it.
+            SpriteKind::Blob | SpriteKind::Outline(_) | SpriteKind::Light => {}
         }
     }
     draw_meshes_before(&mut frame, &mut seq, &mut bodies, None);
@@ -740,6 +749,48 @@ mod tests {
         );
         let small = fit_viewport((640, 360), (320, 180));
         assert_eq!(small.scale, 0.5);
+    }
+
+    /// A light is drawn in a pass of its own, after everything that could have been behind it,
+    /// so it must not take part in the world's occlusion: a glow that hid a character, or cast a
+    /// silhouette of one, would be a glow you could stand behind.
+    #[test]
+    fn a_light_hides_nobody_and_is_hidden_by_nobody() {
+        let mut glow = Sprite::fill(
+            TextureId(0),
+            Vec2::ZERO,
+            Vec2::splat(64.0),
+            [1.0, 0.7, 0.3, 0.5],
+        );
+        glow.kind = SpriteKind::Light;
+        // Sorted *after* the character, which is what makes this a real test: a plain sprite
+        // here would cover them and cast a silhouette, and that is exactly what must not happen.
+        glow.sort_y = 500.0;
+        let mut hero = Sprite::new(
+            TextureId(0),
+            Rect::new(0, 0, 16, 16),
+            Vec2::new(32.0, 32.0),
+            Vec2::new(8.0, 16.0),
+        );
+        hero.kind = SpriteKind::Character;
+        let frame = build_batches(&mut [glow, hero], &[], &[], |_| (64, 64));
+        assert!(frame.occluders.is_empty(), "a glow hides nobody");
+        assert!(frame.silhouettes.is_empty(), "so nobody shows through it");
+        let modes: Vec<u32> = frame.instances.iter().map(|i| i.mode).collect();
+        assert!(
+            modes.contains(&mode::LIGHT),
+            "the light keeps its mode: {modes:?}"
+        );
+        // And the same sprite drawn plainly *does* hide them, so the test above is about the
+        // kind and not about where the two happen to be.
+        let mut plain = glow;
+        plain.kind = SpriteKind::Plain;
+        let frame = build_batches(&mut [plain, hero], &[], &[], |_| (64, 64));
+        assert_eq!(
+            frame.occluders.len(),
+            1,
+            "a plain sprite there would hide them"
+        );
     }
 
     #[test]

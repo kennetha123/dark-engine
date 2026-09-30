@@ -285,6 +285,8 @@ mod gpu_tests {
             }],
             model_camera: Mat4::IDENTITY,
             light: flat(),
+            darkness: crate::DAYLIGHT,
+            lights: &[],
         });
         let [r, _, b] = middle(&renderer.capture());
         assert!(
@@ -305,6 +307,8 @@ mod gpu_tests {
             }],
             model_camera: Mat4::IDENTITY,
             light: flat(),
+            darkness: crate::DAYLIGHT,
+            lights: &[],
         });
         let [r, _, b] = middle(&renderer.capture());
         assert!(r > 200 && b < 60, "a sprite behind does not: got {r},{b}");

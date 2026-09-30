@@ -1,6 +1,7 @@
 // Sprite passes: instanced quads into the low-resolution target; meshes (posed skeletons) are
 // triangles with the same attributes per vertex, drawn by vs_mesh in the main pass.
 //   fs_sprite      main pass (plain sprites, character bodies, blob shadows, debug outlines)
+//   fs_light       a glow, added over the darkened world (journals/engine/05 phase 5)
 //   fs_mask        occluders write their draw order into the occlusion mask (max blend)
 //   fs_silhouette  character bodies, only where the mask holds a later draw order
 
@@ -22,6 +23,7 @@ const MODE_BLOB: u32 = 1u;
 const MODE_BODY: u32 = 2u;
 const MODE_CIRCLE: u32 = 3u;
 const MODE_RECT: u32 = 4u;
+const MODE_LIGHT: u32 = 5u;
 
 // Alpha at or above which a pixel is the object itself rather than its baked soft shadow.
 const OPAQUE: f32 = 0.6;
@@ -95,6 +97,29 @@ fn vs_mesh(vertex: Instance) -> SpriteOut {
 fn texel(in: SpriteOut) -> vec4<f32> {
     let uv = in.uv_min + fract(in.local) * in.uv_size;
     return textureSample(sprite_texture, sprite_sampler, uv);
+}
+
+// The night: the world is multiplied by this colour. It samples nothing — the instance names
+// whatever texture was to hand, because a full-screen wash has no picture.
+@fragment
+fn fs_darkness(in: SpriteOut) -> @location(0) vec4<f32> {
+    return in.color;
+}
+
+// A light: brightest at the middle, nothing at the edge, added to what is already drawn.
+//
+// The falloff is `(1 - d)^2`, which is what reads as light rather than as a disc: linear leaves a
+// visible rim where it reaches zero, and the inverse-square of the real world never reaches zero
+// at all, so it cannot be given an edge. Squared is neither.
+@fragment
+fn fs_light(in: SpriteOut) -> @location(0) vec4<f32> {
+    let p = in.local / in.tiles * 2.0 - 1.0;
+    let d = length(p);
+    if d > 1.0 { discard; }
+    let fall = (1.0 - d) * (1.0 - d);
+    // The colour's alpha is how strong the light is. The pass adds, so nothing is blended by it,
+    // and the alpha written out is zero: a light brightens the world without making it solid.
+    return vec4(in.color.rgb * in.color.a * fall, 0.0);
 }
 
 @fragment

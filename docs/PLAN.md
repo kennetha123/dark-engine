@@ -1006,6 +1006,39 @@ the result.
 - Known gaps: `fx/weather.ron` — which sky draws which effect — has no screen of its own; there is
   no curve editor, because `Fade` is two values and a line between them.
 
+## 16.9 Night, and the lights that push back (M9, `journals/engine/05` phase 5)
+
+Before this the world was the same colour at midnight as at noon — screenshots at hours 0, 6, 12
+and 18 came out byte-identical. A glow against a fully lit field is nothing, so lights needed a
+night first, and phase 5 is both.
+
+- **Darkness multiplies, light adds, and there is no light buffer.** A full-screen quad multiplies
+  the world by the night's colour; each light is a quad that adds to it. Two blend states over the
+  instance machinery already there — no offscreen target and no composite pass.
+- **A light is a sprite mode**, `SpriteKind::Light`: `MODE_BLOB` with a `(1 - d)²` falloff. No new
+  vertex format and no new batching, the same trick that made a particle a mesh (§16.6). Linear
+  falloff leaves a visible rim; the inverse-square of the real world never reaches zero, so it
+  cannot be given an edge. Squared is neither.
+- A light **occludes nothing and casts no silhouette** — it is drawn after everything that could
+  have been behind it, so a glow is not something to stand behind.
+- **Between the world and the interface**, where `layer::UI` already cuts, so the writing stays
+  readable at midnight and the weather's wash (§16.7) lies over the night rather than under it:
+  fog is between you and the world, so a campfire does not burn through it.
+- **`Scene::darkness` is in light, not as it looks.** It multiplies the light in the scene, so a
+  half is genuinely half the light — which the eye reads as about 73% as bright. A night that
+  should *look* a fifth as bright is about `0.03`. Written this way because it is a multiplication
+  of light and a number that did not mean that would be one nobody could reason about. (This was
+  got wrong first: `0.72` looked like no night at all.)
+- The curve lives in the project's `fx/weather.ron` as `night`, hour to colour, running evenly
+  between entries and **wrapping past midnight** — the entry before the first is the last one,
+  still running from yesterday. No `night` written is daylight all day.
+- Lights are presentation, as everything in §16.6 is: a campfire's warmth is a climate in
+  `life.ron`; its glow is this. A fire flickers on two sines whose periods do not divide into one
+  another, and burns down over its last hour.
+- Known gaps: nothing casts a shadow or blocks a light; only campfires give light, because a torch
+  to carry is an item; the editor's map view has no night; and a sky does not darken the day
+  further, though the field is there to grow into.
+
 ## 17. Save, storylets and endings (as built in M7)
 
 - The whole world is saved (`dark_world::WorldSave`, one RON file, version 1): the world

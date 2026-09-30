@@ -104,6 +104,9 @@ impl WeatherLoad {
             showing: None,
             tint: [0.0; 4],
             forced: None,
+            dark: dark_render::DAYLIGHT,
+            lights: Vec::new(),
+            seconds: 0.0,
         })
     }
 }
@@ -121,9 +124,25 @@ pub struct Weather {
     /// The wash over the world as it is at this moment, sliding towards the sky's own.
     tint: [f32; 4],
     forced: Option<String>,
+    /// What the world is multiplied by at this hour, and the glows that push back against it
+    /// (`journals/engine/05` phase 5). Worked out in [`Weather::draw`] and read by the renderer.
+    dark: [f32; 3],
+    lights: Vec<Sprite>,
+    /// Seconds drawn, for the fire's flicker.
+    seconds: f32,
 }
 
 impl Weather {
+    /// What the world is multiplied by this frame: white by day, dim and blue at night.
+    pub fn darkness(&self) -> [f32; 3] {
+        self.dark
+    }
+
+    /// The glows drawn over the darkened world.
+    pub fn lights(&self) -> &[Sprite] {
+        &self.lights
+    }
+
     /// `--weather`: one sky, whatever the calendar says, so a picture can be taken of it.
     pub fn force(&mut self, sky: Option<String>) {
         self.forced = sky;
@@ -154,9 +173,12 @@ impl Weather {
         (view_min, view_size): (Vec2, Vec2),
         white: TextureId,
         dt: f32,
+        structures: &[dark_world::StructureSnapshot],
         meshes: &mut Vec<Mesh>,
         sprites: &mut Vec<Sprite>,
     ) {
+        self.seconds += dt;
+        self.night(time, structures, white);
         let wanted = self.sky(time, region).to_owned();
         let changed = self.showing.as_ref().is_none_or(|(now, _)| *now != wanted);
         if changed {
@@ -192,6 +214,51 @@ impl Weather {
             // Below everything else drawn on that layer: the wash is weather, not writing.
             wash.sort_y = -2e9;
             sprites.push(wash);
+        }
+    }
+
+    /// How dark it is, and what is burning against it.
+    ///
+    /// A campfire is the only thing that gives light today. Its glow flickers, because a fire
+    /// that does not is a lamp; the flicker is a pair of sines whose periods do not divide into
+    /// one another, so it never repeats on a beat the eye can catch.
+    fn night(
+        &mut self,
+        time: Option<(u32, f32)>,
+        structures: &[dark_world::StructureSnapshot],
+        white: TextureId,
+    ) {
+        let hour = time.map_or(12.0, |(_, hour)| hour);
+        self.dark = self.art.darkness(hour);
+        self.lights.clear();
+        // Nothing to light, and nothing would show: a glow added to a fully lit world is a
+        // bright smudge on the grass.
+        if self.dark == dark_render::DAYLIGHT {
+            return;
+        }
+        for structure in structures {
+            let dark_life::Structure::Campfire { minutes } = structure.structure else {
+                continue;
+            };
+            if minutes == 0 {
+                continue;
+            }
+            let flicker =
+                1.0 + 0.06 * (self.seconds * 5.3).sin() + 0.04 * (self.seconds * 11.7).sin();
+            // It burns down: the last of a fire lights less than a new one, over the final hour.
+            let left = (minutes as f32 / 60.0).clamp(0.25, 1.0);
+            let reach = 88.0 * flicker * (0.6 + 0.4 * left);
+            let mut glow = Sprite::fill(
+                white,
+                structure.at - Vec2::splat(reach),
+                Vec2::splat(reach * 2.0),
+                // Firelight. The alpha is how strong it is, and it is kept low on purpose: the
+                // pass adds, so anything near full blows the middle out to white and takes the
+                // fire's own picture with it.
+                [1.0, 0.66, 0.34, 0.30 * left],
+            );
+            glow.kind = dark_render::SpriteKind::Light;
+            self.lights.push(glow);
         }
     }
 
@@ -238,6 +305,9 @@ mod tests {
             showing: None,
             tint: [0.0; 4],
             forced: forced.map(str::to_owned),
+            dark: dark_render::DAYLIGHT,
+            lights: Vec::new(),
+            seconds: 0.0,
         }
     }
 
@@ -319,6 +389,7 @@ mod tests {
                     (Vec2::ZERO, Vec2::new(320.0, 180.0)),
                     TextureId::FIRST,
                     1.0 / steps as f32,
+                    &[],
                     &mut meshes,
                     &mut sprites,
                 );
@@ -347,6 +418,7 @@ mod tests {
                 (Vec2::ZERO, Vec2::new(320.0, 180.0)),
                 TextureId::FIRST,
                 1.0 / 60.0,
+                &[],
                 &mut meshes,
                 &mut sprites,
             );

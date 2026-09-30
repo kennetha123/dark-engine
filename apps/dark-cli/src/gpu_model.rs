@@ -124,6 +124,8 @@ pub fn preview_model_gpu(
         models: &draws,
         model_camera: camera,
         light: Light::default(),
+        darkness: dark_render::DAYLIGHT,
+        lights: &[],
     });
     let capture = renderer.capture();
     let image = image::RgbaImage::from_raw(capture.width, capture.height, capture.rgba)

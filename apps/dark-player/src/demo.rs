@@ -938,6 +938,7 @@ impl DemoView {
             screen,
             self.white,
             dt,
+            frame.structures,
             &mut self.frame_meshes,
             &mut self.frame_sprites,
         );
@@ -980,6 +981,9 @@ impl DemoView {
             models: &model_draws,
             model_camera: dark_view::model_camera(camera, renderer.internal_size()),
             light: dark_render::Light::default(),
+            // Night, and what burns against it (`journals/engine/05` phase 5).
+            darkness: self.weather.darkness(),
+            lights: self.weather.lights(),
         });
     }
 

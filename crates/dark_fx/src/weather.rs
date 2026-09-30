@@ -10,6 +10,8 @@ use std::path::Path;
 use dark_assets::Project;
 use serde::{Deserialize, Serialize};
 
+use dark_render::DAYLIGHT;
+
 use crate::EffectError;
 
 /// How one sky is drawn.
@@ -31,6 +33,17 @@ pub struct WeatherArt {
     /// How long one sky takes to come on, and the one before it to go off.
     #[serde(default = "a_few_seconds")]
     pub change_secs: f32,
+    /// What the world is multiplied by through the day, by the hour it is reached: white is full
+    /// daylight and a dim blue is midnight (`journals/engine/05` phase 5). Between two hours the
+    /// colour runs evenly from one to the other, and it wraps around midnight. Empty is daylight
+    /// all day, so a project that does not ask for a night does not get one.
+    ///
+    /// **These are multipliers on light, not colours as they look.** Half here is half the light,
+    /// which the eye reads as about three quarters as bright; a night that should look a fifth as
+    /// bright is about `0.03`. Written this way because it *is* a multiplication of light, and a
+    /// number that did not mean that would be a number nobody could reason about.
+    #[serde(default)]
+    pub night: Vec<(f32, [f32; 3])>,
     /// By the sky's id in `world.ron`. A sky nothing here names draws nothing, which is how
     /// `clear` works: a project says nothing at all to have clear weather.
     #[serde(default)]
@@ -45,6 +58,7 @@ impl Default for WeatherArt {
     fn default() -> Self {
         Self {
             change_secs: a_few_seconds(),
+            night: Vec::new(),
             skies: BTreeMap::new(),
         }
     }
@@ -77,6 +91,37 @@ impl WeatherArt {
             });
         }
         Ok(art)
+    }
+
+    /// What the world is multiplied by at `hour` (0 to 24).
+    ///
+    /// The entries are read in the order they are written and the day wraps, so the last one runs
+    /// round midnight into the first — which is how a night is written at all, since it begins on
+    /// one day and ends on the next.
+    pub fn darkness(&self, hour: f32) -> [f32; 3] {
+        if self.night.is_empty() {
+            return DAYLIGHT;
+        }
+        let hour = hour.rem_euclid(24.0);
+        // The entry in force: the last one whose hour has come, or — before the first — the last
+        // of the day, which is still running from yesterday.
+        let (n, (at, from)) = match self
+            .night
+            .iter()
+            .enumerate()
+            .rfind(|(_, (at, _))| *at <= hour)
+        {
+            Some((n, entry)) => (n, *entry),
+            None => (self.night.len() - 1, self.night[self.night.len() - 1]),
+        };
+        let (next_at, to) = self.night[(n + 1) % self.night.len()];
+        // How far from this entry to the next, around the clock.
+        let span = (next_at - at).rem_euclid(24.0);
+        if span <= 0.0 {
+            return from;
+        }
+        let gone = (hour - at).rem_euclid(24.0) / span;
+        std::array::from_fn(|i| from[i] + (to[i] - from[i]) * gone.clamp(0.0, 1.0))
     }
 
     pub fn sky(&self, id: &str) -> Option<&Sky> {
@@ -123,6 +168,44 @@ mod tests {
         assert!(art.sky("clear").is_none());
         assert!(art.sky("hurricane").is_none());
         assert_eq!(art.sky("rain").expect("rain").tint, [0.0; 4], "and no tint");
+    }
+
+    /// The night is why lights exist, so the curve has to mean what a project writes.
+    #[test]
+    fn the_night_runs_from_hour_to_hour_and_round_midnight() {
+        // Deliberately starting at six rather than at midnight: a curve whose first entry is
+        // hour zero can never ask what happens *before* the first one, which is the whole of the
+        // night and the only place the wrap shows.
+        let art = art(r#"(night: [(6.0, (1.0, 1.0, 1.0)), (18.0, (0.2, 0.2, 0.4))])"#);
+        // The hours written are exactly what they say.
+        assert_eq!(art.darkness(6.0), [1.0; 3]);
+        assert_eq!(art.darkness(18.0), [0.2, 0.2, 0.4]);
+        // Between two of them, evenly: noon is halfway from dawn to dusk.
+        let noon = art.darkness(12.0);
+        assert!((noon[0] - 0.6).abs() < 1e-5, "{noon:?}");
+        // And round midnight, which is the whole point. From 18:00 to 06:00 is twelve hours, so
+        // midnight is halfway back to daylight — reached by carrying the evening entry forward
+        // through the small hours, not by falling back on the first entry of the list.
+        let midnight = art.darkness(0.0);
+        assert!(
+            (midnight[0] - 0.6).abs() < 1e-5,
+            "midnight came out {midnight:?}"
+        );
+        let small_hours = art.darkness(3.0);
+        assert!(
+            (small_hours[0] - 0.8).abs() < 1e-5,
+            "03:00 came out {small_hours:?}"
+        );
+        assert_eq!(art.darkness(24.0), art.darkness(0.0), "the day wraps");
+    }
+
+    /// A game that does not ask for a night must be the game it was: lit, all day.
+    #[test]
+    fn no_night_written_is_daylight_all_day() {
+        let art = art(r#"(skies: {})"#);
+        for hour in [0.0, 3.0, 12.0, 23.9] {
+            assert_eq!(art.darkness(hour), DAYLIGHT, "at {hour}");
+        }
     }
 
     /// A misspelt field would otherwise be read as its default and draw nothing.

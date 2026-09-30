@@ -223,6 +223,8 @@ impl Viewport {
             models: &[],
             model_camera: dark_view::model_camera(camera, size),
             light: dark_render::Light::default(),
+            darkness: dark_render::DAYLIGHT,
+            lights: &[],
         });
     }
 
